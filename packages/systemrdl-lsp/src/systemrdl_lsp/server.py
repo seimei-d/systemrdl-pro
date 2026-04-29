@@ -155,9 +155,16 @@ def _publish_for_uri(server: LanguageServer, uri: str) -> None:
 
     diagnostics: list[Diagnostic] = []
     for sev, text, src_ref in messages:
+        # Suppress meta-status messages with no source ref ("Parse aborted due to previous
+        # errors", "Elaboration aborted", ...). They are dumped onto file line 1 as a
+        # fallback, which duplicates the user-visible squiggle on the real error line and
+        # adds no navigation value. The genuinely informative messages always carry a ref.
+        if src_ref is None:
+            continue
+
         # Only surface messages that point at this URI; cross-file errors will be handled
         # in Week 2 by publishing per-uri diagnostic batches.
-        if src_ref is not None and getattr(src_ref, "filename", None):
+        if getattr(src_ref, "filename", None):
             try:
                 ref_uri = _path_to_uri(pathlib.Path(src_ref.filename))
             except (OSError, ValueError):
