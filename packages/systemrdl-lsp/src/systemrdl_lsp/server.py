@@ -26,6 +26,7 @@ from lsprotocol.types import (
     DidOpenTextDocumentParams,
     DidSaveTextDocumentParams,
     Position,
+    PublishDiagnosticsParams,
     Range,
 )
 from pygls.lsp.server import LanguageServer
@@ -161,7 +162,9 @@ def _publish_for_uri(server: LanguageServer, uri: str) -> None:
             )
         )
 
-    server.publish_diagnostics(uri, diagnostics)
+    server.text_document_publish_diagnostics(
+        PublishDiagnosticsParams(uri=uri, diagnostics=diagnostics)
+    )
 
 
 def build_server() -> LanguageServer:
