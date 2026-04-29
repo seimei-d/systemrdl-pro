@@ -52,7 +52,7 @@
         "systemrdl-pro.pythonPath": {
           "type": "string",
           "default": "",
-          "scope": "machine-overridable",
+          "scope": "window",
           "description": "Path to Python interpreter that has systemrdl-lsp installed. Empty = use fallback chain (ms-python.python → PATH)."
         },
         "systemrdl-pro.includePaths": {
