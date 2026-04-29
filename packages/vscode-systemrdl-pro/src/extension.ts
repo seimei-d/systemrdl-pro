@@ -74,6 +74,13 @@ let client: LanguageClient | undefined;
 let outputChannel: vscode.LogOutputChannel | undefined;
 let memoryMapPanel: vscode.WebviewPanel | undefined;
 let lastTreeUri: string | undefined;
+let cursorSyncTimer: ReturnType<typeof setTimeout> | undefined;
+// Suppress one cycle of cursor → viewer sync after a viewer-initiated reveal.
+// Otherwise: click reg → editor jumps → onDidChangeTextEditorSelection fires →
+// posts cursor → viewer re-selects (same key) → renders → no harm but wasteful.
+// More importantly, if the user spam-clicks regs we'd be racing render cycles.
+let suppressNextCursorSync = false;
+const CURSOR_SYNC_DEBOUNCE_MS = 500;
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   outputChannel = vscode.window.createOutputChannel('SystemRDL Pro', { log: true });
@@ -95,6 +102,24 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           outputChannel?.warn(`refresh after save failed: ${err}`),
         );
       }
+    }),
+    // D10: cursor in editor → viewer auto-selects the matching reg, debounced 500ms.
+    // Only forwards events from the .rdl that the panel is currently showing — switching
+    // to another file doesn't cross-talk into the viewer.
+    vscode.window.onDidChangeTextEditorSelection(event => {
+      if (!memoryMapPanel || !lastTreeUri) return;
+      if (event.textEditor.document.languageId !== 'systemrdl-pro') return;
+      if (event.textEditor.document.uri.toString() !== lastTreeUri) return;
+      if (suppressNextCursorSync) {
+        suppressNextCursorSync = false;
+        return;
+      }
+      const line = event.textEditor.selection.active.line;
+      if (cursorSyncTimer) clearTimeout(cursorSyncTimer);
+      cursorSyncTimer = setTimeout(() => {
+        if (!memoryMapPanel) return;
+        memoryMapPanel.webview.postMessage({ type: 'cursor', line });
+      }, CURSOR_SYNC_DEBOUNCE_MS);
     }),
   );
 
@@ -364,6 +389,9 @@ async function revealLocation(loc: SourceLoc): Promise<void> {
 
   try {
     const doc = await vscode.workspace.openTextDocument(uri);
+    // The cursor change we're about to cause must not bounce back as a cursor-sync
+    // message into the viewer; suppress one cycle.
+    suppressNextCursorSync = true;
     const editor = await vscode.window.showTextDocument(doc, {
       viewColumn: vscode.ViewColumn.One,
       preserveFocus: false,
@@ -375,6 +403,7 @@ async function revealLocation(loc: SourceLoc): Promise<void> {
     setTimeout(() => editor.setDecorations(flashDecoration, []), 200);
   } catch (err) {
     outputChannel?.warn(`reveal ${loc.uri}:${line + 1} failed: ${err}`);
+    suppressNextCursorSync = false;
   }
 }
 
@@ -476,9 +505,21 @@ function renderViewerHtml(): string {
   .tab.active { color: var(--rdl-fg); background: var(--rdl-bg);
     border-bottom: 2px solid var(--rdl-accent); margin-bottom: -1px; }
   /* Always-stack layout: tree on top, detail below. Independent scroll panes. */
-  .body { display: grid; grid-template-rows: minmax(120px, 50%) 1fr; min-height: 0; }
-  .tree-host { overflow: auto; padding: 8px 0; min-height: 0;
+  .body { display: grid; grid-template-rows: minmax(180px, 50%) 1fr; min-height: 0; }
+  .tree-pane { display: grid; grid-template-rows: auto 1fr; min-height: 0;
     border-bottom: 1px solid var(--rdl-border); }
+  .filter-bar { padding: 6px 12px; border-bottom: 1px solid var(--rdl-border);
+    background: var(--rdl-panel); display: none; }
+  .filter-bar.shown { display: block; }
+  .filter-bar input { width: 100%; box-sizing: border-box; background: var(--rdl-bg);
+    border: 1px solid var(--rdl-border); color: var(--rdl-fg);
+    padding: 5px 9px; font-size: 13px; font-family: var(--rdl-font-chrome);
+    outline: none; border-radius: 2px; }
+  .filter-bar input:focus { border-color: var(--rdl-accent); }
+  .filter-hint { color: var(--rdl-dim); font-size: 11px; margin-top: 4px;
+    font-family: var(--rdl-font-chrome); }
+  .tree-host { overflow: auto; padding: 8px 0; min-height: 0; }
+  .row.filter-hidden { display: none; }
   .tree { font-family: var(--rdl-font-mono); font-size: 13px; }
   .row { display: grid; grid-template-columns: 28px 140px 1fr 100px; gap: 12px;
     align-items: baseline; padding: 3px 16px; cursor: pointer; user-select: none; }
@@ -555,10 +596,16 @@ function renderViewerHtml(): string {
   </div>
   <div id="tabs" class="tabs"></div>
   <div class="body">
-    <div id="tree-host" class="tree-host">
-      <div class="empty">
-        <h2>Memory map viewer</h2>
-        <p>Waiting for elaborated tree from <code>systemrdl-lsp</code>…</p>
+    <div class="tree-pane">
+      <div id="filter-bar" class="filter-bar">
+        <input id="filter-input" type="text" placeholder="Filter registers (Esc to clear)…" />
+        <div id="filter-hint" class="filter-hint"></div>
+      </div>
+      <div id="tree-host" class="tree-host">
+        <div class="empty">
+          <h2>Memory map viewer</h2>
+          <p>Waiting for elaborated tree from <code>systemrdl-lsp</code>…</p>
+        </div>
       </div>
     </div>
     <div id="detail">
@@ -567,18 +614,46 @@ function renderViewerHtml(): string {
   </div>
   <div id="status" class="status">
     <span id="status-left">—</span>
-    <span id="status-right">v0.5 walking skeleton</span>
+    <span id="status-right">v0.6 walking skeleton</span>
   </div>
 <script>
 const vscode = acquireVsCodeApi();
 
 // State persisted across messages within the same panel session.
-let state = { roots: [], activeRootIndex: 0, selectedRegKey: null };
+let state = { roots: [], activeRootIndex: 0, selectedRegKey: null, filter: '' };
 
 window.addEventListener('message', (event) => {
   const m = event.data;
   if (m.type === 'tree')  applyTree(m.tree);
+  else if (m.type === 'cursor') applyCursor(m.line);
   else if (m.type === 'error') showError(m.message);
+});
+
+// Cmd/Ctrl-F focuses the filter input. Esc clears + blurs.
+document.addEventListener('keydown', (e) => {
+  if ((e.metaKey || e.ctrlKey) && (e.key === 'f' || e.key === 'F')) {
+    const bar = document.getElementById('filter-bar');
+    const input = document.getElementById('filter-input');
+    bar.classList.add('shown');
+    input.focus();
+    input.select();
+    e.preventDefault();
+  } else if (e.key === 'Escape') {
+    const input = document.getElementById('filter-input');
+    if (document.activeElement === input || state.filter) {
+      input.value = '';
+      state.filter = '';
+      document.getElementById('filter-bar').classList.remove('shown');
+      input.blur();
+      renderTree();
+      e.preventDefault();
+    }
+  }
+});
+
+document.getElementById('filter-input').addEventListener('input', (e) => {
+  state.filter = e.target.value.toLowerCase();
+  renderTree();
 });
 
 function applyTree(tree) {
@@ -653,8 +728,31 @@ function renderTree() {
   walkChildren(root, tree, 0, [root.name]);
   host.appendChild(tree);
 
+  // Update filter hint with match count if filter is active.
+  const hint = document.getElementById('filter-hint');
+  if (state.filter) {
+    const visibleRegs = host.querySelectorAll('.row:not(.container):not(.filter-hidden)').length;
+    hint.textContent = visibleRegs + ' match' + (visibleRegs === 1 ? '' : 'es');
+  } else {
+    hint.textContent = '';
+  }
+
   const sel = host.querySelector('.row.selected');
   if (sel) sel.scrollIntoView({ block: 'nearest' });
+}
+
+// Returns true if the subtree rooted at 'node' contains a reg/field whose
+// name matches the filter. Used to decide whether to keep container rows visible.
+function subtreeMatches(node, filter) {
+  if (!filter) return true;
+  if (node.kind === 'reg') {
+    if (node.name.toLowerCase().includes(filter)) return true;
+    return (node.fields || []).some(f => f.name.toLowerCase().includes(filter));
+  }
+  // For containers (addrmap/regfile), keep them if any descendant matches OR
+  // their own name matches.
+  if (node.name && node.name.toLowerCase().includes(filter)) return true;
+  return (node.children || []).some(c => subtreeMatches(c, filter));
 }
 
 function walkChildren(parent, host, depth, pathSegments) {
@@ -663,6 +761,8 @@ function walkChildren(parent, host, depth, pathSegments) {
 
 function walk(node, host, depth, pathSegments) {
   const indent = 'indent-' + Math.min(depth, 3);
+  // Filter: skip entire subtree if nothing inside matches.
+  if (state.filter && !subtreeMatches(node, state.filter)) return;
   if (node.kind === 'addrmap' || node.kind === 'regfile') {
     // Render container as a header row so nested addrmaps (cpu0, cpu1, …) are
     // visible — otherwise their child registers collide visually.
@@ -734,6 +834,42 @@ function findRegByKey(rootOrNode, key) {
 function postReveal(source) {
   if (!source) return;
   vscode.postMessage({ type: 'reveal', source });
+}
+
+// D10: editor cursor moved → select the matching reg in the viewer (no editor jump back).
+function applyCursor(line0b) {
+  if (!state.roots.length) return;
+  const root = state.roots[state.activeRootIndex];
+
+  // Find the closest reg whose source span contains the cursor line, OR a field
+  // whose source line matches exactly. Tie-break: prefer field match (more specific).
+  function search(node, segs) {
+    if (node.kind === 'reg') {
+      // Field-level match wins over reg-level.
+      for (const f of node.fields || []) {
+        if (f.source && f.source.line === line0b) {
+          return { reg: node, path: segs, fieldName: f.name };
+        }
+      }
+      if (node.source && node.source.line === line0b) {
+        return { reg: node, path: segs };
+      }
+      return null;
+    }
+    for (const c of node.children || []) {
+      const r = search(c, segs.concat([c.name]));
+      if (r) return r;
+    }
+    return null;
+  }
+
+  const found = search(root, [root.name]);
+  if (!found) return;
+  const newKey = found.path.join('.');
+  if (newKey === state.selectedRegKey) return;
+  state.selectedRegKey = newKey;
+  renderTree();
+  renderDetail();
 }
 
 function renderDetail() {
