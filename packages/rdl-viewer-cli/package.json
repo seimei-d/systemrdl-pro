@@ -1,0 +1,19 @@
+{
+  "name": "rdl-viewer",
+  "version": "0.1.0",
+  "description": "Standalone CLI: rdl-viewer file.rdl --serve. Opens a browser-served live memory-map viewer without VSCode.",
+  "license": "MIT",
+  "publisher": "madeinheaven-dev",
+  "type": "module",
+  "bin": { "rdl-viewer": "./src/index.ts" },
+  "scripts": {
+    "build": "echo 'rdl-viewer-cli: scaffold only — Bun-bundled CLI arrives in Week 4'",
+    "typecheck": "echo 'rdl-viewer-cli: scaffold only'",
+    "lint": "echo 'rdl-viewer-cli: scaffold only'"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/madeinheaven-dev/systemrdl-pro.git",
+    "directory": "packages/rdl-viewer-cli"
+  }
+}

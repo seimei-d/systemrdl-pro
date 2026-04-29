@@ -1,0 +1,27 @@
+name: Publish vscode-systemrdl-pro to Marketplace
+
+on:
+  push:
+    tags: ["ext-v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+      - name: Install deps
+        run: bun install --frozen-lockfile
+      - name: Build extension
+        run: bun run --cwd packages/vscode-systemrdl-pro build
+      - name: Package .vsix
+        run: bun run --cwd packages/vscode-systemrdl-pro package
+      - name: Publish to Marketplace
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: bun run --cwd packages/vscode-systemrdl-pro publish

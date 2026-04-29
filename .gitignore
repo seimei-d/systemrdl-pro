@@ -1,0 +1,37 @@
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+
+# AI / tooling
+.claude/
+.gstack/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+.python-version
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+dist/
+build/
+*.whl
+
+# Node / Bun
+node_modules/
+*.tsbuildinfo
+bun.lockb
+.turbo/
+
+# VSCode extension
+*.vsix
+
+# Logs / temp
+*.log
+.DS_Store
+/tmp-*

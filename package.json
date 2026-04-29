@@ -1,0 +1,25 @@
+{
+  "name": "systemrdl-pro",
+  "private": true,
+  "version": "0.0.0",
+  "description": "LSP server + interactive memory-map viewer for SystemRDL 2.0",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/madeinheaven-dev/systemrdl-pro.git"
+  },
+  "workspaces": [
+    "packages/rdl-viewer-core",
+    "packages/rdl-viewer-cli",
+    "packages/vscode-systemrdl-pro"
+  ],
+  "scripts": {
+    "build": "bun run --filter '*' build",
+    "lint": "bun run --filter '*' lint",
+    "typecheck": "bun run --filter '*' typecheck",
+    "codegen": "bash scripts/codegen.sh"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0"
+  }
+}

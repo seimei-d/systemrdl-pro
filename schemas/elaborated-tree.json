@@ -1,0 +1,154 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/madeinheaven-dev/systemrdl-pro/schemas/elaborated-tree.json",
+  "title": "SystemRDL Elaborated Tree",
+  "description": "Source of truth for the elaborated SystemRDL register-map tree pushed from systemrdl-lsp to the viewer (Decision 9A: codegen in both directions). v0.1 — minimal shape for Week 1; expanded in Week 4 for live viewer.",
+  "type": "object",
+  "required": ["schemaVersion", "roots"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "type": "string",
+      "const": "0.1.0",
+      "description": "Locked at 0.1.0 for the Week 1 walking skeleton. Bump when the shape changes."
+    },
+    "elaboratedAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO-8601 timestamp of when the LSP completed elaboration."
+    },
+    "stale": {
+      "type": "boolean",
+      "default": false,
+      "description": "True if this tree is the last good elaboration but a newer parse failed (D7)."
+    },
+    "roots": {
+      "type": "array",
+      "description": "One entry per top-level addrmap discovered in the workspace (Decision 3C).",
+      "items": { "$ref": "#/$defs/Addrmap" }
+    }
+  },
+  "$defs": {
+    "Addrmap": {
+      "type": "object",
+      "required": ["kind", "name", "address", "size", "children"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "addrmap" },
+        "name": { "type": "string", "description": "Inst name (not type name)." },
+        "type": { "type": "string", "description": "Type name (e.g., 'cpu_top_t')." },
+        "address": { "$ref": "#/$defs/HexU64" },
+        "size": { "$ref": "#/$defs/HexU64" },
+        "desc": { "type": "string" },
+        "source": { "$ref": "#/$defs/SourceLoc" },
+        "children": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              { "$ref": "#/$defs/Addrmap" },
+              { "$ref": "#/$defs/Regfile" },
+              { "$ref": "#/$defs/Reg" }
+            ]
+          }
+        }
+      }
+    },
+    "Regfile": {
+      "type": "object",
+      "required": ["kind", "name", "address", "size", "children"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "regfile" },
+        "name": { "type": "string" },
+        "type": { "type": "string" },
+        "address": { "$ref": "#/$defs/HexU64" },
+        "size": { "$ref": "#/$defs/HexU64" },
+        "desc": { "type": "string" },
+        "source": { "$ref": "#/$defs/SourceLoc" },
+        "children": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              { "$ref": "#/$defs/Regfile" },
+              { "$ref": "#/$defs/Reg" }
+            ]
+          }
+        }
+      }
+    },
+    "Reg": {
+      "type": "object",
+      "required": ["kind", "name", "address", "width", "fields"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "reg" },
+        "name": { "type": "string" },
+        "type": { "type": "string" },
+        "address": { "$ref": "#/$defs/HexU64" },
+        "width": { "type": "integer", "enum": [8, 16, 32, 64] },
+        "reset": { "$ref": "#/$defs/HexU64" },
+        "accessSummary": {
+          "type": "string",
+          "description": "Convenient roll-up like 'RW', 'RO', 'RW/RO', 'W1C/RO'. Detail per field in fields[].access."
+        },
+        "desc": { "type": "string" },
+        "source": { "$ref": "#/$defs/SourceLoc" },
+        "fields": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/Field" }
+        }
+      }
+    },
+    "Field": {
+      "type": "object",
+      "required": ["name", "lsb", "msb", "access"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string" },
+        "lsb": { "type": "integer", "minimum": 0, "maximum": 63 },
+        "msb": { "type": "integer", "minimum": 0, "maximum": 63 },
+        "access": { "$ref": "#/$defs/AccessMode" },
+        "reset": { "$ref": "#/$defs/HexU64" },
+        "desc": { "type": "string" },
+        "source": { "$ref": "#/$defs/SourceLoc" },
+        "encode": {
+          "type": "array",
+          "description": "Optional enumerated values from `enum` SystemRDL type.",
+          "items": {
+            "type": "object",
+            "required": ["name", "value"],
+            "additionalProperties": false,
+            "properties": {
+              "name": { "type": "string" },
+              "value": { "$ref": "#/$defs/HexU64" },
+              "desc": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "AccessMode": {
+      "type": "string",
+      "description": "SystemRDL access modes. Maps to design-token --rdl-acc-* CSS variables.",
+      "enum": ["rw", "ro", "wo", "w1c", "w0c", "w1s", "w0s", "rclr", "rset", "wclr", "wset", "na"]
+    },
+    "HexU64": {
+      "type": "string",
+      "pattern": "^0x[0-9a-fA-F_]+$",
+      "description": "Hex literal with optional underscores for readability, e.g. '0x0000_0010'."
+    },
+    "SourceLoc": {
+      "type": "object",
+      "description": "Position in source file for click-to-reveal (Week 6 source map).",
+      "required": ["uri", "line"],
+      "additionalProperties": false,
+      "properties": {
+        "uri": { "type": "string", "format": "uri" },
+        "line": { "type": "integer", "minimum": 0 },
+        "column": { "type": "integer", "minimum": 0 },
+        "endLine": { "type": "integer", "minimum": 0 },
+        "endColumn": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

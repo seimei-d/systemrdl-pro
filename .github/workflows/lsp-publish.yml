@@ -1,0 +1,29 @@
+name: Publish systemrdl-lsp to PyPI
+
+on:
+  push:
+    tags: ["lsp-v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write   # OIDC publishing — no PyPI token in repo secrets
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+      - name: Build wheel + sdist
+        run: |
+          cd packages/systemrdl-lsp
+          uv build
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: packages/systemrdl-lsp/dist/
+          # OIDC: configure trusted publisher on PyPI before first run.

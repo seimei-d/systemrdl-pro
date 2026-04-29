@@ -1,0 +1,33 @@
+name: Publish rdl-viewer CLI to npm
+
+on:
+  push:
+    tags: ["viewer-v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # provenance attestation (OIDC)
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+      - name: Build
+        run: |
+          bun install --frozen-lockfile
+          bun run --cwd packages/rdl-viewer-cli build
+      - name: Publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          cd packages/rdl-viewer-cli
+          npm publish --access public --provenance

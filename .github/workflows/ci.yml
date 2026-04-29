@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    name: Python (LSP)
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
+      - name: Sync dependencies
+        run: |
+          uv sync
+          uv pip install -e "packages/systemrdl-lsp[dev]"
+      - name: Lint
+        run: uv run ruff check packages/systemrdl-lsp
+      - name: Tests
+        run: uv run pytest packages/systemrdl-lsp/tests/ -v
+      - name: Smoke test entry point
+        run: uv run systemrdl-lsp --version
+
+  typescript:
+    name: TypeScript (extension + viewer)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Install deps
+        run: bun install --frozen-lockfile
+      - name: Typecheck extension
+        run: bun run --cwd packages/vscode-systemrdl-pro typecheck
+      - name: Build extension
+        run: bun run --cwd packages/vscode-systemrdl-pro build
+
+  schema:
+    name: JSON Schema validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate schema is well-formed JSON Schema
+        run: |
+          python3 - <<'PY'
+          import json, sys
+          schema = json.load(open("schemas/elaborated-tree.json"))
+          assert schema.get("$schema", "").startswith("https://json-schema.org/")
+          assert schema["title"] == "SystemRDL Elaborated Tree"
+          assert schema["properties"]["schemaVersion"]["const"] == "0.1.0"
+          print("schema OK")
+          PY

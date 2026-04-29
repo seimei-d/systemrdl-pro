@@ -1,0 +1,18 @@
+[project]
+name = "systemrdl-pro-workspace"
+version = "0.0.0"
+description = "uv workspace root for systemrdl-pro"
+requires-python = ">=3.10"
+
+[tool.uv.workspace]
+members = ["packages/systemrdl-lsp"]
+
+[tool.uv.sources]
+systemrdl-lsp = { workspace = true }
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "RUF"]

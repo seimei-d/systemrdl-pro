@@ -1,0 +1,49 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "SystemRDL",
+  "scopeName": "source.systemrdl",
+  "fileTypes": ["rdl"],
+  "comment": "Minimal Week-1 grammar — Week 2 PR will replace this with a fork of SystemRDL/vscode-systemrdl that adds full coverage. Do not extend this file beyond bracket/string/comment scopes.",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#keywords" },
+    { "include": "#types" },
+    { "include": "#numbers" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        { "name": "comment.line.double-slash.systemrdl", "match": "//.*$" },
+        {
+          "name": "comment.block.systemrdl",
+          "begin": "/\\*",
+          "end": "\\*/"
+        }
+      ]
+    },
+    "strings": {
+      "name": "string.quoted.double.systemrdl",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        { "name": "constant.character.escape.systemrdl", "match": "\\\\." }
+      ]
+    },
+    "keywords": {
+      "name": "keyword.control.systemrdl",
+      "match": "\\b(addrmap|regfile|reg|field|enum|signal|mem|component|external|internal|alias|default|hw|sw|ref|posedge|negedge|bothedge|level|nonsticky|na|rw|ro|wo|w1c|w0c|w1s|w0s|wclr|wset|rclr|rset)\\b"
+    },
+    "types": {
+      "name": "support.type.systemrdl",
+      "match": "\\b(boolean|string|number|bit|longint|unsigned|signed|byte|shortint|int|integer)\\b"
+    },
+    "numbers": {
+      "patterns": [
+        { "name": "constant.numeric.hex.systemrdl", "match": "\\b(0x|0X)[0-9a-fA-F_]+\\b" },
+        { "name": "constant.numeric.binary.systemrdl", "match": "\\b(0b|0B)[01_]+\\b" },
+        { "name": "constant.numeric.systemrdl", "match": "\\b[0-9]+\\b" }
+      ]
+    }
+  }
+}

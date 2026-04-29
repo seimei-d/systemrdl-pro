@@ -1,0 +1,92 @@
+{
+  "name": "vscode-systemrdl-pro",
+  "displayName": "SystemRDL Pro",
+  "description": "Live diagnostics + interactive memory-map viewer for SystemRDL 2.0",
+  "version": "0.1.0",
+  "publisher": "madeinheaven-dev",
+  "license": "MIT",
+  "icon": "media/icon.png",
+  "engines": { "vscode": "^1.85.0" },
+  "categories": ["Programming Languages", "Linters", "Visualization"],
+  "keywords": ["systemrdl", "rdl", "register-map", "hardware"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/madeinheaven-dev/systemrdl-pro.git",
+    "directory": "packages/vscode-systemrdl-pro"
+  },
+  "bugs": { "url": "https://github.com/madeinheaven-dev/systemrdl-pro/issues" },
+  "homepage": "https://github.com/madeinheaven-dev/systemrdl-pro#readme",
+  "main": "./out/extension.js",
+  "activationEvents": ["onLanguage:systemrdl-pro"],
+  "contributes": {
+    "languages": [
+      {
+        "id": "systemrdl-pro",
+        "aliases": ["SystemRDL", "systemrdl"],
+        "extensions": [".rdl"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "systemrdl-pro",
+        "scopeName": "source.systemrdl",
+        "path": "./syntaxes/systemrdl.tmLanguage.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "systemrdl-pro.showMemoryMap",
+        "title": "SystemRDL: Show Memory Map",
+        "category": "SystemRDL"
+      },
+      {
+        "command": "systemrdl-pro.restartServer",
+        "title": "SystemRDL: Restart Language Server",
+        "category": "SystemRDL"
+      }
+    ],
+    "configuration": {
+      "title": "SystemRDL Pro",
+      "properties": {
+        "systemrdl-pro.pythonPath": {
+          "type": "string",
+          "default": "",
+          "scope": "machine-overridable",
+          "description": "Path to Python interpreter that has systemrdl-lsp installed. Empty = use fallback chain (ms-python.python → PATH)."
+        },
+        "systemrdl-pro.includePaths": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "scope": "resource",
+          "description": "Directories searched by `include directives. Workspace-relative paths supported."
+        },
+        "systemrdl-pro.trace.server": {
+          "type": "string",
+          "enum": ["off", "messages", "verbose"],
+          "default": "off",
+          "scope": "window",
+          "description": "Trace LSP communication (output to 'SystemRDL Pro' channel)."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "esbuild src/extension.ts --bundle --outfile=out/extension.js --external:vscode --format=cjs --platform=node --target=node18 --minify",
+    "watch": "esbuild src/extension.ts --bundle --outfile=out/extension.js --external:vscode --format=cjs --platform=node --target=node18 --sourcemap --watch",
+    "typecheck": "tsc --noEmit",
+    "package": "vsce package --no-dependencies --no-yarn",
+    "publish": "vsce publish --no-dependencies --no-yarn"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.2.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.7.0"
+  }
+}

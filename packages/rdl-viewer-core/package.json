@@ -1,0 +1,14 @@
+{
+  "name": "@systemrdl-pro/viewer-core",
+  "version": "0.1.0",
+  "description": "Shared Svelte components for the SystemRDL memory-map viewer (workspace-internal package). Source: docs/design.md Viewer UX section.",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "scripts": {
+    "build": "echo 'rdl-viewer-core: scaffold only — Svelte components arrive in Week 4'",
+    "typecheck": "echo 'rdl-viewer-core: scaffold only'",
+    "lint": "echo 'rdl-viewer-core: scaffold only'"
+  }
+}
