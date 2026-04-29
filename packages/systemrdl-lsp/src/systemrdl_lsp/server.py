@@ -1,22 +1,34 @@
 """LSP server for SystemRDL 2.0.
 
-v0.1 implements only ``textDocument/publishDiagnostics``. The strategy is straightforward:
-on every open and change event we run ``systemrdl-compiler`` against the on-disk file
-content (or, when available, the in-memory document buffer from pygls). All compiler
-messages are captured via a custom ``MessagePrinter`` and converted to LSP diagnostics.
+v0.2 (Week 2):
 
-Week 2 will add hover/outline/definition/completion. Week 4 adds the custom JSON-RPC
-``rdl/elaboratedTree`` push (see schemas/elaborated-tree.json).
+- Compile in-memory buffer (no save required) via a per-edit tempfile
+- 300ms server-side debounce on ``textDocument/didChange``
+- ``ElaborationCache`` keeps the last successful ``RootNode`` per URI; diagnostics
+  are still published on every parse, so the user always sees the freshest error,
+  but hover/outline data falls back to last-good (design D7: zero flicker)
+- ``incl_search_paths`` from ``systemrdl-pro.includePaths`` workspace setting,
+  plus the original .rdl file's directory as implicit fallback so a relative
+  ``include`` keeps working
+- Diagnostics filter: messages without a SourceRef are suppressed (they collapse
+  to file line 1 and duplicate the real squiggle)
+
+Hover and documentSymbol providers live alongside in this module.
 """
 
 from __future__ import annotations
 
+import asyncio
+import dataclasses
 import logging
 import pathlib
+import tempfile
+import time
 import urllib.parse
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from lsprotocol.types import (
+    INITIALIZED,
     TEXT_DOCUMENT_DID_CHANGE,
     TEXT_DOCUMENT_DID_OPEN,
     TEXT_DOCUMENT_DID_SAVE,
@@ -27,77 +39,236 @@ from lsprotocol.types import (
     DidChangeTextDocumentParams,
     DidOpenTextDocumentParams,
     DidSaveTextDocumentParams,
+    InitializedParams,
     Position,
     PublishDiagnosticsParams,
     Range,
 )
 from pygls.lsp.server import LanguageServer
-from systemrdl import RDLCompiler, RDLCompileError
+from systemrdl import RDLCompileError, RDLCompiler
 from systemrdl.messages import MessagePrinter, Severity
 
 if TYPE_CHECKING:
-    from systemrdl.messages import SourceRefBase
+    from systemrdl.node import RootNode
 
 logger = logging.getLogger(__name__)
 
 SERVER_NAME = "systemrdl-lsp"
-SERVER_VERSION = "0.1.0"
+SERVER_VERSION = "0.2.0"
+DEBOUNCE_SECONDS = 0.3
+
+
+# ---------------------------------------------------------------------------
+# Capturing printer
+# ---------------------------------------------------------------------------
+
+
+@dataclasses.dataclass(frozen=True)
+class CompilerMessage:
+    """Severity + text + resolved location, decoupled from systemrdl's SourceRef.
+
+    Decoupling is necessary because we compile a *temp* copy of the buffer; the
+    raw SourceRef points at the temp path. We translate that to the original
+    workspace path here so downstream consumers don't need to know about temp files.
+    """
+
+    severity: Severity
+    text: str
+    file_path: pathlib.Path | None
+    line_1b: int | None  # 1-based line, None for messages with no location
+    col_start_1b: int | None
+    col_end_1b: int | None  # inclusive
+
+    @classmethod
+    def from_compiler(
+        cls,
+        severity: Severity,
+        text: str,
+        src_ref: Any,
+        translate_path: dict[pathlib.Path, pathlib.Path] | None = None,
+    ) -> "CompilerMessage":
+        if src_ref is None:
+            return cls(severity, text, None, None, None, None)
+
+        raw_filename = getattr(src_ref, "filename", None)
+        if raw_filename:
+            file_path = pathlib.Path(raw_filename)
+            if translate_path:
+                file_path = translate_path.get(file_path, file_path)
+        else:
+            file_path = None
+
+        line_1b = getattr(src_ref, "line", None)
+        sel = getattr(src_ref, "line_selection", None) or (None, None)
+        try:
+            col_start_1b, col_end_1b = sel
+        except (TypeError, ValueError):
+            col_start_1b = col_end_1b = None
+
+        return cls(severity, text, file_path, line_1b, col_start_1b, col_end_1b)
 
 
 class CapturingPrinter(MessagePrinter):
-    """``MessagePrinter`` subclass that captures structured diagnostics instead of writing to stderr."""
+    """Captures structured (severity, text, src_ref) tuples instead of writing to stderr."""
 
     def __init__(self) -> None:
         super().__init__()
-        self.captured: list[tuple[Severity, str, "SourceRefBase | None"]] = []
+        self.captured: list[tuple[Severity, str, Any]] = []
 
-    # systemrdl-compiler 1.27+ API
     def print_message(self, severity, text, src_ref):  # type: ignore[override]
         self.captured.append((severity, text, src_ref))
 
 
-def _severity_to_lsp(sev: Severity) -> DiagnosticSeverity:
-    if sev == Severity.ERROR or sev == Severity.FATAL:
-        return DiagnosticSeverity.Error
-    if sev == Severity.WARNING:
-        return DiagnosticSeverity.Warning
-    if sev == Severity.INFO:
-        return DiagnosticSeverity.Information
-    return DiagnosticSeverity.Hint
+# ---------------------------------------------------------------------------
+# Compilation
+# ---------------------------------------------------------------------------
 
 
-def _src_ref_to_range(src_ref: "SourceRefBase | None") -> Range:
-    """Convert a ``SegmentedSourceRef`` (1-based) to an LSP ``Range`` (0-based, half-open).
+def _compile_text(
+    uri: str,
+    text: str,
+    incl_search_paths: list[str] | None = None,
+) -> tuple[list[CompilerMessage], "RootNode | None", pathlib.Path]:
+    """Compile in-memory buffer text. Returns (messages, root_or_None, temp_path).
 
-    Real attributes on ``systemrdl.source_ref.SegmentedSourceRef`` (1.32.x):
+    Implementation: write ``text`` to a temp file (preserves line numbers verbatim),
+    point ``incl_search_paths`` at the original file's directory so relative
+    ``include`` paths resolve, run systemrdl-compiler, then translate temp file
+    paths back to the original path in every captured message.
 
-    - ``line``: ``int`` — 1-based line.
-    - ``line_selection``: ``tuple[int, int]`` — 1-based ``(start_col, end_col)`` *inclusive*.
-
-    LSP ``Range.end`` is *exclusive*. Converting:
-
-    - ``line_0b   = line - 1``
-    - ``start_0b  = start_col_1b - 1``
-    - ``end_0b    = end_col_1b``    (1-based inclusive == 0-based exclusive)
+    The temp file is **not** unlinked here. ``SegmentedSourceRef`` reads its source
+    file lazily when its ``.line`` / ``.line_selection`` properties are accessed — so
+    while a ``RootNode`` is cached for hover/documentSymbol, its temp file must
+    stay on disk. The caller owns the lifecycle: pass the temp path into
+    :class:`ElaborationCache.put` (which unlinks the previous entry's temp file
+    on replacement) or call ``unlink`` when discarding.
     """
-    if src_ref is None:
-        return Range(start=Position(line=0, character=0), end=Position(line=0, character=1))
+    original_path = _uri_to_path(uri)
+    search_paths = list(incl_search_paths or [])
+    if original_path.parent.exists():
+        search_paths.append(str(original_path.parent))
 
-    line_1b = getattr(src_ref, "line", None) or 1
-    sel = getattr(src_ref, "line_selection", None) or (1, 1)
+    printer = CapturingPrinter()
+    compiler = RDLCompiler(message_printer=printer)
+
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        suffix=".rdl",
+        prefix=".systemrdl-lsp-",
+        encoding="utf-8",
+        delete=False,
+    ) as tf:
+        tf.write(text)
+        tmp_path = pathlib.Path(tf.name)
+
+    root: RootNode | None = None
     try:
-        start_col_1b, end_col_1b = sel
-    except (TypeError, ValueError):
-        start_col_1b = end_col_1b = 1
+        compiler.compile_file(str(tmp_path), incl_search_paths=search_paths)
+        root = compiler.elaborate()
+    except RDLCompileError:
+        root = None
+    except Exception as exc:  # defensive: never crash the server
+        logger.exception("unexpected error while compiling %s", original_path)
+        printer.captured.append((Severity.ERROR, f"internal: {exc}", None))
 
-    line_0b = max(0, line_1b - 1)
-    start_0b = max(0, start_col_1b - 1)
-    end_0b = max(start_0b + 1, end_col_1b)
+    # Snapshot diagnostics while the temp file is still on disk — line/col are lazy.
+    translate = {tmp_path: original_path}
+    messages = [
+        CompilerMessage.from_compiler(sev, text, src_ref, translate)
+        for sev, text, src_ref in printer.captured
+    ]
+    return messages, root, tmp_path
 
-    return Range(
-        start=Position(line=line_0b, character=start_0b),
-        end=Position(line=line_0b, character=end_0b),
-    )
+
+def _elaborate(path: pathlib.Path) -> list[tuple[Severity, str, Any]]:
+    """Legacy disk-based elaboration; kept for tests and ``didSave`` warm path."""
+    if not path.exists():
+        printer = CapturingPrinter()
+        printer.captured.append((Severity.ERROR, f"file not found: {path}", None))
+        return printer.captured
+
+    text = path.read_text(encoding="utf-8")
+    messages, _, tmp_path = _compile_text(path.as_uri(), text)
+    tmp_path.unlink(missing_ok=True)  # legacy path doesn't cache, safe to drop now
+    out: list[tuple[Severity, str, Any]] = []
+    for m in messages:
+        if m.line_1b is None:
+            out.append((m.severity, m.text, None))
+        else:
+            ref = _SimpleRef(m.file_path, m.line_1b, m.col_start_1b or 1, m.col_end_1b or 1)
+            out.append((m.severity, m.text, ref))
+    return out
+
+
+@dataclasses.dataclass(frozen=True)
+class _SimpleRef:
+    filename: pathlib.Path | None  # noqa: F841 (referenced via getattr)
+    line: int
+    _col_start: int
+    _col_end: int
+
+    @property
+    def line_selection(self) -> tuple[int, int]:
+        return (self._col_start, self._col_end)
+
+
+# ---------------------------------------------------------------------------
+# ElaborationCache (last-good per URI, design D7)
+# ---------------------------------------------------------------------------
+
+
+@dataclasses.dataclass
+class CachedElaboration:
+    root: "RootNode"
+    text: str
+    elaborated_at: float
+    # Path to the temp file that backs ``root``'s lazy source refs. Owned by the cache;
+    # unlinked when the entry is replaced or the cache is dropped.
+    temp_path: pathlib.Path | None = None
+
+
+class ElaborationCache:
+    """Per-URI cache of the last successful ``RootNode``.
+
+    Hover / documentSymbol read from this cache. When a fresh parse fails we keep
+    the prior entry so the viewer (Week 4) and hover can still answer about
+    previously valid registers — matches design D7 ("zero-flicker stale UX").
+
+    The cache also owns the temp file backing each ``RootNode`` (see
+    :func:`_compile_text` for why). When ``put`` replaces an entry, the previous
+    temp file is unlinked. ``clear`` and ``__del__`` drop everything.
+    """
+
+    def __init__(self) -> None:
+        self._entries: dict[str, CachedElaboration] = {}
+
+    def get(self, uri: str) -> CachedElaboration | None:
+        return self._entries.get(uri)
+
+    def put(
+        self,
+        uri: str,
+        root: "RootNode",
+        text: str,
+        temp_path: pathlib.Path | None = None,
+    ) -> None:
+        old = self._entries.get(uri)
+        if old is not None and old.temp_path is not None:
+            old.temp_path.unlink(missing_ok=True)
+        self._entries[uri] = CachedElaboration(
+            root=root, text=text, elaborated_at=time.time(), temp_path=temp_path
+        )
+
+    def clear(self) -> None:
+        for entry in self._entries.values():
+            if entry.temp_path is not None:
+                entry.temp_path.unlink(missing_ok=True)
+        self._entries.clear()
+
+
+# ---------------------------------------------------------------------------
+# URI helpers
+# ---------------------------------------------------------------------------
 
 
 def _uri_to_path(uri: str) -> pathlib.Path:
@@ -111,72 +282,81 @@ def _path_to_uri(p: pathlib.Path) -> str:
     return p.resolve().as_uri()
 
 
-def _elaborate(path: pathlib.Path) -> list[tuple[Severity, str, "SourceRefBase | None"]]:
-    """Run parse + elaboration on a single .rdl file, return captured messages.
+# ---------------------------------------------------------------------------
+# Diagnostic conversion
+# ---------------------------------------------------------------------------
 
-    Errors are returned as messages, not raised. Behavior matches the design constraint:
-    "Live elaboration requires a valid top-level addrmap. While the user types the file
-    is often invalid. Strategy: keep last-good elaboration and surface diagnostics."
-    """
-    printer = CapturingPrinter()
-    compiler = RDLCompiler(message_printer=printer)
+
+def _severity_to_lsp(sev: Severity) -> DiagnosticSeverity:
+    if sev in (Severity.ERROR, Severity.FATAL):
+        return DiagnosticSeverity.Error
+    if sev == Severity.WARNING:
+        return DiagnosticSeverity.Warning
+    if sev == Severity.INFO:
+        return DiagnosticSeverity.Information
+    return DiagnosticSeverity.Hint
+
+
+def _src_ref_to_range(src_ref: Any) -> Range:
+    """Legacy helper used by tests. Mirrors the conversion in :func:`_message_to_range`."""
+    if src_ref is None:
+        return Range(start=Position(line=0, character=0), end=Position(line=0, character=1))
+    line_1b = getattr(src_ref, "line", None) or 1
+    sel = getattr(src_ref, "line_selection", None) or (1, 1)
     try:
-        compiler.compile_file(str(path))
-        # Elaboration may add more diagnostics. We attempt elaborate but tolerate failure.
-        try:
-            compiler.elaborate()
-        except RDLCompileError:
-            # Elaboration errors were already reported through the printer.
-            pass
-    except RDLCompileError:
-        # Parse errors were already reported through the printer.
-        pass
-    except Exception as exc:  # defensive: never crash the server on a single file
-        logger.exception("unexpected error while compiling %s", path)
-        printer.captured.append((Severity.ERROR, f"internal: {exc}", None))
-    return printer.captured
+        start_col_1b, end_col_1b = sel
+    except (TypeError, ValueError):
+        start_col_1b = end_col_1b = 1
+    return _build_range(line_1b, start_col_1b, end_col_1b)
 
 
-def _publish_for_uri(server: LanguageServer, uri: str) -> None:
-    """Re-elaborate the file at ``uri`` and publish diagnostics."""
-    try:
-        path = _uri_to_path(uri)
-    except ValueError as exc:
-        logger.warning("ignoring non-file URI %s: %s", uri, exc)
-        return
+def _message_to_range(msg: CompilerMessage) -> Range:
+    if msg.line_1b is None:
+        return Range(start=Position(line=0, character=0), end=Position(line=0, character=1))
+    return _build_range(msg.line_1b, msg.col_start_1b or 1, msg.col_end_1b or msg.col_start_1b or 1)
 
-    if not path.exists():
-        # The buffer may exist only in the editor; pygls already mirrors text via DidChange,
-        # but for v0.1 we only re-read from disk. The user must save once before diagnostics.
-        # Week 2: write the buffer to a temp file (or use systemrdl-compiler's compile_string).
-        return
 
-    messages = _elaborate(path)
+def _build_range(line_1b: int, col_start_1b: int, col_end_1b: int) -> Range:
+    line_0b = max(0, line_1b - 1)
+    start_0b = max(0, col_start_1b - 1)
+    end_0b = max(start_0b + 1, col_end_1b)
+    return Range(
+        start=Position(line=line_0b, character=start_0b),
+        end=Position(line=line_0b, character=end_0b),
+    )
 
+
+# ---------------------------------------------------------------------------
+# Diagnostics publishing
+# ---------------------------------------------------------------------------
+
+
+def _publish_diagnostics(
+    server: LanguageServer,
+    uri: str,
+    messages: list[CompilerMessage],
+) -> None:
+    target_path = _uri_to_path(uri)
     diagnostics: list[Diagnostic] = []
-    for sev, text, src_ref in messages:
-        # Suppress meta-status messages with no source ref ("Parse aborted due to previous
-        # errors", "Elaboration aborted", ...). They are dumped onto file line 1 as a
-        # fallback, which duplicates the user-visible squiggle on the real error line and
-        # adds no navigation value. The genuinely informative messages always carry a ref.
-        if src_ref is None:
+    for m in messages:
+        if m.file_path is None:
+            # Sourceless meta messages (e.g. "Parse aborted due to previous errors")
+            # would otherwise pin to file line 1 as redundant noise.
             continue
-
-        # Only surface messages that point at this URI; cross-file errors will be handled
-        # in Week 2 by publishing per-uri diagnostic batches.
-        if getattr(src_ref, "filename", None):
-            try:
-                ref_uri = _path_to_uri(pathlib.Path(src_ref.filename))
-            except (OSError, ValueError):
-                ref_uri = uri
-            if ref_uri != uri:
-                continue
+        try:
+            same_file = m.file_path.resolve() == target_path.resolve()
+        except OSError:
+            same_file = m.file_path == target_path
+        if not same_file:
+            # Cross-file diagnostics (errors in `included files) — skip in this pass.
+            # Week 3 will publish per-uri batches with a separate clear-on-resolve cycle.
+            continue
         diagnostics.append(
             Diagnostic(
-                range=_src_ref_to_range(src_ref),
-                severity=_severity_to_lsp(sev),
+                range=_message_to_range(m),
+                severity=_severity_to_lsp(m.severity),
                 source=SERVER_NAME,
-                message=text,
+                message=m.text,
             )
         )
 
@@ -185,29 +365,330 @@ def _publish_for_uri(server: LanguageServer, uri: str) -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# Server state
+# ---------------------------------------------------------------------------
+
+
+@dataclasses.dataclass
+class ServerState:
+    cache: ElaborationCache = dataclasses.field(default_factory=ElaborationCache)
+    pending: dict[str, asyncio.Task] = dataclasses.field(default_factory=dict)
+    include_paths: list[str] = dataclasses.field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Hover + documentSymbol
+# ---------------------------------------------------------------------------
+
+
+def _format_hex(value: int, width_hex_chars: int = 8) -> str:
+    return f"0x{value:0{width_hex_chars}X}"
+
+
+def _node_at_position(root: "RootNode", line_0b: int, char_0b: int) -> Any | None:
+    """Walk the elaborated tree, returning the deepest node whose source span contains the cursor."""
+    from systemrdl.node import AddressableNode, FieldNode
+
+    best: Any = None
+    best_span: int = 10**9
+    target_line_1b = line_0b + 1
+
+    def visit(node: Any) -> None:
+        nonlocal best, best_span
+        inst = getattr(node, "inst", None)
+        src_ref = getattr(inst, "inst_src_ref", None) or getattr(inst, "def_src_ref", None)
+        if src_ref is not None:
+            ref_line = getattr(src_ref, "line", None)
+            if ref_line == target_line_1b:
+                # Approximate "smallest containing node" by counting depth.
+                span = 1
+                if span < best_span:
+                    best = node
+                    best_span = span
+        if isinstance(node, AddressableNode) or hasattr(node, "children"):
+            for child in node.children(unroll=True):
+                visit(child)
+        if isinstance(node, AddressableNode):
+            # FieldNodes too
+            for f in getattr(node, "fields", lambda: [])() if False else []:
+                visit(f)
+        if hasattr(node, "fields"):
+            try:
+                for f in node.fields():
+                    visit(f)
+            except Exception:
+                pass
+
+    visit(root)
+    return best
+
+
+def _hover_text_for_node(node: Any) -> str | None:
+    from systemrdl.node import AddressableNode, FieldNode, RegNode
+
+    lines: list[str] = []
+    name = getattr(node, "inst_name", None) or "(anonymous)"
+    type_name = type(node).__name__.replace("Node", "").lower()
+
+    if isinstance(node, FieldNode):
+        lsb, msb = node.lsb, node.msb
+        try:
+            access = node.get_property("sw")
+            access_label = getattr(access, "name", str(access)) if access else "?"
+        except LookupError:
+            access_label = "?"
+        try:
+            reset = node.get_property("reset")
+            reset_str = _format_hex(int(reset)) if reset is not None else "—"
+        except LookupError:
+            reset_str = "—"
+        lines.append(f"**field** `{name}` `[{msb}:{lsb}]`")
+        lines.append("")
+        lines.append(f"- **access**: {access_label}")
+        lines.append(f"- **reset**: {reset_str}")
+        try:
+            desc = node.get_property("desc")
+            if desc:
+                lines.append("")
+                lines.append(str(desc))
+        except LookupError:
+            pass
+        return "\n".join(lines)
+
+    if isinstance(node, AddressableNode):
+        addr = node.absolute_address
+        size = getattr(node, "size", None)
+        lines.append(f"**{type_name}** `{name}`")
+        lines.append("")
+        lines.append(f"- **address**: {_format_hex(addr)}")
+        if size is not None:
+            lines.append(f"- **size**: {_format_hex(size)}")
+        if isinstance(node, RegNode):
+            try:
+                lines.append(f"- **width**: {node.get_property('regwidth')}")
+            except LookupError:
+                pass
+            # Roll up a reset value from constituent fields when every field has a reset.
+            try:
+                reg_reset = 0
+                have_all = True
+                for f in node.fields():
+                    fr = f.get_property("reset")
+                    if fr is None:
+                        have_all = False
+                        break
+                    reg_reset |= (int(fr) & ((1 << (f.msb - f.lsb + 1)) - 1)) << f.lsb
+                if have_all:
+                    lines.append(f"- **reset**: {_format_hex(reg_reset)}")
+            except (LookupError, AttributeError):
+                pass
+        try:
+            desc = node.get_property("desc")
+            if desc:
+                lines.append("")
+                lines.append(str(desc))
+        except LookupError:
+            pass
+        return "\n".join(lines)
+
+    return None
+
+
+def _document_symbols(root: "RootNode") -> list[Any]:
+    """Build a tree of LSP DocumentSymbols mirroring addrmap → regfile → reg → field."""
+    from lsprotocol.types import DocumentSymbol, SymbolKind
+    from systemrdl.node import AddrmapNode, FieldNode, RegfileNode, RegNode
+
+    def kind_of(node: Any) -> SymbolKind:
+        if isinstance(node, AddrmapNode):
+            return SymbolKind.Module
+        if isinstance(node, RegfileNode):
+            return SymbolKind.Namespace
+        if isinstance(node, RegNode):
+            return SymbolKind.Struct
+        if isinstance(node, FieldNode):
+            return SymbolKind.Field
+        return SymbolKind.Variable
+
+    def build(node: Any) -> DocumentSymbol | None:
+        inst = getattr(node, "inst", None)
+        src_ref = getattr(inst, "inst_src_ref", None) or getattr(inst, "def_src_ref", None)
+        if src_ref is None:
+            return None
+        line_1b = getattr(src_ref, "line", None) or 1
+        sel = getattr(src_ref, "line_selection", None) or (1, 1)
+        try:
+            cs, ce = sel
+        except (TypeError, ValueError):
+            cs = ce = 1
+        rng = _build_range(line_1b, cs, ce)
+
+        # ``children(unroll=True)`` already yields fields for RegNode — don't iterate
+        # ``fields()`` separately or every field shows up twice in the outline.
+        children: list[DocumentSymbol] = []
+        if hasattr(node, "children"):
+            try:
+                for c in node.children(unroll=True):
+                    sym = build(c)
+                    if sym is not None:
+                        children.append(sym)
+            except Exception:
+                pass
+
+        name = getattr(node, "inst_name", None) or "(anonymous)"
+        detail_parts: list[str] = []
+        if hasattr(node, "absolute_address"):
+            try:
+                detail_parts.append(_format_hex(node.absolute_address))
+            except Exception:
+                pass
+
+        return DocumentSymbol(
+            name=name,
+            detail=" ".join(detail_parts) or None,
+            kind=kind_of(node),
+            range=rng,
+            selection_range=rng,
+            children=children,
+        )
+
+    out: list[DocumentSymbol] = []
+    for top in root.children(unroll=True):
+        sym = build(top)
+        if sym is not None:
+            out.append(sym)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Server construction
+# ---------------------------------------------------------------------------
+
+
 def build_server() -> LanguageServer:
-    """Construct the configured ``LanguageServer``. Separated for ease of testing."""
     server = LanguageServer(SERVER_NAME, SERVER_VERSION)
+    state = ServerState()
+
+    def _read_buffer(uri: str) -> str | None:
+        try:
+            doc = server.workspace.get_text_document(uri)
+        except Exception:
+            return None
+        return doc.source
+
+    def _full_pass(uri: str, buffer_text: str | None) -> None:
+        if buffer_text is None:
+            try:
+                buffer_text = _uri_to_path(uri).read_text(encoding="utf-8")
+            except (OSError, ValueError):
+                return
+        messages, root, tmp_path = _compile_text(uri, buffer_text, state.include_paths)
+        if root is not None:
+            # Cache takes ownership of the temp file (it backs lazy src_ref reads
+            # for hover/documentSymbol). Old entry's temp file is unlinked there.
+            state.cache.put(uri, root, buffer_text, tmp_path)
+        else:
+            # Parse failed and we kept the previous cache entry intact (last-good D7).
+            # The just-written temp file isn't backing anything we'll read again — drop it.
+            tmp_path.unlink(missing_ok=True)
+        _publish_diagnostics(server, uri, messages)
+
+    async def _debounced_full_pass(uri: str) -> None:
+        try:
+            await asyncio.sleep(DEBOUNCE_SECONDS)
+        except asyncio.CancelledError:
+            return
+        try:
+            _full_pass(uri, _read_buffer(uri))
+        finally:
+            state.pending.pop(uri, None)
+
+    @server.feature(INITIALIZED)
+    def _on_initialized(_ls: LanguageServer, _params: InitializedParams) -> None:
+        # Fetch initial config snapshot. If the client doesn't return any, includePaths
+        # stays empty and only sibling-dir resolution applies.
+        async def fetch() -> None:
+            try:
+                from lsprotocol.types import (
+                    ConfigurationItem,
+                    WorkspaceConfigurationParams,
+                )
+                configs = await server.workspace_configuration_async(
+                    WorkspaceConfigurationParams(
+                        items=[ConfigurationItem(section="systemrdl-pro")]
+                    )
+                )
+                if configs and isinstance(configs[0], dict):
+                    paths = configs[0].get("includePaths") or []
+                    state.include_paths = [str(p) for p in paths if p]
+                    logger.info("includePaths from initial config: %s", state.include_paths)
+            except Exception:
+                logger.debug("could not fetch initial workspace configuration", exc_info=True)
+
+        asyncio.ensure_future(fetch())
 
     @server.feature(TEXT_DOCUMENT_DID_OPEN)
-    def _on_open(ls: LanguageServer, params: DidOpenTextDocumentParams) -> None:
-        _publish_for_uri(ls, params.text_document.uri)
+    def _on_open(_ls: LanguageServer, params: DidOpenTextDocumentParams) -> None:
+        _full_pass(params.text_document.uri, params.text_document.text)
 
     @server.feature(TEXT_DOCUMENT_DID_SAVE)
-    def _on_save(ls: LanguageServer, params: DidSaveTextDocumentParams) -> None:
-        _publish_for_uri(ls, params.text_document.uri)
+    def _on_save(_ls: LanguageServer, params: DidSaveTextDocumentParams) -> None:
+        _full_pass(params.text_document.uri, _read_buffer(params.text_document.uri))
 
     @server.feature(TEXT_DOCUMENT_DID_CHANGE)
-    def _on_change(ls: LanguageServer, params: DidChangeTextDocumentParams) -> None:
-        # v0.1 reads from disk only — Week 2 will switch to in-memory buffer or a temp file
-        # and add 300ms debounce. For now, didChange just retriggers a disk-based pass.
-        _publish_for_uri(ls, params.text_document.uri)
+    def _on_change(_ls: LanguageServer, params: DidChangeTextDocumentParams) -> None:
+        uri = params.text_document.uri
+        existing = state.pending.get(uri)
+        if existing is not None:
+            existing.cancel()
+        state.pending[uri] = asyncio.ensure_future(_debounced_full_pass(uri))
 
     @server.feature(WORKSPACE_DID_CHANGE_CONFIGURATION)
-    def _on_config_change(ls: LanguageServer, params: DidChangeConfigurationParams) -> None:
-        # No-op for v0.1: there are no settings the server reads yet. Week 2 wires
-        # `systemrdl-pro.includePaths` into the RDLCompiler search path. Registering
-        # a handler silences pygls's "Ignoring notification for unknown method" warning.
-        del ls, params
+    def _on_config_change(
+        _ls: LanguageServer, _params: DidChangeConfigurationParams
+    ) -> None:
+        async def refresh() -> None:
+            try:
+                from lsprotocol.types import (
+                    ConfigurationItem,
+                    WorkspaceConfigurationParams,
+                )
+                configs = await server.workspace_configuration_async(
+                    WorkspaceConfigurationParams(
+                        items=[ConfigurationItem(section="systemrdl-pro")]
+                    )
+                )
+                if configs and isinstance(configs[0], dict):
+                    paths = configs[0].get("includePaths") or []
+                    state.include_paths = [str(p) for p in paths if p]
+            except Exception:
+                logger.debug("config refresh failed", exc_info=True)
+
+        asyncio.ensure_future(refresh())
+
+    @server.feature("textDocument/hover")
+    def _on_hover(_ls: LanguageServer, params: Any) -> Any | None:
+        from lsprotocol.types import Hover, MarkupContent, MarkupKind
+
+        cached = state.cache.get(params.text_document.uri)
+        if cached is None:
+            return None
+        node = _node_at_position(
+            cached.root, params.position.line, params.position.character
+        )
+        if node is None:
+            return None
+        markdown = _hover_text_for_node(node)
+        if markdown is None:
+            return None
+        return Hover(contents=MarkupContent(kind=MarkupKind.Markdown, value=markdown))
+
+    @server.feature("textDocument/documentSymbol")
+    def _on_document_symbol(_ls: LanguageServer, params: Any) -> list[Any]:
+        cached = state.cache.get(params.text_document.uri)
+        if cached is None:
+            return []
+        return _document_symbols(cached.root)
 
     return server
