@@ -462,48 +462,45 @@ function renderViewerHtml(): string {
     }
   }
   html, body { margin: 0; padding: 0; background: var(--rdl-bg); color: var(--rdl-fg);
-    font-family: var(--rdl-font-chrome); font-size: 13px; height: 100vh; }
+    font-family: var(--rdl-font-chrome); font-size: 14px; height: 100vh; }
   body { display: grid; grid-template-rows: auto auto 1fr auto; min-height: 0; }
   .stale-bar { background: rgba(215,168,90,0.12); border-bottom: 1px solid var(--rdl-warning);
-    color: var(--rdl-warning); padding: 6px 12px; font-size: 12px;
+    color: var(--rdl-warning); padding: 7px 14px; font-size: 13px;
     display: none; align-items: center; gap: 8px; }
   .stale-bar.shown { display: flex; }
   .tabs { display: flex; border-bottom: 1px solid var(--rdl-border); background: var(--rdl-chrome);
     overflow-x: auto; }
-  .tab { padding: 8px 16px; font-size: 12px; color: var(--rdl-dim); cursor: pointer;
+  .tab { padding: 9px 16px; font-size: 13px; color: var(--rdl-dim); cursor: pointer;
     border-right: 1px solid var(--rdl-border); white-space: nowrap; user-select: none; }
   .tab:hover { color: var(--rdl-fg); }
   .tab.active { color: var(--rdl-fg); background: var(--rdl-bg);
     border-bottom: 2px solid var(--rdl-accent); margin-bottom: -1px; }
-  .body { display: grid; grid-template-columns: 320px 1fr; min-height: 0; }
-  /* D13: auto-stack at narrow viewport (right-dock side-by-code use case) */
-  @media (max-width: 700px) {
-    .body { grid-template-columns: 1fr; grid-template-rows: 1fr 1fr; }
-    #detail { border-left: none; border-top: 1px solid var(--rdl-border); }
-  }
-  .tree-host { overflow: auto; padding: 8px 0; min-height: 0; }
-  .tree { font-family: var(--rdl-font-mono); font-size: 12px; }
-  .row { display: grid; grid-template-columns: 28px 130px 1fr 90px; gap: 12px; align-items: baseline;
-    padding: 3px 16px; cursor: default; }
-  .row.expandable { cursor: pointer; }
-  .row.expandable:hover { background: rgba(74,158,255,0.08); }
+  /* Always-stack layout: tree on top, detail below. Independent scroll panes. */
+  .body { display: grid; grid-template-rows: minmax(120px, 50%) 1fr; min-height: 0; }
+  .tree-host { overflow: auto; padding: 8px 0; min-height: 0;
+    border-bottom: 1px solid var(--rdl-border); }
+  .tree { font-family: var(--rdl-font-mono); font-size: 13px; }
+  .row { display: grid; grid-template-columns: 28px 140px 1fr 100px; gap: 12px;
+    align-items: baseline; padding: 3px 16px; cursor: pointer; user-select: none; }
+  .row:hover { background: rgba(74,158,255,0.08); }
   .row.selected { background: var(--rdl-selected); border-left: 3px solid var(--rdl-accent);
     padding-left: 13px; }
-  .row .caret { color: var(--rdl-dim); font-size: 10px; user-select: none; text-align: right; }
+  .row .caret { color: var(--rdl-dim); font-size: 11px; text-align: right; }
   .row .addr { color: var(--rdl-dim); }
   .row .name { font-weight: 600; }
-  .row .access { color: var(--rdl-dim); font-size: 11px; text-align: right;
+  .row .access { color: var(--rdl-dim); font-size: 12px; text-align: right;
     font-family: var(--rdl-font-chrome); }
+  /* Container rows (addrmap/regfile) — slightly different chrome to read as headers. */
+  .row.container .name { color: var(--rdl-accent); }
+  .row.container .access { font-style: italic; }
   .indent-1 { padding-left: 32px; }
   .indent-2 { padding-left: 56px; }
+  .indent-3 { padding-left: 80px; }
   .indent-1.selected { padding-left: 29px; }
   .indent-2.selected { padding-left: 53px; }
-  .field-row-inline { display: grid; grid-template-columns: 56px 130px 60px 60px 1fr; gap: 12px;
-    padding: 2px 0 2px 64px; color: var(--rdl-dim); font-size: 11px;
-    font-family: var(--rdl-font-mono); }
-  .field-row-inline b { color: var(--rdl-fg); font-weight: 500; }
+  .indent-3.selected { padding-left: 77px; }
   .pill { display: inline-block; padding: 0 6px; border-radius: 2px; color: #1a1a1a;
-    font-size: 10px; line-height: 16px; font-family: var(--rdl-font-chrome); font-weight: 500;
+    font-size: 11px; line-height: 17px; font-family: var(--rdl-font-chrome); font-weight: 500;
     text-align: center; }
   .pill.rw  { background: var(--rdl-acc-rw); }
   .pill.ro  { background: var(--rdl-acc-ro); }
@@ -516,41 +513,40 @@ function renderViewerHtml(): string {
   .pill.rclr,.pill.rset { background: var(--rdl-acc-ro); opacity: 0.7; }
   .pill.rsv,.pill.na { background: var(--rdl-acc-rsv); color: var(--rdl-fg); opacity: 0.8; }
 
-  /* Detail pane (W5) */
-  #detail { border-left: 1px solid var(--rdl-border); padding: 16px 20px;
-    overflow: auto; min-height: 0; }
-  #detail h2 { margin: 0 0 4px; font-size: 16px; font-weight: 600;
+  /* Detail pane */
+  #detail { padding: 16px 20px; overflow: auto; min-height: 0; }
+  #detail h2 { margin: 0 0 4px; font-size: 17px; font-weight: 600;
     font-family: var(--rdl-font-mono); }
-  #detail .breadcrumb { color: var(--rdl-dim); font-size: 11px;
+  #detail .breadcrumb { color: var(--rdl-dim); font-size: 12px;
     font-family: var(--rdl-font-mono); margin-bottom: 12px; }
   #detail .meta { display: grid; grid-template-columns: auto 1fr auto 1fr;
-    column-gap: 12px; row-gap: 4px; max-width: 480px; font-size: 12px;
+    column-gap: 12px; row-gap: 4px; max-width: 520px; font-size: 13px;
     margin-bottom: 16px; }
   #detail .meta .k { color: var(--rdl-dim); }
   #detail .meta .v { color: var(--rdl-fg); font-family: var(--rdl-font-mono); }
-  #detail .desc { color: var(--rdl-dim); font-size: 12px; line-height: 1.5;
+  #detail .desc { color: var(--rdl-dim); font-size: 13px; line-height: 1.5;
     margin-bottom: 16px; max-width: 60ch; }
-  #detail .fields-title { font-size: 10px; color: var(--rdl-dim);
+  #detail .fields-title { font-size: 11px; color: var(--rdl-dim);
     text-transform: uppercase; letter-spacing: 0.06em;
     border-bottom: 1px solid var(--rdl-border); padding-bottom: 6px;
     margin: 16px 0 8px; }
-  #detail .field { display: grid; grid-template-columns: 56px 130px 60px 80px 1fr;
+  #detail .field { display: grid; grid-template-columns: 60px 140px 60px 90px 1fr;
     column-gap: 12px; padding: 4px 0; border-bottom: 1px dotted #2a2a2a;
-    font-family: var(--rdl-font-mono); font-size: 12px; align-items: baseline; }
+    font-family: var(--rdl-font-mono); font-size: 13px; align-items: baseline; }
   #detail .field .desc { color: var(--rdl-dim); font-family: var(--rdl-font-chrome);
     font-style: normal; }
   #detail .src-link { display: inline-block; margin-top: 16px;
     color: var(--rdl-accent); cursor: pointer;
-    font-family: var(--rdl-font-mono); font-size: 12px; }
+    font-family: var(--rdl-font-mono); font-size: 13px; }
   #detail .src-link:hover { text-decoration: underline; }
-  #detail .placeholder { color: var(--rdl-dim); font-size: 12px; padding: 24px 0; }
+  #detail .placeholder { color: var(--rdl-dim); font-size: 13px; padding: 24px 0; }
 
   .empty { padding: 32px 40px; max-width: 60ch; }
-  .empty h2 { font-size: 14px; font-weight: 600; margin: 0 0 8px; }
-  .empty p { margin: 4px 0; color: var(--rdl-dim); font-size: 12px; }
+  .empty h2 { font-size: 15px; font-weight: 600; margin: 0 0 8px; }
+  .empty p { margin: 4px 0; color: var(--rdl-dim); font-size: 13px; }
   .empty code { font-family: var(--rdl-font-mono); background: var(--rdl-panel);
     padding: 1px 5px; border-radius: 2px; }
-  .status { font-size: 11px; color: var(--rdl-dim); padding: 6px 12px;
+  .status { font-size: 12px; color: var(--rdl-dim); padding: 6px 12px;
     border-top: 1px solid var(--rdl-border); display: flex; justify-content: space-between; }
 </style></head>
 <body>
@@ -571,17 +567,13 @@ function renderViewerHtml(): string {
   </div>
   <div id="status" class="status">
     <span id="status-left">—</span>
-    <span id="status-right">v0.4 walking skeleton</span>
+    <span id="status-right">v0.5 walking skeleton</span>
   </div>
 <script>
 const vscode = acquireVsCodeApi();
 
-let state = {
-  roots: [],
-  activeRootIndex: 0,
-  expandedRegs: new Set(),
-  selectedRegKey: null,
-};
+// State persisted across messages within the same panel session.
+let state = { roots: [], activeRootIndex: 0, selectedRegKey: null };
 
 window.addEventListener('message', (event) => {
   const m = event.data;
@@ -601,13 +593,11 @@ function applyTree(tree) {
     return;
   }
 
-  // Auto-select first reg if nothing is currently selected (D4).
-  if (!state.selectedRegKey || !findRegByKey(state.roots[state.activeRootIndex], state.selectedRegKey)) {
-    const first = findFirstReg(state.roots[state.activeRootIndex]);
-    if (first) {
-      state.selectedRegKey = regKey(first);
-      state.expandedRegs.add(state.selectedRegKey);
-    }
+  // Auto-select the first reg in the active root if nothing valid is selected (D4).
+  const root = state.roots[state.activeRootIndex];
+  if (!state.selectedRegKey || !findRegByKey(root, state.selectedRegKey)) {
+    const firstPath = findFirstRegPath(root, [root.name]);
+    state.selectedRegKey = firstPath ? firstPath.key : null;
   }
 
   renderTabs();
@@ -617,7 +607,7 @@ function applyTree(tree) {
   const total = countRegs(state.roots);
   const elapsed = tree.elaboratedAt ? new Date(tree.elaboratedAt).toLocaleTimeString() : '';
   document.getElementById('status-left').textContent =
-    \`Elaborated \${elapsed} · \${total} register\${total === 1 ? '' : 's'} · \${state.roots[state.activeRootIndex].name}\`;
+    \`Elaborated \${elapsed} · \${total} register\${total === 1 ? '' : 's'} · \${root.name}\`;
 }
 
 function countRegs(roots) {
@@ -641,15 +631,8 @@ function renderTabs() {
     t.addEventListener('click', () => {
       if (i === state.activeRootIndex) return;
       state.activeRootIndex = i;
-      state.expandedRegs.clear();
-      state.selectedRegKey = null;
-      // Force re-derivation of selection on next applyTree call by triggering a render
-      // with the same data. We just walk what's already in state.
-      const first = findFirstReg(state.roots[i]);
-      if (first) {
-        state.selectedRegKey = regKey(first);
-        state.expandedRegs.add(state.selectedRegKey);
-      }
+      const first = findFirstRegPath(state.roots[i], [state.roots[i].name]);
+      state.selectedRegKey = first ? first.key : null;
       renderTabs();
       renderTree();
       renderDetail();
@@ -664,79 +647,93 @@ function renderTree() {
   host.innerHTML = '';
   const tree = document.createElement('div');
   tree.className = 'tree';
-  walk(root, tree, 0);
+  // Render the active root's children directly — the root itself IS the tab.
+  // For nested addrmaps deeper in the hierarchy we DO render header rows so the
+  // "two CTRLs from cpu0 + cpu1" case stays disambiguated.
+  walkChildren(root, tree, 0, [root.name]);
   host.appendChild(tree);
 
-  // Scroll the selected row into view.
   const sel = host.querySelector('.row.selected');
   if (sel) sel.scrollIntoView({ block: 'nearest' });
 }
 
-function findFirstReg(node) {
-  if (node.kind === 'reg') return node;
-  for (const c of node.children || []) {
-    const r = findFirstReg(c);
-    if (r) return r;
-  }
-  return null;
+function walkChildren(parent, host, depth, pathSegments) {
+  (parent.children || []).forEach(child => walk(child, host, depth, pathSegments));
 }
 
-function findRegByKey(node, key) {
-  if (node.kind === 'reg') return regKey(node) === key ? node : null;
-  for (const c of node.children || []) {
-    const r = findRegByKey(c, key);
-    if (r) return r;
-  }
-  return null;
-}
-
-function regKey(reg) { return reg.address + '|' + reg.name; }
-
-function walk(node, host, depth) {
+function walk(node, host, depth, pathSegments) {
+  const indent = 'indent-' + Math.min(depth, 3);
   if (node.kind === 'addrmap' || node.kind === 'regfile') {
-    if (node.kind === 'regfile') {
-      const row = document.createElement('div');
-      row.className = 'row indent-' + depth;
-      row.innerHTML = '<span class="caret">▼</span>' +
-        '<span class="addr">' + node.address + '</span>' +
-        '<span class="name">' + escapeHtml(node.name) + '</span>' +
-        '<span class="access" title="regfile">regfile</span>';
-      host.appendChild(row);
+    // Render container as a header row so nested addrmaps (cpu0, cpu1, …) are
+    // visible — otherwise their child registers collide visually.
+    const row = document.createElement('div');
+    row.className = 'row container ' + indent;
+    const kindLabel = node.kind + (node.type ? ' (' + node.type + ')' : '');
+    row.innerHTML = '<span class="caret">▼</span>' +
+      '<span class="addr">' + node.address + '</span>' +
+      '<span class="name">' + escapeHtml(node.name) + '</span>' +
+      '<span class="access" title="' + escapeHtml(kindLabel) + '">' + escapeHtml(kindLabel) + '</span>';
+    if (node.source) {
+      row.title = 'Click to reveal in editor';
+      row.addEventListener('click', () => postReveal(node.source));
     }
-    (node.children || []).forEach(c =>
-      walk(c, host, depth + (node.kind === 'regfile' ? 1 : 0)));
+    host.appendChild(row);
+    walkChildren(node, host, depth + 1, pathSegments.concat([node.name]));
     return;
   }
   if (node.kind === 'reg') {
-    const expanded = state.expandedRegs.has(regKey(node));
-    const selected = state.selectedRegKey === regKey(node);
+    const path = pathSegments.concat([node.name]);
+    const key = path.join('.');
+    const selected = state.selectedRegKey === key;
     const row = document.createElement('div');
-    row.className = 'row expandable indent-' + depth + (selected ? ' selected' : '');
-    row.innerHTML = '<span class="caret">' + (expanded ? '▼' : '▶') + '</span>' +
+    row.className = 'row ' + indent + (selected ? ' selected' : '');
+    row.innerHTML = '<span class="caret"> </span>' +
       '<span class="addr">' + node.address + '</span>' +
       '<span class="name">' + escapeHtml(node.name) + '</span>' +
       '<span class="access">' + (node.accessSummary || '') + '</span>';
     row.addEventListener('click', () => {
-      state.selectedRegKey = regKey(node);
-      if (expanded) state.expandedRegs.delete(regKey(node));
-      else state.expandedRegs.add(regKey(node));
+      state.selectedRegKey = key;
       renderTree();
       renderDetail();
+      // Reg click also reveals — feedback item: "при клике на регистр не переводит на нужный лайн"
+      if (node.source) postReveal(node.source);
     });
     host.appendChild(row);
-    if (expanded) (node.fields || []).forEach(f => {
-      const r = document.createElement('div');
-      r.className = 'field-row-inline';
-      const accLower = (f.access || 'na').toLowerCase();
-      r.innerHTML = '<b>[' + f.msb + ':' + f.lsb + ']</b>' +
-        '<b>' + escapeHtml(f.name) + '</b>' +
-        '<span class="pill ' + accLower + '">' + accLower.toUpperCase() + '</span>' +
-        '<span>' + (f.reset || '—') + '</span>' +
-        '<span style="color:var(--rdl-dim);font-family:var(--rdl-font-chrome);font-style:italic">' +
-          escapeHtml(f.desc || '') + '</span>';
-      host.appendChild(r);
-    });
   }
+}
+
+// Returns { key, reg, path } for the first register in DFS order.
+function findFirstRegPath(node, pathSegments) {
+  if (node.kind === 'reg') {
+    return { reg: node, path: pathSegments, key: pathSegments.join('.') };
+  }
+  for (const c of node.children || []) {
+    const r = findFirstRegPath(c, pathSegments.concat([c.name]));
+    if (r) return r;
+  }
+  return null;
+}
+
+function findRegByKey(rootOrNode, key) {
+  // Walk and reconstruct the same dotted path as the renderer.
+  const startPath = [rootOrNode.name];
+  function walk(node, segs) {
+    if (node.kind === 'reg') {
+      const k = segs.join('.');
+      return k === key ? { reg: node, path: segs } : null;
+    }
+    for (const c of node.children || []) {
+      const r = walk(c, segs.concat([c.name]));
+      if (r) return r;
+    }
+    return null;
+  }
+  return walk(rootOrNode, startPath);
+}
+
+function postReveal(source) {
+  if (!source) return;
+  vscode.postMessage({ type: 'reveal', source });
 }
 
 function renderDetail() {
@@ -745,31 +742,30 @@ function renderDetail() {
     host.innerHTML = '<div class="placeholder">Select a register to see details.</div>';
     return;
   }
-  const reg = findRegByKey(state.roots[state.activeRootIndex], state.selectedRegKey);
-  if (!reg) {
+  const found = findRegByKey(state.roots[state.activeRootIndex], state.selectedRegKey);
+  if (!found) {
     host.innerHTML = '<div class="placeholder">Selected register no longer exists.</div>';
     return;
   }
-  const path = state.roots[state.activeRootIndex].name + '.' + reg.name;
+  const reg = found.reg;
+  const path = found.path.join('.');
   let html = '';
   html += '<h2>' + escapeHtml(reg.name) + '</h2>';
   html += '<div class="breadcrumb">' + escapeHtml(path) + '</div>';
   html += '<div class="meta">';
   html += '<span class="k">Address</span><span class="v">' + reg.address + '</span>';
   html += '<span class="k">Width</span><span class="v">' + reg.width + '</span>';
-  if (reg.reset !== undefined) {
-    html += '<span class="k">Reset</span><span class="v">' + reg.reset + '</span>';
-  } else {
-    html += '<span class="k">Reset</span><span class="v">—</span>';
-  }
+  html += '<span class="k">Reset</span><span class="v">' + (reg.reset !== undefined ? reg.reset : '—') + '</span>';
   html += '<span class="k">Access</span><span class="v">' + (reg.accessSummary || '—') + '</span>';
   html += '</div>';
   if (reg.desc) html += '<div class="desc">' + escapeHtml(reg.desc) + '</div>';
   html += '<div class="fields-title">Bit fields</div>';
   (reg.fields || []).forEach(f => {
     const accLower = (f.access || 'na').toLowerCase();
+    const cursor = f.source ? 'cursor:pointer' : '';
+    const title = f.source ? 'Click to reveal in editor' : '';
     html += '<div class="field" data-source="' + (f.source ? encodeURIComponent(JSON.stringify(f.source)) : '') + '"' +
-      (f.source ? ' style="cursor:pointer" title="Click to reveal in editor"' : '') + '>' +
+      ' style="' + cursor + '" title="' + title + '">' +
       '<b>[' + f.msb + ':' + f.lsb + ']</b>' +
       '<b>' + escapeHtml(f.name) + '</b>' +
       '<span class="pill ' + accLower + '">' + accLower.toUpperCase() + '</span>' +
@@ -784,15 +780,11 @@ function renderDetail() {
   }
   host.innerHTML = html;
 
-  // Wire reveal handlers (W6: bidirectional source map).
   host.querySelectorAll('[data-source]').forEach(el => {
     const raw = el.getAttribute('data-source');
     if (!raw) return;
     el.addEventListener('click', () => {
-      try {
-        const source = JSON.parse(decodeURIComponent(raw));
-        vscode.postMessage({ type: 'reveal', source });
-      } catch (e) { /* ignore */ }
+      try { postReveal(JSON.parse(decodeURIComponent(raw))); } catch (e) { /* ignore */ }
     });
   });
 }
