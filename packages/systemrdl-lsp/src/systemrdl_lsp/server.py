@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import datetime
 import logging
 import pathlib
 import tempfile
@@ -54,8 +55,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 SERVER_NAME = "systemrdl-lsp"
-SERVER_VERSION = "0.2.0"
+SERVER_VERSION = "0.3.0"
 DEBOUNCE_SECONDS = 0.3
+ELABORATED_TREE_SCHEMA_VERSION = "0.1.0"
 
 
 # ---------------------------------------------------------------------------
@@ -495,6 +497,244 @@ def _hover_text_for_node(node: Any) -> str | None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Elaborated tree serialization (rdl/elaboratedTree, schema v0.1.0)
+# ---------------------------------------------------------------------------
+
+
+def _hex(value: int, width_bits: int = 32) -> str:
+    """Format an unsigned int as ``0xAAAA_BBBB`` matching the JSON Schema regex."""
+    digits = max(8, (width_bits + 3) // 4)
+    digits = ((digits + 3) // 4) * 4  # round up to multiple of 4 so underscores are clean
+    raw = f"{value:0{digits}X}"
+    chunks = [raw[max(0, i - 4) : i] for i in range(len(raw), 0, -4)]
+    return "0x" + "_".join(reversed(chunks))
+
+
+def _src_ref_to_dict(
+    src_ref: Any,
+    path_translate: dict[pathlib.Path, pathlib.Path] | None = None,
+) -> dict[str, Any] | None:
+    if src_ref is None:
+        return None
+    filename = getattr(src_ref, "filename", None)
+    line_1b = getattr(src_ref, "line", None)
+    if not filename or line_1b is None:
+        return None
+    file_path = pathlib.Path(filename)
+    if path_translate:
+        file_path = path_translate.get(file_path, file_path)
+    sel = getattr(src_ref, "line_selection", None) or (1, 1)
+    try:
+        cs, ce = sel
+    except (TypeError, ValueError):
+        cs = ce = 1
+    return {
+        "uri": file_path.as_uri(),
+        "line": max(0, line_1b - 1),
+        "column": max(0, cs - 1),
+        "endLine": max(0, line_1b - 1),
+        "endColumn": max(cs, ce),
+    }
+
+
+def _serialize_field(
+    node: Any, path_translate: dict[pathlib.Path, pathlib.Path] | None = None
+) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "name": node.inst_name or "",
+        "lsb": node.lsb,
+        "msb": node.msb,
+        "access": _field_access_token(node),
+    }
+    try:
+        reset = node.get_property("reset")
+        if reset is not None:
+            out["reset"] = _hex(int(reset), node.msb - node.lsb + 1)
+    except LookupError:
+        pass
+    try:
+        desc = node.get_property("desc")
+        if desc:
+            out["desc"] = str(desc)
+    except LookupError:
+        pass
+    inst = getattr(node, "inst", None)
+    src = _src_ref_to_dict(
+        getattr(inst, "inst_src_ref", None) or getattr(inst, "def_src_ref", None),
+        path_translate,
+    )
+    if src:
+        out["source"] = src
+    return out
+
+
+def _field_access_token(node: Any) -> str:
+    """Map systemrdl-compiler field semantics to the schema's AccessMode enum."""
+    try:
+        sw = node.get_property("sw")
+    except LookupError:
+        sw = None
+    try:
+        onwrite = node.get_property("onwrite")
+    except LookupError:
+        onwrite = None
+
+    sw_name = getattr(sw, "name", "").lower() if sw else ""
+    on_name = getattr(onwrite, "name", "").lower() if onwrite else ""
+
+    # Order matters: more specific tokens win.
+    if on_name == "woclr":
+        return "w1c"
+    if on_name == "woset":
+        return "w1s"
+    if on_name == "wzc":
+        return "w0c"
+    if on_name == "wzs":
+        return "w0s"
+    if on_name == "wclr":
+        return "wclr"
+    if on_name == "wset":
+        return "wset"
+    if sw_name in {"rw", "ro", "wo"}:
+        return sw_name
+    if sw_name == "r":
+        return "ro"
+    if sw_name == "w":
+        return "wo"
+    return "na"
+
+
+def _serialize_reg(
+    node: Any, path_translate: dict[pathlib.Path, pathlib.Path] | None = None
+) -> dict[str, Any]:
+    fields = []
+    accesses: list[str] = []
+    reg_reset = 0
+    have_all_resets = True
+    for f in node.fields():
+        sf = _serialize_field(f, path_translate)
+        fields.append(sf)
+        accesses.append(sf["access"].upper())
+        try:
+            fr = f.get_property("reset")
+            if fr is None:
+                have_all_resets = False
+            else:
+                width = f.msb - f.lsb + 1
+                reg_reset |= (int(fr) & ((1 << width) - 1)) << f.lsb
+        except (LookupError, AttributeError):
+            have_all_resets = False
+
+    width_bits = 32
+    try:
+        width_bits = int(node.get_property("regwidth"))
+    except (LookupError, ValueError):
+        pass
+
+    out: dict[str, Any] = {
+        "kind": "reg",
+        "name": node.inst_name or "",
+        "address": _hex(node.absolute_address, max(32, width_bits)),
+        "width": width_bits,
+        "fields": fields,
+    }
+    type_name = type(node).__name__
+    if hasattr(node.inst, "type_name") and node.inst.type_name:
+        out["type"] = str(node.inst.type_name)
+    if accesses:
+        out["accessSummary"] = "/".join(dict.fromkeys(accesses))  # ordered unique
+    if have_all_resets:
+        out["reset"] = _hex(reg_reset, width_bits)
+    try:
+        desc = node.get_property("desc")
+        if desc:
+            out["desc"] = str(desc)
+    except LookupError:
+        pass
+    inst = getattr(node, "inst", None)
+    src = _src_ref_to_dict(
+        getattr(inst, "inst_src_ref", None) or getattr(inst, "def_src_ref", None),
+        path_translate,
+    )
+    if src:
+        out["source"] = src
+    del type_name  # quiet linters
+    return out
+
+
+def _serialize_addressable(
+    node: Any, path_translate: dict[pathlib.Path, pathlib.Path] | None = None
+) -> dict[str, Any] | None:
+    from systemrdl.node import AddrmapNode, RegfileNode, RegNode
+
+    if isinstance(node, RegNode):
+        return _serialize_reg(node, path_translate)
+    if isinstance(node, (AddrmapNode, RegfileNode)):
+        kind = "addrmap" if isinstance(node, AddrmapNode) else "regfile"
+        children: list[dict[str, Any]] = []
+        try:
+            for c in node.children(unroll=True):
+                child = _serialize_addressable(c, path_translate)
+                if child is not None:
+                    children.append(child)
+        except Exception:
+            logger.exception("error walking children of %r", node)
+        out: dict[str, Any] = {
+            "kind": kind,
+            "name": node.inst_name or "",
+            "address": _hex(node.absolute_address),
+            "size": _hex(node.size),
+            "children": children,
+        }
+        if hasattr(node.inst, "type_name") and node.inst.type_name:
+            out["type"] = str(node.inst.type_name)
+        try:
+            desc = node.get_property("desc")
+            if desc:
+                out["desc"] = str(desc)
+        except LookupError:
+            pass
+        inst = getattr(node, "inst", None)
+        src = _src_ref_to_dict(
+            getattr(inst, "inst_src_ref", None) or getattr(inst, "def_src_ref", None),
+            path_translate,
+        )
+        if src:
+            out["source"] = src
+        return out
+    return None
+
+
+def _serialize_root(
+    root: "RootNode | None",
+    stale: bool,
+    path_translate: dict[pathlib.Path, pathlib.Path] | None = None,
+) -> dict[str, Any]:
+    """Build the JSON envelope matching ``schemas/elaborated-tree.json`` v0.1.0.
+
+    ``path_translate`` rewrites filenames in source refs — used to swap the LSP's
+    internal compile temp path for the user's real workspace path so that
+    click-to-reveal in the viewer (Week 6) jumps to the editor's actual file.
+    """
+    roots: list[dict[str, Any]] = []
+    if root is not None:
+        try:
+            for top in root.children(unroll=True):
+                serialized = _serialize_addressable(top, path_translate)
+                if serialized is not None and serialized.get("kind") == "addrmap":
+                    roots.append(serialized)
+        except Exception:
+            logger.exception("failed to serialize elaborated tree")
+
+    return {
+        "schemaVersion": ELABORATED_TREE_SCHEMA_VERSION,
+        "elaboratedAt": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "stale": stale,
+        "roots": roots,
+    }
+
+
 def _document_symbols(root: "RootNode") -> list[Any]:
     """Build a tree of LSP DocumentSymbols mirroring addrmap → regfile → reg → field."""
     from lsprotocol.types import DocumentSymbol, SymbolKind
@@ -690,5 +930,38 @@ def build_server() -> LanguageServer:
         if cached is None:
             return []
         return _document_symbols(cached.root)
+
+    @server.feature("rdl/elaboratedTree")
+    def _on_elaborated_tree(_ls: LanguageServer, params: Any) -> dict[str, Any]:
+        """Custom JSON-RPC: viewer fetches the latest elaborated tree for a URI.
+
+        Schema: ``schemas/elaborated-tree.json`` v0.1.0. Returns the cached
+        last-good tree when the current parse has failed (design D7).
+        """
+        uri = None
+        if isinstance(params, dict):
+            uri = params.get("uri") or params.get("textDocument", {}).get("uri")
+        else:
+            uri = getattr(params, "uri", None)
+            if uri is None and hasattr(params, "text_document"):
+                uri = params.text_document.uri
+        if not uri:
+            return _serialize_root(None, stale=False)
+        cached = state.cache.get(uri)
+        if cached is None:
+            return _serialize_root(None, stale=False)
+        # Stale = no fresh root for this URI right now. We don't currently track that
+        # signal explicitly; W5 will set ``stale=True`` when last-good differs from the
+        # latest parse attempt. For now stale is always False.
+        try:
+            original_path = _uri_to_path(uri)
+        except ValueError:
+            original_path = None
+        translate = (
+            {cached.temp_path: original_path}
+            if cached.temp_path is not None and original_path is not None
+            else None
+        )
+        return _serialize_root(cached.root, stale=False, path_translate=translate)
 
     return server
