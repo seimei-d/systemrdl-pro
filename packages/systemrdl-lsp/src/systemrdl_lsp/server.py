@@ -55,7 +55,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 SERVER_NAME = "systemrdl-lsp"
-SERVER_VERSION = "0.4.0"
+SERVER_VERSION = "0.5.0"
 DEBOUNCE_SECONDS = 0.3
 ELABORATED_TREE_SCHEMA_VERSION = "0.1.0"
 
@@ -505,6 +505,19 @@ def _hover_text_for_node(node: Any) -> str | None:
 # ---------------------------------------------------------------------------
 
 
+def _safe_get_property(node: Any, prop: str) -> Any:
+    """``node.get_property(prop)`` with LookupError + AttributeError swallowed.
+
+    Some property reads (e.g. ``name``) raise ``LookupError`` when the property
+    isn't set on this kind of node; others raise ``AttributeError`` when the node
+    doesn't support property lookup at all (rare, but defensive).
+    """
+    try:
+        return node.get_property(prop)
+    except (LookupError, AttributeError):
+        return None
+
+
 def _hex(value: int, width_bits: int = 32) -> str:
     """Format an unsigned int as ``0xAAAA_BBBB`` matching the JSON Schema regex."""
     digits = max(8, (width_bits + 3) // 4)
@@ -550,6 +563,9 @@ def _serialize_field(
         "msb": node.msb,
         "access": _field_access_token(node),
     }
+    display_name = _safe_get_property(node, "name")
+    if display_name:
+        out["displayName"] = str(display_name)
     try:
         reset = node.get_property("reset")
         if reset is not None:
@@ -645,6 +661,9 @@ def _serialize_reg(
     type_name = type(node).__name__
     if hasattr(node.inst, "type_name") and node.inst.type_name:
         out["type"] = str(node.inst.type_name)
+    display_name = _safe_get_property(node, "name")
+    if display_name:
+        out["displayName"] = str(display_name)
     if accesses:
         out["accessSummary"] = "/".join(dict.fromkeys(accesses))  # ordered unique
     if have_all_resets:
@@ -692,6 +711,9 @@ def _serialize_addressable(
         }
         if hasattr(node.inst, "type_name") and node.inst.type_name:
             out["type"] = str(node.inst.type_name)
+        display_name = _safe_get_property(node, "name")
+        if display_name:
+            out["displayName"] = str(display_name)
         try:
             desc = node.get_property("desc")
             if desc:
@@ -889,6 +911,15 @@ def build_server() -> LanguageServer:
         if existing is not None:
             existing.cancel()
         state.pending[uri] = asyncio.ensure_future(_debounced_full_pass(uri))
+
+    @server.feature("$/cancelRequest")
+    def _on_cancel(_ls: LanguageServer, _params: Any) -> None:
+        # VSCode's language client sends $/cancelRequest when it's no longer interested
+        # in a still-pending request (e.g. user typed during a slow elaborate). pygls 2.x
+        # logs "Cancel notification for unknown message id …" by default for any request
+        # that already completed before the cancel arrived — harmless but noisy in the
+        # Output panel. Register a no-op handler to keep that channel quiet.
+        return None
 
     @server.feature(WORKSPACE_DID_CHANGE_CONFIGURATION)
     def _on_config_change(

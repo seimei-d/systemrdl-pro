@@ -21,6 +21,7 @@ type Addrmap = {
   kind: 'addrmap';
   name: string;
   type?: string;
+  displayName?: string;
   address: string;
   size: string;
   desc?: string;
@@ -32,6 +33,7 @@ type Regfile = {
   kind: 'regfile';
   name: string;
   type?: string;
+  displayName?: string;
   address: string;
   size: string;
   desc?: string;
@@ -43,6 +45,7 @@ type Reg = {
   kind: 'reg';
   name: string;
   type?: string;
+  displayName?: string;
   address: string;
   width: 8 | 16 | 32 | 64;
   reset?: string;
@@ -54,6 +57,7 @@ type Reg = {
 
 type Field = {
   name: string;
+  displayName?: string;
   lsb: number;
   msb: number;
   access: string;
@@ -527,6 +531,7 @@ function renderViewerHtml(): string {
       --rdl-acc-rsv: #8a3a3a;
     }
   }
+  *, *::before, *::after { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; background: var(--rdl-bg); color: var(--rdl-fg);
     font-family: var(--rdl-font-chrome); font-size: 14px; height: 100vh; }
   /* Status info lives in the VSCode status bar — webview footer removed.
@@ -543,8 +548,12 @@ function renderViewerHtml(): string {
   .tab:hover { color: var(--rdl-fg); }
   .tab.active { color: var(--rdl-fg); background: var(--rdl-bg);
     border-bottom: 2px solid var(--rdl-accent); margin-bottom: -1px; }
-  /* Always-stack layout: tree on top, detail below. Independent scroll panes. */
-  .body { display: grid; grid-template-rows: minmax(180px, 50%) 1fr; min-height: 0; }
+  /* Always-stack: tree on top (auto-sized to content up to 50% — small chips show
+     all regs without scrolling), detail below filling the rest. Each pane has
+     overflow:auto so large register maps still scroll within their pane. */
+  .body { display: grid;
+    grid-template-rows: minmax(120px, min(50%, max-content)) 1fr;
+    min-height: 0; }
   .tree-pane { display: grid; grid-template-rows: auto 1fr; min-height: 0;
     border-bottom: 1px solid var(--rdl-border); }
   .filter-bar { padding: 6px 12px; border-bottom: 1px solid var(--rdl-border);
@@ -595,8 +604,10 @@ function renderViewerHtml(): string {
 
   /* Detail pane */
   #detail { padding: 16px 20px; overflow: auto; min-height: 0; }
-  #detail h2 { margin: 0 0 4px; font-size: 17px; font-weight: 600;
+  #detail h2 { margin: 0 0 2px; font-size: 17px; font-weight: 600;
     font-family: var(--rdl-font-mono); }
+  #detail .display-name { color: var(--rdl-fg); font-size: 13px;
+    margin-bottom: 4px; }
   #detail .breadcrumb { color: var(--rdl-dim); font-size: 12px;
     font-family: var(--rdl-font-mono); margin-bottom: 12px; }
   #detail .meta { display: grid; grid-template-columns: auto 1fr auto 1fr;
@@ -950,6 +961,9 @@ function renderDetail() {
   const path = found.path.join('.');
   let html = '';
   html += '<h2>' + escapeHtml(reg.name) + '</h2>';
+  if (reg.displayName) {
+    html += '<div class="display-name">' + escapeHtml(reg.displayName) + '</div>';
+  }
   html += '<div class="breadcrumb">' + escapeHtml(path) + '</div>';
   html += '<div class="meta">';
   html += '<span class="k">Address</span><span class="v">' + reg.address + '</span>';
@@ -963,13 +977,15 @@ function renderDetail() {
     const accLower = (f.access || 'na').toLowerCase();
     const cursor = f.source ? 'cursor:pointer' : '';
     const title = f.source ? 'Click to reveal in editor' : '';
+    // Prefer the long desc; fall back to the SystemRDL "name" property (displayName).
+    const blurb = f.desc || f.displayName || '';
     html += '<div class="field" data-source="' + (f.source ? encodeURIComponent(JSON.stringify(f.source)) : '') + '"' +
       ' style="' + cursor + '" title="' + title + '">' +
       '<b>[' + f.msb + ':' + f.lsb + ']</b>' +
       '<b>' + escapeHtml(f.name) + '</b>' +
       '<span class="pill ' + accLower + '">' + accLower.toUpperCase() + '</span>' +
       '<span>' + (f.reset || '—') + '</span>' +
-      '<span class="desc">' + escapeHtml(f.desc || '') + '</span>' +
+      '<span class="desc">' + escapeHtml(blurb) + '</span>' +
       '</div>';
   });
   if (reg.source) {
