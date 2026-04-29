@@ -61,6 +61,26 @@ def test_invalid_file_reports_error_with_location(tmp_rdl):
     assert text, "error text must be non-empty"
 
 
+def test_src_ref_resolves_to_correct_line(tmp_rdl):
+    """Regression: error on file line N must yield LSP Range with line=(N-1).
+
+    Previously ``_src_ref_to_range`` looked for non-existent ``start_line``/``start_col``
+    attributes and silently fell back to line 1, so every diagnostic appeared on the first
+    line of the file.
+    """
+    from systemrdl_lsp.server import _src_ref_to_range
+
+    rdl_with_error_on_line_3 = "addrmap a {\n    reg {} CTRL;\n    junk_token;\n};\n"
+    msgs = _elaborate(tmp_rdl(rdl_with_error_on_line_3, "x.rdl"))
+    errors = [m for m in msgs if m[0] in (Severity.ERROR, Severity.FATAL) and m[2] is not None]
+    assert errors, "expected an error with a source ref"
+
+    rng = _src_ref_to_range(errors[0][2])
+    # LSP is 0-based, file line 3 = LSP line 2.
+    assert rng.start.line == 2, f"expected LSP line 2 (file line 3), got {rng.start.line}"
+    assert rng.end.character > rng.start.character, "range must be non-empty"
+
+
 def test_missing_file_returns_message_not_crash(tmp_path):
     """Calling ``_elaborate`` on a non-existent path captures an error rather than raising."""
     missing = tmp_path / "does-not-exist.rdl"

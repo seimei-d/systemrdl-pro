@@ -67,27 +67,36 @@ def _severity_to_lsp(sev: Severity) -> DiagnosticSeverity:
 
 
 def _src_ref_to_range(src_ref: "SourceRefBase | None") -> Range:
-    """Convert a ``SourceRefBase`` (1-based line/col) to an LSP ``Range`` (0-based).
+    """Convert a ``SegmentedSourceRef`` (1-based) to an LSP ``Range`` (0-based, half-open).
 
-    ``systemrdl-compiler`` source refs may carry partial info (e.g., file-level errors with no
-    column). We coerce to a sensible single-character range.
+    Real attributes on ``systemrdl.source_ref.SegmentedSourceRef`` (1.32.x):
+
+    - ``line``: ``int`` — 1-based line.
+    - ``line_selection``: ``tuple[int, int]`` — 1-based ``(start_col, end_col)`` *inclusive*.
+
+    LSP ``Range.end`` is *exclusive*. Converting:
+
+    - ``line_0b   = line - 1``
+    - ``start_0b  = start_col_1b - 1``
+    - ``end_0b    = end_col_1b``    (1-based inclusive == 0-based exclusive)
     """
     if src_ref is None:
         return Range(start=Position(line=0, character=0), end=Position(line=0, character=1))
 
-    start_line = max(0, (getattr(src_ref, "start_line", 1) or 1) - 1)
-    start_col = max(0, (getattr(src_ref, "start_col", 1) or 1) - 1)
-    end_line_raw = getattr(src_ref, "end_line", None) or (start_line + 1)
-    end_col_raw = getattr(src_ref, "end_col", None) or ((start_col + 1) + 1)
-    end_line = max(0, end_line_raw - 1)
-    end_col = max(0, end_col_raw - 1)
+    line_1b = getattr(src_ref, "line", None) or 1
+    sel = getattr(src_ref, "line_selection", None) or (1, 1)
+    try:
+        start_col_1b, end_col_1b = sel
+    except (TypeError, ValueError):
+        start_col_1b = end_col_1b = 1
 
-    if (end_line, end_col) <= (start_line, start_col):
-        end_col = start_col + 1
+    line_0b = max(0, line_1b - 1)
+    start_0b = max(0, start_col_1b - 1)
+    end_0b = max(start_0b + 1, end_col_1b)
 
     return Range(
-        start=Position(line=start_line, character=start_col),
-        end=Position(line=end_line, character=end_col),
+        start=Position(line=line_0b, character=start_0b),
+        end=Position(line=line_0b, character=end_0b),
     )
 
 
