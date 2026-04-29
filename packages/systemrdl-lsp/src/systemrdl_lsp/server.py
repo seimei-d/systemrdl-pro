@@ -20,8 +20,10 @@ from lsprotocol.types import (
     TEXT_DOCUMENT_DID_CHANGE,
     TEXT_DOCUMENT_DID_OPEN,
     TEXT_DOCUMENT_DID_SAVE,
+    WORKSPACE_DID_CHANGE_CONFIGURATION,
     Diagnostic,
     DiagnosticSeverity,
+    DidChangeConfigurationParams,
     DidChangeTextDocumentParams,
     DidOpenTextDocumentParams,
     DidSaveTextDocumentParams,
@@ -184,5 +186,12 @@ def build_server() -> LanguageServer:
         # v0.1 reads from disk only — Week 2 will switch to in-memory buffer or a temp file
         # and add 300ms debounce. For now, didChange just retriggers a disk-based pass.
         _publish_for_uri(ls, params.text_document.uri)
+
+    @server.feature(WORKSPACE_DID_CHANGE_CONFIGURATION)
+    def _on_config_change(ls: LanguageServer, params: DidChangeConfigurationParams) -> None:
+        # No-op for v0.1: there are no settings the server reads yet. Week 2 wires
+        # `systemrdl-pro.includePaths` into the RDLCompiler search path. Registering
+        # a handler silences pygls's "Ignoring notification for unknown method" warning.
+        del ls, params
 
     return server
