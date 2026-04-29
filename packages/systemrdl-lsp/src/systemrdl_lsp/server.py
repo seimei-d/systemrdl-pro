@@ -55,7 +55,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 SERVER_NAME = "systemrdl-lsp"
-SERVER_VERSION = "0.3.0"
+SERVER_VERSION = "0.4.0"
 DEBOUNCE_SECONDS = 0.3
 ELABORATED_TREE_SCHEMA_VERSION = "0.1.0"
 
@@ -377,6 +377,9 @@ class ServerState:
     cache: ElaborationCache = dataclasses.field(default_factory=ElaborationCache)
     pending: dict[str, asyncio.Task] = dataclasses.field(default_factory=dict)
     include_paths: list[str] = dataclasses.field(default_factory=list)
+    # URIs whose latest parse attempt failed but for which we still have a last-good
+    # cache entry. The viewer renders a stale-bar when a URI is in this set (D7).
+    stale_uris: set[str] = dataclasses.field(default_factory=set)
 
 
 # ---------------------------------------------------------------------------
@@ -828,10 +831,13 @@ def build_server() -> LanguageServer:
             # Cache takes ownership of the temp file (it backs lazy src_ref reads
             # for hover/documentSymbol). Old entry's temp file is unlinked there.
             state.cache.put(uri, root, buffer_text, tmp_path)
+            state.stale_uris.discard(uri)
         else:
-            # Parse failed and we kept the previous cache entry intact (last-good D7).
+            # Parse failed and we keep the previous cache entry intact (last-good D7).
             # The just-written temp file isn't backing anything we'll read again — drop it.
             tmp_path.unlink(missing_ok=True)
+            if state.cache.get(uri) is not None:
+                state.stale_uris.add(uri)
         _publish_diagnostics(server, uri, messages)
 
     async def _debounced_full_pass(uri: str) -> None:
@@ -950,9 +956,6 @@ def build_server() -> LanguageServer:
         cached = state.cache.get(uri)
         if cached is None:
             return _serialize_root(None, stale=False)
-        # Stale = no fresh root for this URI right now. We don't currently track that
-        # signal explicitly; W5 will set ``stale=True`` when last-good differs from the
-        # latest parse attempt. For now stale is always False.
         try:
             original_path = _uri_to_path(uri)
         except ValueError:
@@ -962,6 +965,10 @@ def build_server() -> LanguageServer:
             if cached.temp_path is not None and original_path is not None
             else None
         )
-        return _serialize_root(cached.root, stale=False, path_translate=translate)
+        return _serialize_root(
+            cached.root,
+            stale=uri in state.stale_uris,
+            path_translate=translate,
+        )
 
     return server
