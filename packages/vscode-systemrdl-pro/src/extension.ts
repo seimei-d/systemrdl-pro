@@ -74,6 +74,7 @@ let client: LanguageClient | undefined;
 let outputChannel: vscode.LogOutputChannel | undefined;
 let memoryMapPanel: vscode.WebviewPanel | undefined;
 let lastTreeUri: string | undefined;
+let statusBarItem: vscode.StatusBarItem | undefined;
 let cursorSyncTimer: ReturnType<typeof setTimeout> | undefined;
 // Suppress one cycle of cursor → viewer sync after a viewer-initiated reveal.
 // Otherwise: click reg → editor jumps → onDidChangeTextEditorSelection fires →
@@ -85,6 +86,11 @@ const CURSOR_SYNC_DEBOUNCE_MS = 500;
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   outputChannel = vscode.window.createOutputChannel('SystemRDL Pro', { log: true });
   context.subscriptions.push(outputChannel);
+
+  statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+  statusBarItem.command = 'systemrdl-pro.showMemoryMap';
+  statusBarItem.tooltip = 'Click to open SystemRDL Memory Map';
+  context.subscriptions.push(statusBarItem);
 
   context.subscriptions.push(
     vscode.commands.registerCommand('systemrdl-pro.showMemoryMap', () =>
@@ -392,13 +398,17 @@ async function revealLocation(loc: SourceLoc): Promise<void> {
     // The cursor change we're about to cause must not bounce back as a cursor-sync
     // message into the viewer; suppress one cycle.
     suppressNextCursorSync = true;
+    // Place the cursor at the START of the symbol — feedback: jumping to the END
+    // (range.end) lands the cursor right after `DMA_BASE_ADDR`, not at the name's
+    // first character. revealRange + flash still uses the broader range so the
+    // visual context is intact.
+    const cursorAtStart = new vscode.Range(range.start, range.start);
     const editor = await vscode.window.showTextDocument(doc, {
       viewColumn: vscode.ViewColumn.One,
       preserveFocus: false,
-      selection: range,
+      selection: cursorAtStart,
     });
     editor.revealRange(range, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
-    // 200ms whole-line flash (U2: smooth scroll + flash)
     editor.setDecorations(flashDecoration, [range]);
     setTimeout(() => editor.setDecorations(flashDecoration, []), 200);
   } catch (err) {
@@ -418,6 +428,7 @@ async function refreshMemoryMap(): Promise<void> {
     if (memoryMapPanel?.visible !== undefined) {
       memoryMapPanel.webview.postMessage({ type: 'tree', tree });
     }
+    updateStatusBar(tree);
   } catch (err) {
     outputChannel?.error(`rdl/elaboratedTree failed: ${err}`);
     if (memoryMapPanel?.webview) {
@@ -427,6 +438,32 @@ async function refreshMemoryMap(): Promise<void> {
       });
     }
   }
+}
+
+function updateStatusBar(tree: ElaboratedTree): void {
+  if (!statusBarItem) return;
+  if (!tree.roots.length) {
+    statusBarItem.hide();
+    return;
+  }
+  const total = countRegs(tree.roots);
+  const rootNames = tree.roots.map(r => r.name).join(', ');
+  const stale = tree.stale ? ' $(warning) stale' : '';
+  statusBarItem.text = `$(circuit-board) ${total} reg${total === 1 ? '' : 's'} · ${rootNames}${stale}`;
+  statusBarItem.tooltip = stale
+    ? 'Memory map showing last good elaboration · current parse failed. Click to open viewer.'
+    : `Memory map · ${rootNames} · click to open`;
+  statusBarItem.show();
+}
+
+function countRegs(roots: Addrmap[]): number {
+  let n = 0;
+  const walk = (node: Addrmap | Regfile | Reg): void => {
+    if (node.kind === 'reg') n++;
+    else (node.children ?? []).forEach(walk);
+  };
+  roots.forEach(walk);
+  return n;
 }
 
 function pickTargetUri(): vscode.Uri | undefined {
@@ -492,7 +529,9 @@ function renderViewerHtml(): string {
   }
   html, body { margin: 0; padding: 0; background: var(--rdl-bg); color: var(--rdl-fg);
     font-family: var(--rdl-font-chrome); font-size: 14px; height: 100vh; }
-  body { display: grid; grid-template-rows: auto auto 1fr auto; min-height: 0; }
+  /* Status info lives in the VSCode status bar — webview footer removed.
+     Future rdl-viewer-cli (browser, no VSCode chrome) will reintroduce a slim status row. */
+  body { display: grid; grid-template-rows: auto auto 1fr; min-height: 0; }
   .stale-bar { background: rgba(215,168,90,0.12); border-bottom: 1px solid var(--rdl-warning);
     color: var(--rdl-warning); padding: 7px 14px; font-size: 13px;
     display: none; align-items: center; gap: 8px; }
@@ -587,8 +626,6 @@ function renderViewerHtml(): string {
   .empty p { margin: 4px 0; color: var(--rdl-dim); font-size: 13px; }
   .empty code { font-family: var(--rdl-font-mono); background: var(--rdl-panel);
     padding: 1px 5px; border-radius: 2px; }
-  .status { font-size: 12px; color: var(--rdl-dim); padding: 6px 12px;
-    border-top: 1px solid var(--rdl-border); display: flex; justify-content: space-between; }
 </style></head>
 <body>
   <div id="stale-bar" class="stale-bar">
@@ -611,10 +648,6 @@ function renderViewerHtml(): string {
     <div id="detail">
       <div class="placeholder">Select a register to see details.</div>
     </div>
-  </div>
-  <div id="status" class="status">
-    <span id="status-left">—</span>
-    <span id="status-right">v0.6 walking skeleton</span>
   </div>
 <script>
 const vscode = acquireVsCodeApi();
@@ -678,21 +711,6 @@ function applyTree(tree) {
   renderTabs();
   renderTree();
   renderDetail();
-
-  const total = countRegs(state.roots);
-  const elapsed = tree.elaboratedAt ? new Date(tree.elaboratedAt).toLocaleTimeString() : '';
-  document.getElementById('status-left').textContent =
-    \`Elaborated \${elapsed} · \${total} register\${total === 1 ? '' : 's'} · \${root.name}\`;
-}
-
-function countRegs(roots) {
-  let n = 0;
-  const walk = (node) => {
-    if (node.kind === 'reg') n++;
-    else if (node.children) node.children.forEach(walk);
-  };
-  roots.forEach(walk);
-  return n;
 }
 
 function renderTabs() {
@@ -836,25 +854,53 @@ function postReveal(source) {
   vscode.postMessage({ type: 'reveal', source });
 }
 
-// D10: editor cursor moved → select the matching reg in the viewer (no editor jump back).
+// D10: editor cursor moved → select the matching tree node in the viewer
+// (no editor jump back). Resolution order, most specific first:
+//
+//   1. Field whose source line matches exactly → select parent reg
+//   2. Reg whose source line matches → select the reg
+//   3. Container (addrmap/regfile) whose source line matches:
+//      - if it's a top-level root → switch active tab
+//      - if it's a nested container → scroll its row into view
+//
+// Falls through silently if nothing matches (e.g. cursor on a comment line).
 function applyCursor(line0b) {
   if (!state.roots.length) return;
+
+  // First check whether the cursor is on a top-level addrmap declaration —
+  // if so we want to switch tabs, not just scroll within the current root.
+  for (let i = 0; i < state.roots.length; i++) {
+    const r = state.roots[i];
+    if (r.source && r.source.line === line0b) {
+      if (state.activeRootIndex !== i) {
+        state.activeRootIndex = i;
+        const first = findFirstRegPath(state.roots[i], [state.roots[i].name]);
+        state.selectedRegKey = first ? first.key : null;
+        renderTabs();
+        renderTree();
+        renderDetail();
+      }
+      return;
+    }
+  }
+
   const root = state.roots[state.activeRootIndex];
 
-  // Find the closest reg whose source span contains the cursor line, OR a field
-  // whose source line matches exactly. Tie-break: prefer field match (more specific).
   function search(node, segs) {
     if (node.kind === 'reg') {
-      // Field-level match wins over reg-level.
       for (const f of node.fields || []) {
         if (f.source && f.source.line === line0b) {
-          return { reg: node, path: segs, fieldName: f.name };
+          return { kind: 'reg', path: segs };
         }
       }
       if (node.source && node.source.line === line0b) {
-        return { reg: node, path: segs };
+        return { kind: 'reg', path: segs };
       }
       return null;
+    }
+    // Container: addrmap/regfile.
+    if (node.source && node.source.line === line0b) {
+      return { kind: 'container', path: segs, node };
     }
     for (const c of node.children || []) {
       const r = search(c, segs.concat([c.name]));
@@ -865,11 +911,28 @@ function applyCursor(line0b) {
 
   const found = search(root, [root.name]);
   if (!found) return;
-  const newKey = found.path.join('.');
-  if (newKey === state.selectedRegKey) return;
-  state.selectedRegKey = newKey;
+
+  if (found.kind === 'reg') {
+    const newKey = found.path.join('.');
+    if (newKey === state.selectedRegKey) return;
+    state.selectedRegKey = newKey;
+    renderTree();
+    renderDetail();
+    return;
+  }
+
+  // Nested container — scroll its row into view without changing selection.
+  const targetName = found.node.name;
   renderTree();
-  renderDetail();
+  const host = document.getElementById('tree-host');
+  const rows = host.querySelectorAll('.row.container');
+  for (const r of rows) {
+    const nameEl = r.querySelector('.name');
+    if (nameEl && nameEl.textContent === targetName) {
+      r.scrollIntoView({ block: 'nearest' });
+      break;
+    }
+  }
 }
 
 function renderDetail() {
@@ -941,7 +1004,6 @@ function showEmpty() {
     '</div>';
   document.getElementById('detail').innerHTML =
     '<div class="placeholder">No selection.</div>';
-  document.getElementById('status-left').textContent = '—';
 }
 
 function showError(msg) {
