@@ -42,6 +42,27 @@ regfile dma_channel_t {
     } DMA_BASE_ADDR @ 0x08;
 };
 
+// `cpu_top` nests two addrmaps, so the viewer renders them as collapsible
+// container rows (▼/▶) under the cpu_top tab. Click the row to fold/unfold.
+addrmap cpu_top {
+    name = "CPU subsystem";
+    desc = "Two CPU cores, each with its own DMA engine; nested addrmaps collapse independently.";
+
+    addrmap cpu0 {
+        name = "Core 0";
+        ctrl_reg_t CTRL @ 0x0;
+        dma_channel_t dma_ch0 @ 0x100;
+        dma_channel_t dma_ch1 @ 0x200;
+    } core0 @ 0x0000;
+
+    addrmap cpu1 {
+        name = "Core 1";
+        ctrl_reg_t CTRL @ 0x0;
+        dma_channel_t dma_ch0 @ 0x100;
+        dma_channel_t dma_ch1 @ 0x200;
+    } core1 @ 0x1000;
+};
+
 addrmap dma_engine {
     name = "DMA engine";
     desc = "Two-channel DMA controller, mapped at 0x4000_0000 in the SoC.";

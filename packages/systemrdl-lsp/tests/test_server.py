@@ -25,6 +25,7 @@ from systemrdl_lsp.server import (
     _definition_location,
     _document_symbols,
     _elaborate,
+    _hover_for_word,
     _hover_text_for_node,
     _node_at_position,
     _src_ref_to_range,
@@ -294,6 +295,45 @@ def test_completion_context_offers_only_onwrite_values():
     labels = {it.label for it in items}
     assert "woclr" in labels and "woset" in labels and "wzc" in labels
     assert "rw" not in labels and "addrmap" not in labels
+
+
+def test_hover_for_word_resolves_keyword():
+    md = _hover_for_word("addrmap", roots=[])
+    assert md is not None
+    assert "addrmap" in md
+    assert "(keyword)" in md
+
+
+def test_hover_for_word_resolves_property():
+    md = _hover_for_word("sw", roots=[])
+    assert md is not None
+    assert "(property)" in md
+    assert "Software access" in md
+
+
+def test_hover_for_word_resolves_access_value():
+    md = _hover_for_word("rw", roots=[])
+    assert md is not None
+    assert "(access mode)" in md
+    md_woclr = _hover_for_word("woclr", roots=[])
+    assert md_woclr is not None and "(onwrite value)" in md_woclr
+
+
+def test_hover_for_word_resolves_user_type(tmp_path):
+    """Hover on a type identifier surfaces its kind, name, and desc."""
+    uri = (tmp_path / "x.rdl").as_uri()
+    _msgs, roots, tmp = _compile_text(uri, TYPED_RDL)
+    try:
+        md = _hover_for_word("my_ctrl_t", roots=roots)
+        assert md is not None
+        assert "reg" in md and "my_ctrl_t" in md
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def test_hover_for_word_unknown_returns_none():
+    assert _hover_for_word("nonexistent_xyz", roots=[]) is None
+    assert _hover_for_word("", roots=[]) is None
 
 
 def test_completion_offers_user_defined_types(tmp_path):

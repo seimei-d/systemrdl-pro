@@ -78,6 +78,47 @@ prerequisite, already in Pass 5 design tokens.
 
 ---
 
+### TODO-R1: Refactor `systemrdl_lsp/server.py` into focused modules
+
+**What:** Split the now ~1300-line `server.py` into themed modules:
+
+- `compile.py` — `_compile_text`, `_elaborate`, `ElaborationCache`,
+  `CapturingPrinter`, `CompilerMessage`
+- `diagnostics.py` — severity mapping, `_publish_diagnostics`, range builders
+- `hover.py` — `_hover_text_for_node`, `_hover_for_word`, `_node_at_position`
+- `completion.py` — keyword/property/value catalogues, `_completion_*`
+- `definition.py` — `_word_at_position`, `_definition_location`,
+  `_comp_defs_from_cached`
+- `serialize.py` — `_serialize_root`, `_serialize_addressable`, `_serialize_reg`,
+  `_serialize_field`
+- `outline.py` — `_document_symbols`
+- `server.py` — keeps `build_server()`, `ServerState`, and the LSP feature
+  registrations only
+
+**Why:** `server.py` mixes seven distinct concerns. New features (more
+hover scopes, signature help, code actions) inevitably grow the same file
+because everything is closure-bound to `build_server`. Module split unblocks
+typed test surface (each helper testable in isolation), reduces merge friction
+between feature additions, and makes onboarding read-the-source viable.
+
+**Pros:** ~7 ×150-line files vs one 1300-liner; LSP request handlers stay
+small and obvious. Tests already import each helper individually so the
+move is mechanical.
+**Cons:** Cache, server state, and capture-printer have to thread through as
+explicit args (currently closure-captured by `build_server`). Some helpers
+need shared imports (e.g. `systemrdl.node.AddrmapNode`) — pull into a
+`_node_imports.py` to avoid circular deps.
+
+**Context:** User flagged file size 2026-04-30 after the completion +
+context-aware hover landed. Defer until the LSP feature surface stabilises
+(after Week 6 right-click context menu lands) to avoid double-refactor.
+
+**Depends on / blocked by:** Feature-complete LSP first (Week 2-3 + Week 6).
+Plan: do the refactor in one PR per module, each passing the existing tests
+unchanged.
+
+---
+
 ### TODO-D2: High-contrast theme support (hc-black / hc-light)
 
 **What:** Add a third theme variant beyond the locked dark and light palettes —

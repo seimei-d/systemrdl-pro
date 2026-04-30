@@ -59,7 +59,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 SERVER_NAME = "systemrdl-lsp"
-SERVER_VERSION = "0.8.1"
+SERVER_VERSION = "0.8.2"
 DEBOUNCE_SECONDS = 0.3
 ELABORATED_TREE_SCHEMA_VERSION = "0.1.0"
 # Eng-review safety net #3: cap a single elaborate pass at 10s wall-clock.
@@ -473,6 +473,58 @@ def _node_at_position(
     else:
         visit(roots)
     return best
+
+
+def _hover_for_word(word: str, roots: list["RootNode"]) -> str | None:
+    """Resolve a SystemRDL identifier to its hover documentation.
+
+    Resolution order — most specific first, so a token that's both a keyword
+    and a user-defined type label (rare but possible: ``mem``-named regfile)
+    surfaces the user's definition over the language docs.
+
+    1. User-defined component types from ``comp_defs`` — surfaces ``name``,
+       ``desc``, and the kind. This catches every type reference in the file
+       that completion already knew about.
+    2. SystemRDL top-level keywords (``addrmap``, ``regfile``, ``reg``, …).
+    3. Property keywords (``sw``, ``reset``, ``onwrite``, …).
+    4. Access-mode values (``rw``, ``ro``, ``woclr``, ``wzc``, …).
+    """
+    if not word:
+        return None
+
+    # 1. User-defined types first.
+    defs = _comp_defs_from_cached(roots)
+    comp = defs.get(word)
+    if comp is not None:
+        kind = type(comp).__name__.lower()
+        props = getattr(comp, "properties", {}) or {}
+        out = [f"**{kind}** `{word}`"]
+        display_name = props.get("name")
+        desc = props.get("desc")
+        if display_name:
+            out.append("")
+            out.append(f"**{display_name}**")
+        if desc:
+            out.append("")
+            out.append(str(desc))
+        if not display_name and not desc:
+            out.append("")
+            out.append(f"User-defined `{kind}` type.")
+        return "\n".join(out)
+
+    # 2-4. Static catalogues. Each gets its own role label so the user knows
+    # *why* something matched.
+    for catalogue, role in (
+        (SYSTEMRDL_TOP_KEYWORDS,    "keyword"),
+        (SYSTEMRDL_PROPERTIES,      "property"),
+        (SYSTEMRDL_RW_VALUES,       "access mode"),
+        (SYSTEMRDL_ONWRITE_VALUES,  "onwrite value"),
+        (SYSTEMRDL_ONREAD_VALUES,   "onread value"),
+    ):
+        if word in catalogue:
+            return f"**`{word}`** _({role})_\n\n{catalogue[word]}"
+
+    return None
 
 
 def _hover_text_for_node(node: Any) -> str | None:
@@ -1388,17 +1440,38 @@ def build_server() -> LanguageServer:
 
     @server.feature("textDocument/hover")
     def _on_hover(_ls: LanguageServer, params: Any) -> Any | None:
+        """Hover resolution combines four sources, most specific first:
+
+        1. **Instance lookup** by source line — a register/field node whose
+           ``inst_src_ref.line`` matches the cursor line. Wins because instance
+           hover surfaces resolved address/reset/access — the live computed values.
+        2. **User-defined types** from ``comp_defs`` — when the word matches a
+           type definition, show its kind/name/desc.
+        3. **Static catalogue** of keywords, properties, and access values.
+
+        Anything not in 1–3 returns None and the editor shows nothing — better
+        than displaying a useless "no info" tooltip.
+        """
         from lsprotocol.types import Hover, MarkupContent, MarkupKind
 
         cached = state.cache.get(params.text_document.uri)
         if cached is None or not cached.roots:
             return None
-        node = _node_at_position(
-            cached.roots, params.position.line, params.position.character
-        )
-        if node is None:
-            return None
-        markdown = _hover_text_for_node(node)
+
+        line, char = params.position.line, params.position.character
+
+        # 1. Instance lookup first — gives the richest answer when it hits.
+        node = _node_at_position(cached.roots, line, char)
+        markdown = _hover_text_for_node(node) if node is not None else None
+
+        # 2-3. Fall back to word-based catalogue lookup for keywords / properties /
+        # access values / type names. Catches every identifier not already
+        # answered by the elaborated tree's source-line matches.
+        if markdown is None:
+            word = _word_at_position(cached.text, line, char)
+            if word:
+                markdown = _hover_for_word(word, cached.roots)
+
         if markdown is None:
             return None
         return Hover(contents=MarkupContent(kind=MarkupKind.Markdown, value=markdown))
