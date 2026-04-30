@@ -473,9 +473,12 @@ async function revealLocation(loc: SourceLoc): Promise<void> {
     // first character. revealRange + flash still uses the broader range so the
     // visual context is intact.
     const cursorAtStart = new vscode.Range(range.start, range.start);
+    // preserveFocus: true keeps keyboard focus in the webview so arrow-key
+    // navigation through the tree keeps working after a reveal. Editor scrolls
+    // and gets a flash highlight; user can still click into it to type.
     const editor = await vscode.window.showTextDocument(doc, {
       viewColumn: vscode.ViewColumn.One,
-      preserveFocus: false,
+      preserveFocus: true,
       selection: cursorAtStart,
     });
     editor.revealRange(range, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
