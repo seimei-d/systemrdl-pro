@@ -431,7 +431,9 @@ function renderTree() {
   host.innerHTML = '';
   const tree = document.createElement('div');
   tree.className = 'tree';
-  walkChildren(root, tree, 0, [root.name]);
+  // Render the root itself as the topmost row so the user can fold the entire
+  // tab content with one click on its caret.
+  walk(root, tree, 0, []);
   host.appendChild(tree);
   const hint = document.getElementById('filter-hint');
   if (state.filter) {
@@ -476,20 +478,25 @@ function walk(node, host, depth, segs) {
   if (node.kind === 'addrmap' || node.kind === 'regfile') {
     const containerKey = segs.concat([node.name]).join('.');
     const isCollapsed = !state.filter && state.collapsedKeys.has(containerKey);
-    const caret = isCollapsed ? '▶' : '▼';
+    const caretChar = isCollapsed ? '▶' : '▼';
     const row = document.createElement('div');
     row.className = 'row container ' + indent;
     const kindLabel = node.kind + (node.type ? ' (' + node.type + ')' : '');
-    row.innerHTML = '<span class="caret">' + caret + '</span>' +
+    row.innerHTML = '<span class="caret caret-toggle" title="' +
+      (isCollapsed ? 'Click to expand' : 'Click to collapse') + '">' + caretChar + '</span>' +
       '<span class="addr">' + node.address + '</span>' +
       '<span class="name">' + escapeHtml(node.name) + '</span>' +
       '<span class="access">' + escapeHtml(kindLabel) + '</span>';
-    row.title = isCollapsed ? 'Click to expand' : 'Click to collapse';
-    row.addEventListener('click', () => {
-      if (state.collapsedKeys.has(containerKey)) state.collapsedKeys.delete(containerKey);
-      else state.collapsedKeys.add(containerKey);
-      renderTree();
-    });
+    const caretEl = row.querySelector('.caret-toggle');
+    if (caretEl) {
+      caretEl.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (state.collapsedKeys.has(containerKey)) state.collapsedKeys.delete(containerKey);
+        else state.collapsedKeys.add(containerKey);
+        renderTree();
+      });
+    }
+    row.title = 'Click caret to fold';
     host.appendChild(row);
     if (!isCollapsed) {
       walkChildren(node, host, depth + 1, segs.concat([node.name]));
@@ -690,6 +697,9 @@ function renderHtml(filename: string): string {
   .row.selected { background: var(--rdl-selected); border-left: 3px solid var(--rdl-accent);
     padding-left: 13px; }
   .row .caret { color: var(--rdl-dim); font-size: 11px; text-align: right; }
+  .row .caret-toggle { cursor: pointer; padding: 0 4px; border-radius: 2px;
+    transition: background 0.08s; }
+  .row .caret-toggle:hover { background: rgba(74,158,255,0.18); color: var(--rdl-fg); }
   .row .addr { color: var(--rdl-dim); }
   .row .name { font-weight: 600; }
   .row .access { color: var(--rdl-dim); font-size: 12px; text-align: right;

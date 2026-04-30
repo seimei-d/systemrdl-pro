@@ -628,6 +628,9 @@ function renderViewerHtml(): string {
   .row.selected { background: var(--rdl-selected); border-left: 3px solid var(--rdl-accent);
     padding-left: 13px; }
   .row .caret { color: var(--rdl-dim); font-size: 11px; text-align: right; }
+  .row .caret-toggle { cursor: pointer; padding: 0 4px; border-radius: 2px;
+    transition: background 0.08s; }
+  .row .caret-toggle:hover { background: rgba(74,158,255,0.18); color: var(--rdl-fg); }
   .row .addr { color: var(--rdl-dim); }
   .row .name { font-weight: 600; }
   .row .access { color: var(--rdl-dim); font-size: 12px; text-align: right;
@@ -807,10 +810,11 @@ function renderTree() {
   host.innerHTML = '';
   const tree = document.createElement('div');
   tree.className = 'tree';
-  // Render the active root's children directly — the root itself IS the tab.
-  // For nested addrmaps deeper in the hierarchy we DO render header rows so the
-  // "two CTRLs from cpu0 + cpu1" case stays disambiguated.
-  walkChildren(root, tree, 0, [root.name]);
+  // Render the root itself as a header row at depth 0 so the user can collapse
+  // the entire tab content with one click. Previously the root was implicit in
+  // the tab strip and only its children were visible — that left no way to
+  // fold a 1000-reg addrmap (user feedback "нельзя свернуть addrmap").
+  walk(root, tree, 0, []);
   host.appendChild(tree);
 
   // Update filter hint with match count if filter is active.
@@ -872,20 +876,32 @@ function walk(node, host, depth, pathSegments) {
     // Filter active overrides manual collapse — otherwise filtering would hide
     // matches that live inside a folded branch.
     const isCollapsed = !state.filter && state.collapsedKeys.has(containerKey);
-    const caret = isCollapsed ? '▶' : '▼';
+    const caretChar = isCollapsed ? '▶' : '▼';
     const row = document.createElement('div');
     row.className = 'row container ' + indent;
     const kindLabel = node.kind + (node.type ? ' (' + node.type + ')' : '');
-    row.innerHTML = '<span class="caret">' + caret + '</span>' +
+    row.innerHTML = '<span class="caret caret-toggle" title="' +
+      (isCollapsed ? 'Click to expand' : 'Click to collapse') + '">' + caretChar + '</span>' +
       '<span class="addr">' + node.address + '</span>' +
       '<span class="name">' + escapeHtml(node.name) + '</span>' +
       '<span class="access" title="' + escapeHtml(kindLabel) + '">' + escapeHtml(kindLabel) + '</span>';
-    row.title = isCollapsed ? 'Click to expand' : 'Click to collapse';
-    row.addEventListener('click', () => {
-      if (state.collapsedKeys.has(containerKey)) state.collapsedKeys.delete(containerKey);
-      else state.collapsedKeys.add(containerKey);
-      renderTree();
-    });
+    // Two distinct click targets — user feedback "при клик на кнопку свернуть
+    // идет навигация на элемент". Caret toggles, body reveals.
+    const caretEl = row.querySelector('.caret-toggle');
+    if (caretEl) {
+      caretEl.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (state.collapsedKeys.has(containerKey)) state.collapsedKeys.delete(containerKey);
+        else state.collapsedKeys.add(containerKey);
+        renderTree();
+      });
+    }
+    if (node.source) {
+      row.title = 'Click to reveal in editor (caret to fold)';
+      row.addEventListener('click', () => postReveal(node.source));
+    } else {
+      row.title = 'Click caret to fold';
+    }
     host.appendChild(row);
     if (!isCollapsed) {
       walkChildren(node, host, depth + 1, pathSegments.concat([node.name]));
