@@ -18,7 +18,7 @@ empty viewer panel that opens via "Show Memory Map" command.
 - [ ] `textDocument/hover` — resolved address, width, sw/hw access
 - [ ] `textDocument/documentSymbol` — outline of regfiles + regs in editor sidebar
 - [x] `textDocument/definition` — goto-def for component types and parameters
-- [ ] `textDocument/completion` — register names, properties
+- [x] `textDocument/completion` — register names, properties
 - [ ] `incl_search_paths` setting + auto-discovery from `peakrdl.toml`
 - [x] **Eng-review-locked Week 2 deliverables**:
   - [x] LSP supervisor + "Restart LSP" command (silent-failure gap #1)

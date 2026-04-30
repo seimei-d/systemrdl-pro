@@ -34,6 +34,9 @@ from lsprotocol.types import (
     TEXT_DOCUMENT_DID_OPEN,
     TEXT_DOCUMENT_DID_SAVE,
     WORKSPACE_DID_CHANGE_CONFIGURATION,
+    CompletionItem,
+    CompletionItemKind,
+    CompletionList,
     Diagnostic,
     DiagnosticSeverity,
     DidChangeConfigurationParams,
@@ -56,7 +59,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 SERVER_NAME = "systemrdl-lsp"
-SERVER_VERSION = "0.7.0"
+SERVER_VERSION = "0.8.0"
 DEBOUNCE_SECONDS = 0.3
 ELABORATED_TREE_SCHEMA_VERSION = "0.1.0"
 # Eng-review safety net #3: cap a single elaborate pass at 10s wall-clock.
@@ -816,6 +819,98 @@ def _serialize_root(
 
 
 # ---------------------------------------------------------------------------
+# textDocument/completion (W2-7)
+# ---------------------------------------------------------------------------
+
+
+# Static keyword tables. Categorised so the CompletionItemKind hint helps the
+# editor sort and icon-decorate suggestions correctly. The lists deliberately
+# under-cover the SystemRDL spec (no UDPs, no signal modifiers) — those would
+# need scope-aware completion to avoid noise. v1 covers the 80% case: writing
+# top-level addrmap/regfile/reg/field bodies with the most common properties.
+SYSTEMRDL_TOP_KEYWORDS = (
+    "addrmap", "regfile", "reg", "field", "enum", "mem", "signal",
+    "external", "internal",
+    "default", "property", "constraint",
+    "true", "false",
+)
+
+SYSTEMRDL_PROPERTIES = (
+    # Component metadata
+    "name", "desc",
+    # Field access semantics
+    "sw", "hw",
+    "reset", "resetsignal",
+    "rclr", "rset", "ruser",
+    "onread", "onwrite",
+    "swacc", "swmod", "swwe", "swwel",
+    "we", "wel",
+    "anded", "ored", "xored",
+    "fieldwidth", "encode",
+    "singlepulse",
+    # Register
+    "regwidth", "accesswidth", "shared",
+    # Addrmap / regfile
+    "alignment", "sharedextbus", "errextbus", "bigendian", "littleendian",
+    "addressing", "lsb0", "msb0",
+    # Counter
+    "counter", "incr", "decr", "incrwidth", "decrwidth",
+    "incrvalue", "decrvalue", "saturate",
+    "incrsaturate", "decrsaturate",
+    "threshold", "incrthreshold", "decrthreshold",
+    "overflow", "underflow",
+    # Interrupt
+    "intr", "intr type", "enable", "mask", "haltenable", "haltmask",
+    "stickybit", "sticky",
+)
+
+SYSTEMRDL_ACCESS_VALUES = (
+    "rw", "ro", "wo", "r", "w", "na",
+    "woclr", "woset", "wclr", "wset",
+    "wzc", "wzs", "wzt",
+    "rclr", "rset",
+)
+
+
+def _completion_items_static() -> list[CompletionItem]:
+    """Build the keyword/property/value catalogue once per request — these never
+    change at runtime, but pygls can't reuse a list across requests safely (the
+    items get serialised in place), so we recreate cheaply.
+    """
+    items: list[CompletionItem] = []
+    for kw in SYSTEMRDL_TOP_KEYWORDS:
+        items.append(CompletionItem(label=kw, kind=CompletionItemKind.Keyword))
+    for prop in SYSTEMRDL_PROPERTIES:
+        items.append(CompletionItem(label=prop, kind=CompletionItemKind.Property))
+    for val in SYSTEMRDL_ACCESS_VALUES:
+        items.append(CompletionItem(label=val, kind=CompletionItemKind.EnumMember))
+    return items
+
+
+def _completion_items_for_types(roots: list["RootNode"]) -> list[CompletionItem]:
+    """Pull every top-level component definition out of the cached compile.
+
+    Uses :func:`_comp_defs_from_cached` to read ``inst.comp_defs`` — the same
+    registry textDocument/definition resolves against — so the two providers
+    can never disagree on what types exist. ``detail`` carries the component
+    kind (``addrmap``, ``regfile``, ``reg``, ``field``, …) which VSCode shows
+    on the right side of the suggestion popup.
+    """
+    items: list[CompletionItem] = []
+    defs = _comp_defs_from_cached(roots)
+    for name, comp in defs.items():
+        kind_label = type(comp).__name__.lower()  # "addrmap" / "regfile" / "reg" / "field"
+        items.append(
+            CompletionItem(
+                label=name,
+                kind=CompletionItemKind.Class,
+                detail=kind_label,
+            )
+        )
+    return items
+
+
+# ---------------------------------------------------------------------------
 # textDocument/definition (W2-6)
 # ---------------------------------------------------------------------------
 
@@ -1178,6 +1273,23 @@ def build_server() -> LanguageServer:
         if cached is None or not cached.roots:
             return []
         return _document_symbols(cached.roots)
+
+    @server.feature("textDocument/completion")
+    def _on_completion(_ls: LanguageServer, params: Any) -> CompletionList:
+        """Suggest SystemRDL keywords, common properties, access values, and
+        every type defined in the cached compile.
+
+        v1 is **scope-blind**: the same catalogue is offered everywhere — VSCode
+        filters by what the user has typed so the noise rarely shows. Real
+        scope handling (don't suggest ``addrmap`` inside a field body, do
+        suggest ``reset`` only inside a field/reg) needs an LL position-aware
+        analyser; defer until users complain.
+        """
+        items = _completion_items_static()
+        cached = state.cache.get(params.text_document.uri)
+        if cached is not None and cached.roots:
+            items.extend(_completion_items_for_types(cached.roots))
+        return CompletionList(is_incomplete=False, items=items)
 
     @server.feature("textDocument/definition")
     def _on_definition(_ls: LanguageServer, params: Any) -> list[Location] | Location | None:

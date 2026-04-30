@@ -18,6 +18,8 @@ from systemrdl_lsp.server import (
     ElaborationCache,
     _comp_defs_from_cached,
     _compile_text,
+    _completion_items_for_types,
+    _completion_items_static,
     _definition_location,
     _document_symbols,
     _elaborate,
@@ -224,6 +226,39 @@ def test_definition_returns_none_for_unknown_word(tmp_path):
     try:
         defs = _comp_defs_from_cached(roots)
         assert "doesnotexist" not in defs
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# textDocument/completion (W2-7)
+# ---------------------------------------------------------------------------
+
+
+def test_static_completion_includes_keywords_and_access_values():
+    items = _completion_items_static()
+    labels = {it.label for it in items}
+    # Top-level keywords
+    assert "addrmap" in labels and "reg" in labels and "field" in labels
+    # Properties
+    assert "sw" in labels and "hw" in labels and "reset" in labels
+    # Access values
+    assert "rw" in labels and "ro" in labels and "woclr" in labels
+
+
+def test_completion_offers_user_defined_types(tmp_path):
+    """The viewer's typed sample registers ``ctrl_t``, ``status_reg_t``, etc.
+    Those names should appear in the completion list so the user can pick them
+    when typing an instantiation site."""
+    uri = (tmp_path / "x.rdl").as_uri()
+    _msgs, roots, tmp = _compile_text(uri, TYPED_RDL)
+    try:
+        items = _completion_items_for_types(roots)
+        labels = {it.label for it in items}
+        assert "my_ctrl_t" in labels and "top" in labels
+        # Detail describes the kind so VSCode can group/filter intelligently.
+        ctrl = next(it for it in items if it.label == "my_ctrl_t")
+        assert ctrl.detail == "reg", f"expected 'reg', got {ctrl.detail!r}"
     finally:
         tmp.unlink(missing_ok=True)
 
