@@ -78,6 +78,33 @@ prerequisite, already in Pass 5 design tokens.
 
 ---
 
+### TODO-V1: Polish caret-toggle button visual
+
+**What:** The `.caret-toggle` span in the tree-pane container row works but reads
+as a hover-highlighted text glyph, not a button. User feedback 2026-04-30:
+"UI кнопки ужасен."
+
+**Why:** Affordance is unclear — the caret looks identical to a regular row's
+caret column except on hover. New users don't realise it's a click target.
+
+**Pros (of fix):** Higher discoverability, more polished feel.
+**Cons:** Risks breaking the tree's information density — anything bigger
+crowds the addr/name columns.
+
+**Sketch of fix:**
+- Slightly bolder caret glyph (▾/▸ instead of ▼/▶, or use Codicon chevrons
+  via vscode-codicons font when bundled in the webview)
+- Subtle background even when not hovered (low-opacity panel tint)
+- Increase clickable area without growing visible width (use ::before
+  pseudo-element with negative margin)
+- Possibly switch to a real `<button>` element with VSCode-themed background
+  for proper a11y semantics (also helps WAI-ARIA work).
+
+**Context:** Logged at 0.9.1. Defer until WAI-ARIA + keyboard nav lands so the
+visual + a11y work happens in one pass.
+
+---
+
 ### TODO-R1: Refactor `systemrdl_lsp/server.py` into focused modules
 
 **What:** Split the now ~1300-line `server.py` into themed modules:

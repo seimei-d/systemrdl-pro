@@ -337,7 +337,12 @@ if (args.open) {
 // ---------------------------------------------------------------------------
 
 const RENDER_JS = `
-let state = { roots: [], activeRootIndex: 0, selectedRegKey: null, filter: '', collapsedKeys: new Set() };
+let state = {
+  roots: [], activeRootIndex: 0,
+  selectedRegKey: null, focusedKey: null,
+  filter: '', collapsedKeys: new Set(),
+  flatList: []
+};
 
 function setConn(cls, text) {
   const el = document.getElementById('conn');
@@ -388,6 +393,61 @@ document.getElementById('filter-input').addEventListener('input', (e) => {
   renderTree();
 });
 
+// Keyboard navigation. Same WAI-ARIA tree pattern as the VSCode webview:
+//   ↑/↓        — prev/next visible row
+//   →          — expand collapsed container, else first child
+//   ←          — collapse expanded container, else parent
+//   Enter / Space — toggle (container) or select (reg)
+//   Home / End — first / last
+document.getElementById('tree-host').addEventListener('keydown', (e) => {
+  const list = state.flatList;
+  if (!list.length) return;
+  const idx = list.findIndex(it => it.key === state.focusedKey);
+  const cur = idx >= 0 ? list[idx] : null;
+
+  function moveTo(j) {
+    if (j < 0 || j >= list.length) return;
+    state.focusedKey = list[j].key;
+    renderTree();
+  }
+  function findParentIdx(of) {
+    for (let j = of - 1; j >= 0; j--) if (list[j].depth < list[of].depth) return j;
+    return -1;
+  }
+
+  switch (e.key) {
+    case 'ArrowDown': moveTo(idx + 1); e.preventDefault(); break;
+    case 'ArrowUp':   moveTo(idx > 0 ? idx - 1 : 0); e.preventDefault(); break;
+    case 'Home':      moveTo(0); e.preventDefault(); break;
+    case 'End':       moveTo(list.length - 1); e.preventDefault(); break;
+    case 'ArrowRight':
+      if (cur && cur.kind === 'container') {
+        if (!cur.expanded && cur.hasChildren) toggleCollapse(cur.key);
+        else if (idx + 1 < list.length && list[idx + 1].depth > cur.depth) moveTo(idx + 1);
+      }
+      e.preventDefault();
+      break;
+    case 'ArrowLeft':
+      if (cur && cur.kind === 'container' && cur.expanded) toggleCollapse(cur.key);
+      else if (cur) {
+        const p = findParentIdx(idx);
+        if (p >= 0) moveTo(p);
+      }
+      e.preventDefault();
+      break;
+    case 'Enter':
+    case ' ':
+      if (!cur) break;
+      if (cur.kind === 'container') toggleCollapse(cur.key);
+      else {
+        state.selectedRegKey = cur.key;
+        renderTree(); renderDetail();
+      }
+      e.preventDefault();
+      break;
+  }
+});
+
 function applyTree(tree) {
   state.roots = tree.roots || [];
   if (state.activeRootIndex >= state.roots.length) state.activeRootIndex = 0;
@@ -429,10 +489,9 @@ function renderTree() {
   const root = state.roots[state.activeRootIndex];
   const host = document.getElementById('tree-host');
   host.innerHTML = '';
+  state.flatList = [];
   const tree = document.createElement('div');
   tree.className = 'tree';
-  // Render the root itself as the topmost row so the user can fold the entire
-  // tab content with one click on its caret.
   walk(root, tree, 0, []);
   host.appendChild(tree);
   const hint = document.getElementById('filter-hint');
@@ -440,9 +499,24 @@ function renderTree() {
     const visible = host.querySelectorAll('.row:not(.container)').length;
     hint.textContent = visible + ' match' + (visible === 1 ? '' : 'es');
   } else { hint.textContent = ''; }
-  const sel = host.querySelector('.row.selected');
-  if (sel) sel.scrollIntoView({ block: 'nearest' });
+
+  const focusVisible = state.focusedKey && state.flatList.some(it => it.key === state.focusedKey);
+  if (!focusVisible) {
+    state.focusedKey = state.selectedRegKey || (state.flatList[0] && state.flatList[0].key) || null;
+  }
+  const focusedEl = state.focusedKey
+    ? host.querySelector('[data-key="' + cssEscape(state.focusedKey) + '"]')
+    : null;
+  if (focusedEl) {
+    focusedEl.classList.add('focused');
+    focusedEl.scrollIntoView({ block: 'nearest' });
+  } else {
+    const sel = host.querySelector('.row.selected');
+    if (sel) sel.scrollIntoView({ block: 'nearest' });
+  }
 }
+
+function cssEscape(s) { return String(s).replace(/"/g, '\\\\"'); }
 
 function looksLikeHex(s) {
   if (!s) return false;
@@ -482,6 +556,11 @@ function walk(node, host, depth, segs) {
     const row = document.createElement('div');
     row.className = 'row container ' + indent;
     const kindLabel = node.kind + (node.type ? ' (' + node.type + ')' : '');
+    row.setAttribute('role', 'treeitem');
+    row.setAttribute('aria-level', String(depth + 1));
+    row.setAttribute('aria-expanded', isCollapsed ? 'false' : 'true');
+    row.setAttribute('data-key', containerKey);
+    row.setAttribute('data-kind', 'container');
     row.innerHTML = '<span class="caret caret-toggle" title="' +
       (isCollapsed ? 'Click to expand' : 'Click to collapse') + '">' + caretChar + '</span>' +
       '<span class="addr">' + node.address + '</span>' +
@@ -491,13 +570,13 @@ function walk(node, host, depth, segs) {
     if (caretEl) {
       caretEl.addEventListener('click', (e) => {
         e.stopPropagation();
-        if (state.collapsedKeys.has(containerKey)) state.collapsedKeys.delete(containerKey);
-        else state.collapsedKeys.add(containerKey);
-        renderTree();
+        toggleCollapse(containerKey);
       });
     }
     row.title = 'Click caret to fold';
+    row.addEventListener('click', () => { state.focusedKey = containerKey; renderTree(); });
     host.appendChild(row);
+    state.flatList.push({ key: containerKey, kind: 'container', depth, expanded: !isCollapsed, hasChildren: (node.children || []).length > 0 });
     if (!isCollapsed) {
       walkChildren(node, host, depth + 1, segs.concat([node.name]));
     }
@@ -509,16 +588,30 @@ function walk(node, host, depth, segs) {
     const selected = state.selectedRegKey === key;
     const row = document.createElement('div');
     row.className = 'row ' + indent + (selected ? ' selected' : '');
+    row.setAttribute('role', 'treeitem');
+    row.setAttribute('aria-level', String(depth + 1));
+    row.setAttribute('aria-selected', selected ? 'true' : 'false');
+    row.setAttribute('data-key', key);
+    row.setAttribute('data-kind', 'reg');
     row.innerHTML = '<span class="caret"> </span>' +
       '<span class="addr">' + node.address + '</span>' +
       '<span class="name">' + escapeHtml(node.name) + '</span>' +
       '<span class="access">' + (node.accessSummary || '') + '</span>';
     row.addEventListener('click', () => {
       state.selectedRegKey = key;
+      state.focusedKey = key;
       renderTree(); renderDetail();
     });
     host.appendChild(row);
+    state.flatList.push({ key, kind: 'reg', depth, expanded: false, hasChildren: false });
   }
+}
+
+function toggleCollapse(containerKey) {
+  if (state.collapsedKeys.has(containerKey)) state.collapsedKeys.delete(containerKey);
+  else state.collapsedKeys.add(containerKey);
+  state.focusedKey = containerKey;
+  renderTree();
 }
 
 function findFirstRegPath(node, segs) {
@@ -696,6 +789,8 @@ function renderHtml(filename: string): string {
   .row:hover { background: rgba(74,158,255,0.08); }
   .row.selected { background: var(--rdl-selected); border-left: 3px solid var(--rdl-accent);
     padding-left: 13px; }
+  .row.focused { outline: 1px solid var(--rdl-accent); outline-offset: -1px; }
+  .tree-host:focus { outline: none; }
   .row .caret { color: var(--rdl-dim); font-size: 11px; text-align: right; }
   .row .caret-toggle { cursor: pointer; padding: 0 4px; border-radius: 2px;
     transition: background 0.08s; }
@@ -770,7 +865,7 @@ function renderHtml(filename: string): string {
         <input id="filter-input" type="text" placeholder="Filter by name, address (0x10), field, or access (rw)…" />
         <div id="filter-hint" class="filter-hint"></div>
       </div>
-      <div id="tree-host" class="tree-host">
+      <div id="tree-host" class="tree-host" tabindex="0" role="tree" aria-label="Memory map tree">
         <div class="empty">
           <h2>Memory map viewer</h2>
           <p>Waiting for first compile of <code>${escapeAttr(filename)}</code>…</p>

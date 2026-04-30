@@ -38,7 +38,7 @@ All design decisions D4-D15 from the design review are non-negotiable inputs.
 - [ ] Stale-bar + library-only empty state + partial-tab amber-dot (D7/D8/D9)
 - [ ] Dark + light theme tokens (D14)
 - [ ] Auto-stack at < 700px viewport (D13)
-- [ ] WAI-ARIA Tree + keyboard navigation
+- [x] WAI-ARIA Tree + keyboard navigation
 - [x] **`rdl-viewer` CLI walking skeleton**: Bun HTTP server + fs.watch +
       `python -m systemrdl_lsp.dump` backend + inline SPA + SSE push.
       Renderer is duplicated for now (extension webview + CLI SPA);

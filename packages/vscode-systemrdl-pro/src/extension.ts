@@ -627,6 +627,9 @@ function renderViewerHtml(): string {
   .row:hover { background: rgba(74,158,255,0.08); }
   .row.selected { background: var(--rdl-selected); border-left: 3px solid var(--rdl-accent);
     padding-left: 13px; }
+  .row.focused { outline: 1px solid var(--rdl-accent); outline-offset: -1px; }
+  .tree-host:focus { outline: none; }
+  .tree-host:focus .row.focused { outline-color: var(--rdl-accent); }
   .row .caret { color: var(--rdl-dim); font-size: 11px; text-align: right; }
   .row .caret-toggle { cursor: pointer; padding: 0 4px; border-radius: 2px;
     transition: background 0.08s; }
@@ -705,7 +708,7 @@ function renderViewerHtml(): string {
         <input id="filter-input" type="text" placeholder="Filter by name, address (0x10), field, or access (rw)…" />
         <div id="filter-hint" class="filter-hint"></div>
       </div>
-      <div id="tree-host" class="tree-host">
+      <div id="tree-host" class="tree-host" tabindex="0" role="tree" aria-label="Memory map tree">
         <div class="empty">
           <h2>Memory map viewer</h2>
           <p>Waiting for elaborated tree from <code>systemrdl-lsp</code>…</p>
@@ -720,10 +723,17 @@ function renderViewerHtml(): string {
 const vscode = acquireVsCodeApi();
 
 // State persisted across messages within the same panel session.
-// collapsedKeys holds dotted paths of containers (addrmap/regfile) the user
-// has manually collapsed. Survives tree refreshes — paths are stable as long
-// as the user doesn't rename instances. Cleared on tab switch.
-let state = { roots: [], activeRootIndex: 0, selectedRegKey: null, filter: '', collapsedKeys: new Set() };
+// - collapsedKeys: dotted paths of containers the user has manually folded.
+// - focusedKey: keyboard-driven cursor position (independent of selectedRegKey
+//   so arrow keys can move through containers without changing the detail pane).
+// - flatList: rebuilt every renderTree() — ordered list of visible rows with
+//   metadata, used by the keyboard handler to jump to the next/prev/parent/child.
+let state = {
+  roots: [], activeRootIndex: 0,
+  selectedRegKey: null, focusedKey: null,
+  filter: '', collapsedKeys: new Set(),
+  flatList: []
+};
 
 window.addEventListener('message', (event) => {
   const m = event.data;
@@ -757,6 +767,66 @@ document.addEventListener('keydown', (e) => {
 document.getElementById('filter-input').addEventListener('input', (e) => {
   state.filter = e.target.value.toLowerCase();
   renderTree();
+});
+
+// Keyboard navigation on the tree host. Standard WAI-ARIA tree pattern:
+//   ↑/↓        — move focus to previous/next visible row
+//   →          — expand a collapsed container, else move to first child
+//   ←          — collapse an expanded container, else move to parent
+//   Enter / Space — reveal in editor (reg) or toggle (container)
+//   Home / End — first / last visible row
+document.getElementById('tree-host').addEventListener('keydown', (e) => {
+  const list = state.flatList;
+  if (!list.length) return;
+  const idx = list.findIndex(it => it.key === state.focusedKey);
+  const cur = idx >= 0 ? list[idx] : null;
+
+  function moveTo(j) {
+    if (j < 0 || j >= list.length) return;
+    state.focusedKey = list[j].key;
+    renderTree();
+  }
+  function findParentIdx(of) {
+    for (let j = of - 1; j >= 0; j--) {
+      if (list[j].depth < list[of].depth) return j;
+    }
+    return -1;
+  }
+
+  switch (e.key) {
+    case 'ArrowDown': moveTo(idx + 1); e.preventDefault(); break;
+    case 'ArrowUp':   moveTo(idx > 0 ? idx - 1 : 0); e.preventDefault(); break;
+    case 'Home':      moveTo(0); e.preventDefault(); break;
+    case 'End':       moveTo(list.length - 1); e.preventDefault(); break;
+    case 'ArrowRight':
+      if (cur && cur.kind === 'container') {
+        if (!cur.expanded && cur.hasChildren) toggleCollapse(cur.key);
+        else if (idx + 1 < list.length && list[idx + 1].depth > cur.depth) moveTo(idx + 1);
+      }
+      e.preventDefault();
+      break;
+    case 'ArrowLeft':
+      if (cur && cur.kind === 'container' && cur.expanded) toggleCollapse(cur.key);
+      else if (cur) {
+        const p = findParentIdx(idx);
+        if (p >= 0) moveTo(p);
+      }
+      e.preventDefault();
+      break;
+    case 'Enter':
+    case ' ':
+      if (!cur) break;
+      if (cur.kind === 'container') {
+        toggleCollapse(cur.key);
+      } else {
+        state.selectedRegKey = cur.key;
+        renderTree();
+        renderDetail();
+        if (cur.source) postReveal(cur.source);
+      }
+      e.preventDefault();
+      break;
+  }
 });
 
 function applyTree(tree) {
@@ -808,12 +878,10 @@ function renderTree() {
   const root = state.roots[state.activeRootIndex];
   const host = document.getElementById('tree-host');
   host.innerHTML = '';
+  // flatList drives keyboard navigation — one entry per visible row in DFS order.
+  state.flatList = [];
   const tree = document.createElement('div');
   tree.className = 'tree';
-  // Render the root itself as a header row at depth 0 so the user can collapse
-  // the entire tab content with one click. Previously the root was implicit in
-  // the tab strip and only its children were visible — that left no way to
-  // fold a 1000-reg addrmap (user feedback "нельзя свернуть addrmap").
   walk(root, tree, 0, []);
   host.appendChild(tree);
 
@@ -826,9 +894,30 @@ function renderTree() {
     hint.textContent = '';
   }
 
-  const sel = host.querySelector('.row.selected');
-  if (sel) sel.scrollIntoView({ block: 'nearest' });
+  // Default focus to selection if nothing focused yet, or if focus points
+  // at a row that's no longer visible (e.g. parent collapsed the focused child).
+  const focusVisible = state.focusedKey && state.flatList.some(it => it.key === state.focusedKey);
+  if (!focusVisible) {
+    state.focusedKey = state.selectedRegKey || (state.flatList[0] && state.flatList[0].key) || null;
+  }
+  // Mark the focused row visually + scroll it into view.
+  const focusedEl = state.focusedKey
+    ? host.querySelector('[data-key="' + cssEscape(state.focusedKey) + '"]')
+    : null;
+  if (focusedEl) {
+    focusedEl.classList.add('focused');
+    focusedEl.scrollIntoView({ block: 'nearest' });
+  } else {
+    const sel = host.querySelector('.row.selected');
+    if (sel) sel.scrollIntoView({ block: 'nearest' });
+  }
 }
+
+// Quoted attribute selector — paths can contain '.' which collide with class
+// selectors, but [data-key="..."] handles dots fine. We still need to escape
+// embedded quotes; SystemRDL identifiers don't allow them, so this is a no-op
+// for the typical case but keeps the selector safe for paranoid inputs.
+function cssEscape(s) { return String(s).replace(/"/g, '\\\\"'); }
 
 // Returns true if the subtree rooted at 'node' matches the filter. The filter
 // is checked against (in order): the reg/container name, the register address,
@@ -870,39 +959,42 @@ function walk(node, host, depth, pathSegments) {
   // Filter: skip entire subtree if nothing inside matches.
   if (state.filter && !subtreeMatches(node, state.filter)) return;
   if (node.kind === 'addrmap' || node.kind === 'regfile') {
-    // Render container as a header row so nested addrmaps (cpu0, cpu1, …) are
-    // visible — otherwise their child registers collide visually.
     const containerKey = pathSegments.concat([node.name]).join('.');
-    // Filter active overrides manual collapse — otherwise filtering would hide
-    // matches that live inside a folded branch.
     const isCollapsed = !state.filter && state.collapsedKeys.has(containerKey);
     const caretChar = isCollapsed ? '▶' : '▼';
     const row = document.createElement('div');
     row.className = 'row container ' + indent;
     const kindLabel = node.kind + (node.type ? ' (' + node.type + ')' : '');
+    // ARIA: role=treeitem, aria-level (1-based), aria-expanded for containers.
+    row.setAttribute('role', 'treeitem');
+    row.setAttribute('aria-level', String(depth + 1));
+    row.setAttribute('aria-expanded', isCollapsed ? 'false' : 'true');
+    row.setAttribute('data-key', containerKey);
+    row.setAttribute('data-kind', 'container');
     row.innerHTML = '<span class="caret caret-toggle" title="' +
       (isCollapsed ? 'Click to expand' : 'Click to collapse') + '">' + caretChar + '</span>' +
       '<span class="addr">' + node.address + '</span>' +
       '<span class="name">' + escapeHtml(node.name) + '</span>' +
       '<span class="access" title="' + escapeHtml(kindLabel) + '">' + escapeHtml(kindLabel) + '</span>';
-    // Two distinct click targets — user feedback "при клик на кнопку свернуть
-    // идет навигация на элемент". Caret toggles, body reveals.
     const caretEl = row.querySelector('.caret-toggle');
     if (caretEl) {
       caretEl.addEventListener('click', (e) => {
         e.stopPropagation();
-        if (state.collapsedKeys.has(containerKey)) state.collapsedKeys.delete(containerKey);
-        else state.collapsedKeys.add(containerKey);
-        renderTree();
+        toggleCollapse(containerKey);
       });
     }
     if (node.source) {
       row.title = 'Click to reveal in editor (caret to fold)';
-      row.addEventListener('click', () => postReveal(node.source));
+      row.addEventListener('click', () => {
+        state.focusedKey = containerKey;
+        postReveal(node.source);
+      });
     } else {
       row.title = 'Click caret to fold';
+      row.addEventListener('click', () => { state.focusedKey = containerKey; renderTree(); });
     }
     host.appendChild(row);
+    state.flatList.push({ key: containerKey, kind: 'container', depth, expanded: !isCollapsed, hasChildren: (node.children || []).length > 0, source: node.source });
     if (!isCollapsed) {
       walkChildren(node, host, depth + 1, pathSegments.concat([node.name]));
     }
@@ -914,19 +1006,32 @@ function walk(node, host, depth, pathSegments) {
     const selected = state.selectedRegKey === key;
     const row = document.createElement('div');
     row.className = 'row ' + indent + (selected ? ' selected' : '');
+    row.setAttribute('role', 'treeitem');
+    row.setAttribute('aria-level', String(depth + 1));
+    row.setAttribute('aria-selected', selected ? 'true' : 'false');
+    row.setAttribute('data-key', key);
+    row.setAttribute('data-kind', 'reg');
     row.innerHTML = '<span class="caret"> </span>' +
       '<span class="addr">' + node.address + '</span>' +
       '<span class="name">' + escapeHtml(node.name) + '</span>' +
       '<span class="access">' + (node.accessSummary || '') + '</span>';
     row.addEventListener('click', () => {
       state.selectedRegKey = key;
+      state.focusedKey = key;
       renderTree();
       renderDetail();
-      // Reg click also reveals — feedback item: "при клике на регистр не переводит на нужный лайн"
       if (node.source) postReveal(node.source);
     });
     host.appendChild(row);
+    state.flatList.push({ key, kind: 'reg', depth, expanded: false, hasChildren: false, source: node.source });
   }
+}
+
+function toggleCollapse(containerKey) {
+  if (state.collapsedKeys.has(containerKey)) state.collapsedKeys.delete(containerKey);
+  else state.collapsedKeys.add(containerKey);
+  state.focusedKey = containerKey;
+  renderTree();
 }
 
 // Returns { key, reg, path } for the first register in DFS order.
