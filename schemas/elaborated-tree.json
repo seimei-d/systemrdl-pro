@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/madeinheaven-dev/systemrdl-pro/schemas/elaborated-tree.json",
+  "$id": "https://github.com/madeinheaven-devv/systemrdl-pro/schemas/elaborated-tree.json",
   "title": "SystemRDL Elaborated Tree",
   "description": "Source of truth for the elaborated SystemRDL register-map tree pushed from systemrdl-lsp to the viewer (Decision 9A: codegen in both directions). v0.1 — minimal shape for Week 1; expanded in Week 4 for live viewer.",
   "type": "object",

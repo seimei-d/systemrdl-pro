@@ -7,7 +7,7 @@ VSCode extension for SystemRDL 2.0 — live diagnostics + interactive memory-map
 
 ## Install
 
-1. Install the extension from the [Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=madeinheaven-dev.vscode-systemrdl-pro).
+1. Install the extension from the [Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=madeinheaven-devv.vscode-systemrdl-pro).
 2. The extension calls Python on activation. It will:
    - Use `systemrdl-pro.pythonPath` if set in your settings.
    - Otherwise read the active interpreter from the official `ms-python.python` extension.

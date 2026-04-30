@@ -27,7 +27,7 @@ The server speaks LSP over stdio. Editor integrations call:
 systemrdl-lsp
 ```
 
-For VSCode users, install the [`vscode-systemrdl-pro`](https://marketplace.visualstudio.com/items?itemName=madeinheaven-dev.vscode-systemrdl-pro)
+For VSCode users, install the [`vscode-systemrdl-pro`](https://marketplace.visualstudio.com/items?itemName=madeinheaven-devv.vscode-systemrdl-pro)
 extension — it manages the LSP for you.
 
 For Vim/Neovim/Helix/Emacs, configure your client to launch `systemrdl-lsp` for files matching
