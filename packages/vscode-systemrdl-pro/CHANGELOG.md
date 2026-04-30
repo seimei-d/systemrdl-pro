@@ -4,6 +4,31 @@ All notable changes to **SystemRDL Pro** are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [SemVer](https://semver.org/).
 
+## [0.17.0] — 2026-04-30
+
+### Changed
+
+- **Multi-tab Memory Map.** One panel per `.rdl` file (markdown-preview-style)
+  instead of a single shared panel. Open `chip_a.rdl`, run Show Memory Map,
+  switch to `chip_b.rdl`, run again — both tabs now coexist. Re-running on a
+  file that already has a panel just brings it forward.
+- **Status bar follows the active editor.** When you switch between two
+  `.rdl` files with open panels, the reg/error count tracks the focused file.
+- **Inlay hints moved to end-of-line** with `→ 0xADDR` glyph. Earlier
+  position broke names mid-word (`CTR (0x...)L`); end-of-line never collides.
+
+### Removed
+
+- **`📋 Open in Memory Map` CodeLens** — redundant with `Ctrl+Shift+V`
+  shortcut and the `📊 N regs · 0x..0x` summary lens stays.
+
+### Fixed
+
+- **Bit-field grid redesign.** Fields now span their full width as one cell
+  (was: one cell per bit, name clipped to 1 letter). Datasheet-style row
+  with bit indices on top, colored field cells underneath, gaps render as
+  reserved cells.
+
 ## [0.16.0] — 2026-04-30
 
 Major UX upgrade across editor and viewer.

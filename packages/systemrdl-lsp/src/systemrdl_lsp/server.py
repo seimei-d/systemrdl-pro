@@ -1009,62 +1009,66 @@ def _folding_ranges_from_text(text: str) -> list[FoldingRange]:
     return ranges
 
 
-def _inlay_hints_for_addressables(roots: list[RootNode], path: pathlib.Path) -> list[InlayHint]:
-    """Produce inlay hints showing the resolved absolute address after each
-    register / regfile / addrmap instance name.
+def _inlay_hints_for_addressables(
+    roots: list[RootNode], path: pathlib.Path, buffer_text: str
+) -> list[InlayHint]:
+    """Inlay hints showing the resolved absolute address at the **end of the line**
+    containing each register / regfile / addrmap declaration.
 
-    The hint dangles after the trailing column of the inst's source ref so
-    it visually appears like `} CTRL @ 0x0   (0x0000_0010)`. Skipped when the
-    instance's source ref doesn't point at the user's file (e.g. an
-    `include`d type definition lives elsewhere).
+    Earlier version placed the hint at ``line_selection[1]`` which fell inside
+    the instance name in some compiler outputs (e.g. produced
+    ``ctrl_reg_t CTR (0x0000_0100)L @ 0x0``). End-of-line placement avoids
+    every overlap and makes typing names painless — the ghost text is always
+    far to the right.
     """
     from systemrdl.node import AddressableNode
 
     hints: list[InlayHint] = []
+    lines = buffer_text.splitlines() if buffer_text else []
+    seen_lines: set[int] = set()
 
-    def visit(node: Any, parent_addr: int) -> None:
+    def visit(node: Any) -> None:
         if not isinstance(node, AddressableNode):
             for c in getattr(node, "children", lambda **_: [])(unroll=True):
-                visit(c, parent_addr)
+                visit(c)
             return
 
         inst = getattr(node, "inst", None)
         src_ref = getattr(inst, "inst_src_ref", None) or getattr(inst, "def_src_ref", None)
         line_1b = getattr(src_ref, "line", None)
-        sel = getattr(src_ref, "line_selection", None) or (None, None)
         ref_filename = getattr(src_ref, "filename", None)
 
-        # Only annotate instances whose source ref points at the file the
-        # editor has open. Otherwise hints would appear on `include`d files
-        # the user isn't currently looking at.
         if (
             line_1b is not None
             and ref_filename
             and pathlib.Path(ref_filename) == path
-            and isinstance(sel, tuple) and len(sel) == 2 and sel[1] is not None
         ):
             line_0b = max(0, line_1b - 1)
-            col_0b = max(0, sel[1])  # right after the name
-            try:
-                addr = node.absolute_address
-            except Exception:
-                addr = None
-            if addr is not None:
-                hints.append(
-                    InlayHint(
-                        position=Position(line=line_0b, character=col_0b),
-                        label=f"  ({_hex(addr)})",
-                        padding_left=True,
-                        kind=InlayHintKind.Type,
+            # One hint per line — multiple instances on the same line is rare
+            # and we can't separate them visually anyway.
+            if line_0b not in seen_lines and line_0b < len(lines):
+                seen_lines.add(line_0b)
+                col_0b = len(lines[line_0b])
+                try:
+                    addr = node.absolute_address
+                except Exception:
+                    addr = None
+                if addr is not None:
+                    hints.append(
+                        InlayHint(
+                            position=Position(line=line_0b, character=col_0b),
+                            label=f"  → {_hex(addr)}",
+                            padding_left=True,
+                            kind=InlayHintKind.Type,
+                        )
                     )
-                )
 
         for c in node.children(unroll=True):
-            visit(c, parent_addr)
+            visit(c)
 
     for r in roots:
         for top in r.children(unroll=True):
-            visit(top, 0)
+            visit(top)
     return hints
 
 
@@ -1115,15 +1119,6 @@ def _code_lenses_for_addrmaps(
                 if min_addr is not None and max_addr is not None:
                     summary += f" · {_hex(min_addr)}..{_hex(max_addr)}"
                 out.append(CodeLens(range=rng, command=Command(title=summary, command="")))
-            out.append(
-                CodeLens(
-                    range=rng,
-                    command=Command(
-                        title="📋 Open in Memory Map",
-                        command="systemrdl-pro.showMemoryMap",
-                    ),
-                )
-            )
     return out
 
 
@@ -1897,11 +1892,8 @@ def build_server() -> LanguageServer:
             target_path = _uri_to_path(params.text_document.uri)
         except ValueError:
             return []
-        # The cached roots' src_refs point at the LSP-internal temp file.
-        # Translate by walking with the cache's temp_path mapping.
-        if cached.temp_path is not None:
-            return _inlay_hints_for_addressables(cached.roots, cached.temp_path)
-        return _inlay_hints_for_addressables(cached.roots, target_path)
+        path = cached.temp_path or target_path
+        return _inlay_hints_for_addressables(cached.roots, path, cached.text)
 
     @server.feature("textDocument/codeLens")
     def _on_code_lens(_ls: LanguageServer, params: Any) -> list[CodeLens]:

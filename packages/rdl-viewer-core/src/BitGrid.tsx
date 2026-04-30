@@ -1,70 +1,85 @@
 import type { Field, Reg } from './types';
 
+type Cell =
+  | { kind: 'field'; field: Field; msb: number; lsb: number }
+  | { kind: 'reserved'; msb: number; lsb: number };
+
 type Props = { reg: Reg };
 
 /**
- * Visual bit grid: one cell per bit in the register, MSB on the left like
- * datasheets. Each field gets a coloured rectangle spanning its bit range
- * with the field name centred inside (truncated if it doesn't fit).
+ * Visual bit grid: header row of bit indices ([width-1..0], MSB left like
+ * datasheets), followed by a row of field cells. Each field is one wide
+ * cell spanning all of its bits via `grid-column: span N`. Gaps between
+ * fields render as "reserved" cells so the user sees the unallocated bits.
  *
- * Hover any cell to highlight the whole field. Click a field to select
- * its row in the inline detail list (TODO if useful — currently click is a no-op).
+ * Pre-Apr 30 attempt put one DOM node per bit with the name only on the
+ * first cell — which clipped to ~3% width and showed a single letter.
+ * This grid-spans the name across the whole field's column range so it
+ * fits or ellipsises inside its actual width.
  */
 export function BitGrid({ reg }: Props) {
   const width = reg.width || 32;
   const fields = reg.fields || [];
 
-  // Cell colour follows access-mode pill colours via CSS variables.
-  const cells: { bit: number; field?: Field; isFirstOfField?: boolean; isLastOfField?: boolean }[] = [];
-  for (let b = width - 1; b >= 0; b--) {
-    const f = fields.find(f => b >= f.lsb && b <= f.msb);
-    cells.push({
-      bit: b,
-      field: f,
-      isFirstOfField: f && b === f.msb,
-      isLastOfField: f && b === f.lsb,
-    });
+  // Walk MSB → LSB collecting fields; insert "reserved" cells for gaps.
+  const sortedFields = [...fields].sort((a, b) => b.msb - a.msb);
+  const cells: Cell[] = [];
+  let cursor = width - 1;
+  for (const f of sortedFields) {
+    if (cursor > f.msb) {
+      cells.push({ kind: 'reserved', msb: cursor, lsb: f.msb + 1 });
+    }
+    cells.push({ kind: 'field', field: f, msb: f.msb, lsb: f.lsb });
+    cursor = f.lsb - 1;
   }
-
-  const cellsPerRow = Math.min(width, 32);
-  const rowCount = Math.ceil(width / cellsPerRow);
-  const rows: typeof cells[] = [];
-  for (let r = 0; r < rowCount; r++) {
-    rows.push(cells.slice(r * cellsPerRow, (r + 1) * cellsPerRow));
+  if (cursor >= 0) {
+    cells.push({ kind: 'reserved', msb: cursor, lsb: 0 });
   }
 
   return (
     <div className="rdl-bitgrid" role="img" aria-label={`${width}-bit register layout`}>
-      {rows.map((row, ri) => (
-        <div key={ri} className="rdl-bitgrid-row">
-          {row.map(cell => {
-            const acc = (cell.field?.access || 'rsv').toLowerCase();
-            const cls = [
-              'rdl-bitgrid-cell',
-              cell.field ? `acc-${acc}` : 'reserved',
-              cell.isFirstOfField ? 'first' : '',
-              cell.isLastOfField ? 'last' : '',
-            ].filter(Boolean).join(' ');
+      <div
+        className="rdl-bitgrid-bits"
+        style={{ gridTemplateColumns: `repeat(${width}, minmax(0, 1fr))` }}
+      >
+        {Array.from({ length: width }, (_, i) => width - 1 - i).map(b => (
+          <div key={b} className="rdl-bitgrid-bit">{b}</div>
+        ))}
+      </div>
+      <div
+        className="rdl-bitgrid-fields"
+        style={{ gridTemplateColumns: `repeat(${width}, minmax(0, 1fr))` }}
+      >
+        {cells.map((c, i) => {
+          const span = c.msb - c.lsb + 1;
+          const range = span === 1 ? `${c.msb}` : `${c.msb}:${c.lsb}`;
+          if (c.kind === 'reserved') {
             return (
               <div
-                key={cell.bit}
-                className={cls}
-                title={cell.field
-                  ? `[${cell.field.msb}:${cell.field.lsb}] ${cell.field.name} (${acc.toUpperCase()})`
-                  : `[${cell.bit}] reserved`}
+                key={i}
+                className="rdl-bitgrid-cell reserved"
+                style={{ gridColumn: `span ${span}` }}
+                title={`reserved [${range}]`}
               >
-                <span className="bitnum">{cell.bit}</span>
-                {cell.isFirstOfField && cell.field && cell.field.msb !== cell.field.lsb && (
-                  <span className="fieldname">{cell.field.name}</span>
-                )}
-                {cell.isFirstOfField && cell.field && cell.field.msb === cell.field.lsb && (
-                  <span className="fieldname single">{cell.field.name}</span>
-                )}
+                <span className="fieldname">—</span>
+                <span className="bitrange">{range}</span>
               </div>
             );
-          })}
-        </div>
-      ))}
+          }
+          const acc = (c.field.access || 'na').toLowerCase();
+          return (
+            <div
+              key={i}
+              className={`rdl-bitgrid-cell acc-${acc}`}
+              style={{ gridColumn: `span ${span}` }}
+              title={`[${range}] ${c.field.name} (${acc.toUpperCase()})`}
+            >
+              <span className="fieldname">{c.field.name}</span>
+              <span className="bitrange">{range}</span>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }

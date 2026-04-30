@@ -135,32 +135,39 @@ html, body { margin: 0; padding: 0; background: var(--rdl-bg); color: var(--rdl-
 .rdl-detail .meta .v { color: var(--rdl-fg); font-family: var(--rdl-font-mono); }
 .rdl-detail .desc { color: var(--rdl-dim); font-size: 13px; line-height: 1.5;
   margin-bottom: 16px; max-width: 60ch; }
-.rdl-bitgrid { display: flex; flex-direction: column; gap: 0;
-  margin: 0 0 16px; max-width: 720px; }
-.rdl-bitgrid-row { display: flex; }
-.rdl-bitgrid-cell { flex: 1 1 0; min-width: 0; height: 36px;
-  border: 1px solid var(--rdl-border); border-right-width: 0;
-  position: relative; overflow: hidden; box-sizing: border-box;
-  display: flex; align-items: flex-end; justify-content: center;
-  font-family: var(--rdl-font-mono); font-size: 10px; color: var(--rdl-dim);
-  background: var(--rdl-panel); }
-.rdl-bitgrid-cell:last-child { border-right-width: 1px; }
-.rdl-bitgrid-cell.acc-rw  { background: rgba(111,185,143,0.22); color: var(--rdl-fg); }
-.rdl-bitgrid-cell.acc-ro  { background: rgba(138,166,184,0.22); color: var(--rdl-fg); }
-.rdl-bitgrid-cell.acc-wo  { background: rgba(122,135,184,0.22); color: var(--rdl-fg); }
-.rdl-bitgrid-cell.acc-w1c { background: rgba(215,168,90,0.22); color: var(--rdl-fg); }
-.rdl-bitgrid-cell.acc-w0c { background: rgba(215,168,90,0.18); color: var(--rdl-fg); }
-.rdl-bitgrid-cell.acc-w1s { background: rgba(111,185,143,0.18); color: var(--rdl-fg); }
-.rdl-bitgrid-cell.acc-w0s { background: rgba(111,185,143,0.14); color: var(--rdl-fg); }
-.rdl-bitgrid-cell.acc-na  { background: var(--rdl-acc-rsv); color: var(--rdl-fg); opacity: 0.7; }
-.rdl-bitgrid-cell.reserved { background: var(--rdl-acc-rsv); color: var(--rdl-fg); opacity: 0.55; }
-.rdl-bitgrid-cell .bitnum { position: absolute; top: 2px; left: 0; right: 0;
-  text-align: center; font-size: 9px; opacity: 0.85; }
-.rdl-bitgrid-cell .fieldname { position: absolute; top: 50%; left: 0; right: 0;
-  transform: translateY(-25%); text-align: center;
-  font-size: 11px; font-weight: 600; white-space: nowrap; overflow: hidden;
-  text-overflow: ellipsis; padding: 0 4px; pointer-events: none; }
-.rdl-bitgrid-cell .fieldname.single { font-size: 9px; transform: translateY(-15%); }
+/* Bit grid: header row of bit indices, followed by a row of variable-width
+   field cells that span via grid-column. Field name fits/ellipsises inside
+   its actual span instead of clipping to one bit's worth of width. */
+.rdl-bitgrid { margin: 0 0 16px; max-width: 720px; }
+.rdl-bitgrid-bits { display: grid; column-gap: 1px;
+  font-family: var(--rdl-font-mono); font-size: 9px; color: var(--rdl-dim);
+  margin-bottom: 2px; }
+.rdl-bitgrid-bit { text-align: center; min-width: 0; overflow: hidden; }
+.rdl-bitgrid-fields { display: grid; column-gap: 1px; }
+.rdl-bitgrid-cell { min-width: 0; min-height: 44px; padding: 4px 4px;
+  display: flex; flex-direction: column; align-items: center;
+  justify-content: center; gap: 2px;
+  background: var(--rdl-panel); border-radius: 2px;
+  font-family: var(--rdl-font-mono); color: var(--rdl-fg);
+  overflow: hidden; }
+.rdl-bitgrid-cell .fieldname { font-weight: 600; font-size: 12px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  max-width: 100%; line-height: 1.1; }
+.rdl-bitgrid-cell .bitrange { font-size: 10px; color: var(--rdl-dim);
+  line-height: 1; }
+.rdl-bitgrid-cell.acc-rw  { background: rgba(111,185,143,0.40); }
+.rdl-bitgrid-cell.acc-ro  { background: rgba(138,166,184,0.40); }
+.rdl-bitgrid-cell.acc-r   { background: rgba(138,166,184,0.40); }
+.rdl-bitgrid-cell.acc-wo  { background: rgba(122,135,184,0.40); }
+.rdl-bitgrid-cell.acc-w   { background: rgba(122,135,184,0.40); }
+.rdl-bitgrid-cell.acc-w1c { background: rgba(215,168,90,0.40); }
+.rdl-bitgrid-cell.acc-w1s { background: rgba(111,185,143,0.30); }
+.rdl-bitgrid-cell.acc-w0c { background: rgba(215,168,90,0.30); }
+.rdl-bitgrid-cell.acc-w0s { background: rgba(111,185,143,0.22); }
+.rdl-bitgrid-cell.acc-na  { background: var(--rdl-acc-rsv); opacity: 0.7; }
+.rdl-bitgrid-cell.reserved { background: rgba(120,120,120,0.18);
+  color: var(--rdl-dim); }
+.rdl-bitgrid-cell.reserved .fieldname { font-weight: 400; opacity: 0.7; }
 
 .rdl-detail .fields-title { font-size: 11px; color: var(--rdl-dim);
   text-transform: uppercase; letter-spacing: 0.06em;

@@ -76,12 +76,17 @@ type SourceLoc = {
 
 let client: LanguageClient | undefined;
 let outputChannel: vscode.LogOutputChannel | undefined;
-let memoryMapPanel: vscode.WebviewPanel | undefined;
-let memoryMapPanelDisposed = true;
-let lastTreeUri: string | undefined;
-// Cached tree used by the diagnostic-change subscriber to re-render the
-// status bar without re-fetching from the LSP.
-let lastTreeForStatusBar: ElaboratedTree | undefined;
+
+// One Memory Map panel per .rdl file (markdown-preview-style). Key is the
+// document URI string; value carries the panel + its latest tree snapshot
+// for the status-bar refresher.
+type PanelEntry = {
+  panel: vscode.WebviewPanel;
+  uri: string;
+  lastTree?: ElaboratedTree;
+};
+const memoryMapPanels = new Map<string, PanelEntry>();
+
 let statusBarItem: vscode.StatusBarItem | undefined;
 let cursorSyncTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -116,23 +121,23 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand('systemrdl-pro.restartServer', () =>
       restartServer(context),
     ),
-    // When the user saves any .rdl, refresh whichever URI the viewer is currently showing.
+    // Save → refresh the panel for that exact URI (if one is open).
     vscode.workspace.onDidSaveTextDocument(doc => {
       if (doc.languageId !== 'systemrdl-pro') return;
-      // If the user saves the file the panel is showing, refresh.
-      if (lastTreeUri && doc.uri.toString() === lastTreeUri) {
-        refreshMemoryMap().catch(err =>
+      const uri = doc.uri.toString();
+      if (memoryMapPanels.has(uri)) {
+        refreshMemoryMap(uri).catch(err =>
           outputChannel?.warn(`refresh after save failed: ${err}`),
         );
       }
     }),
-    // D10: cursor in editor → viewer auto-selects the matching reg, debounced 500ms.
-    // Only forwards events from the .rdl that the panel is currently showing — switching
-    // to another file doesn't cross-talk into the viewer.
+    // D10: cursor → viewer. Forwards only to the panel watching the exact
+    // URI the editor cursor is in.
     vscode.window.onDidChangeTextEditorSelection(event => {
-      if (!memoryMapPanel || !lastTreeUri) return;
       if (event.textEditor.document.languageId !== 'systemrdl-pro') return;
-      if (event.textEditor.document.uri.toString() !== lastTreeUri) return;
+      const uri = event.textEditor.document.uri.toString();
+      const entry = memoryMapPanels.get(uri);
+      if (!entry) return;
       if (suppressNextCursorSync) {
         suppressNextCursorSync = false;
         return;
@@ -140,18 +145,27 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const line = event.textEditor.selection.active.line;
       if (cursorSyncTimer) clearTimeout(cursorSyncTimer);
       cursorSyncTimer = setTimeout(() => {
-        safePostToWebview({ type: 'cursor', line });
+        safePostTo(entry, { type: 'cursor', line });
       }, CURSOR_SYNC_DEBOUNCE_MS);
     }),
-    // Refresh status bar's error/warning counter when diagnostics change for
-    // the file the viewer is showing. Without this the count goes stale
-    // until the next refreshMemoryMap fires.
+    // Refresh status bar diag count when diagnostics change for the URI the
+    // active editor is on.
     vscode.languages.onDidChangeDiagnostics(event => {
-      if (!lastTreeUri || !lastTreeForStatusBar) return;
-      const target = vscode.Uri.parse(lastTreeUri).toString();
-      if (event.uris.some(u => u.toString() === target)) {
-        updateStatusBar(lastTreeForStatusBar);
+      const active = vscode.window.activeTextEditor;
+      if (!active) return;
+      const activeUri = active.document.uri.toString();
+      if (event.uris.some(u => u.toString() === activeUri)) {
+        const entry = memoryMapPanels.get(activeUri);
+        if (entry?.lastTree) updateStatusBar(entry.lastTree, activeUri);
       }
+    }),
+    // Tab focus → swap status bar to track that file's panel.
+    vscode.window.onDidChangeActiveTextEditor(editor => {
+      if (!editor || editor.document.languageId !== 'systemrdl-pro') return;
+      const uri = editor.document.uri.toString();
+      const entry = memoryMapPanels.get(uri);
+      if (entry?.lastTree) updateStatusBar(entry.lastTree, uri);
+      else if (statusBarItem) statusBarItem.hide();
     }),
   );
 
@@ -163,8 +177,8 @@ export async function deactivate(): Promise<void> {
     await client.stop();
     client = undefined;
   }
-  memoryMapPanel?.dispose();
-  memoryMapPanel = undefined;
+  for (const entry of memoryMapPanels.values()) entry.panel.dispose();
+  memoryMapPanels.clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -368,73 +382,64 @@ async function showMemoryMap(context: vscode.ExtensionContext): Promise<void> {
     );
     return;
   }
-  lastTreeUri = targetUri.toString();
+  const uri = targetUri.toString();
 
-  if (!memoryMapPanel) {
-    // viewer-core's bundled JS + CSS live under media/viewer/ (copied at build
-    // time from packages/rdl-viewer-core/dist/). The webview must whitelist
-    // that directory via localResourceRoots before it can load /viewer.js.
-    const viewerDist = vscode.Uri.joinPath(context.extensionUri, 'media', 'viewer');
-    memoryMapPanel = vscode.window.createWebviewPanel(
-      'systemrdl-pro.memoryMap',
-      'SystemRDL Memory Map',
-      vscode.ViewColumn.Beside,
-      {
-        enableScripts: true,
-        retainContextWhenHidden: true,
-        localResourceRoots: [viewerDist],
-      },
-    );
-    memoryMapPanelDisposed = false;
-    memoryMapPanel.iconPath = vscode.Uri.joinPath(context.extensionUri, 'media', 'icon.png');
-    memoryMapPanel.onDidDispose(
-      () => {
-        memoryMapPanelDisposed = true;
-        memoryMapPanel = undefined;
-        lastTreeUri = undefined;
-      },
-      null,
-      context.subscriptions,
-    );
-    // Eng-review safety net #2: when the user re-reveals a hidden panel after
-    // a parse cycle changed the tree (e.g. user typed while panel was tabbed
-    // away), refresh on the visibility flip so we don't show a stale tree —
-    // postMessage to a hidden panel is fine with retainContextWhenHidden, but
-    // an aborted/timed-out pass while hidden could have left the panel out of date.
-    memoryMapPanel.onDidChangeViewState(
-      e => {
-        if (e.webviewPanel.visible && !memoryMapPanelDisposed) {
-          refreshMemoryMap().catch(err =>
-            outputChannel?.warn(`refresh on viewState change failed: ${err}`),
-          );
-        }
-      },
-      null,
-      context.subscriptions,
-    );
-    memoryMapPanel.webview.onDidReceiveMessage(
-      (msg: WebviewMessage) => handleWebviewMessage(msg),
-      undefined,
-      context.subscriptions,
-    );
-    memoryMapPanel.webview.html = renderViewerHtml(memoryMapPanel.webview, context.extensionUri);
-  } else {
-    memoryMapPanel.reveal(vscode.ViewColumn.Beside);
+  // If a panel for this URI already exists, just bring it forward —
+  // markdown-preview-style. Otherwise create a fresh one.
+  const existing = memoryMapPanels.get(uri);
+  if (existing) {
+    existing.panel.reveal(vscode.ViewColumn.Beside);
+    await refreshMemoryMap(uri);
+    return;
   }
 
-  await refreshMemoryMap();
+  const viewerDist = vscode.Uri.joinPath(context.extensionUri, 'media', 'viewer');
+  const fileName = targetUri.path.split('/').pop() || 'Memory Map';
+  const panel = vscode.window.createWebviewPanel(
+    'systemrdl-pro.memoryMap',
+    `Memory Map · ${fileName}`,
+    vscode.ViewColumn.Beside,
+    {
+      enableScripts: true,
+      retainContextWhenHidden: true,
+      localResourceRoots: [viewerDist],
+    },
+  );
+  panel.iconPath = vscode.Uri.joinPath(context.extensionUri, 'media', 'icon.png');
+
+  const entry: PanelEntry = { panel, uri };
+  memoryMapPanels.set(uri, entry);
+
+  panel.onDidDispose(
+    () => { memoryMapPanels.delete(uri); },
+    null,
+    context.subscriptions,
+  );
+  panel.onDidChangeViewState(
+    e => {
+      if (e.webviewPanel.visible) {
+        refreshMemoryMap(uri).catch(err =>
+          outputChannel?.warn(`refresh on viewState change failed: ${err}`),
+        );
+      }
+    },
+    null,
+    context.subscriptions,
+  );
+  panel.webview.onDidReceiveMessage(
+    (msg: WebviewMessage) => handleWebviewMessage(msg, uri),
+    undefined,
+    context.subscriptions,
+  );
+  panel.webview.html = renderViewerHtml(panel.webview, context.extensionUri);
+
+  await refreshMemoryMap(uri);
 }
 
-/**
- * Eng-review silent-failure gap #2: never post into a disposed webview.
- * `panel.visible === false` is fine — `retainContextWhenHidden` keeps state
- * alive — but a disposed panel will throw on `webview.postMessage`. Centralise
- * the guard so every callsite (refreshMemoryMap, cursor sync, error path) is safe.
- */
-function safePostToWebview(message: unknown): void {
-  if (!memoryMapPanel || memoryMapPanelDisposed) return;
+/** Post to a specific panel; no-ops gracefully if the panel was disposed. */
+function safePostTo(entry: PanelEntry, message: unknown): void {
   try {
-    memoryMapPanel.webview.postMessage(message);
+    entry.panel.webview.postMessage(message);
   } catch (err) {
     outputChannel?.warn(`webview.postMessage failed: ${err}`);
   }
@@ -448,7 +453,7 @@ type WebviewMessage =
   | { type: 'reveal'; source: SourceLoc }
   | { type: 'copy'; text: string; label?: string };
 
-async function handleWebviewMessage(msg: WebviewMessage): Promise<void> {
+async function handleWebviewMessage(msg: WebviewMessage, _panelUri: string): Promise<void> {
   if (msg.type === 'reveal') {
     await revealLocation(msg.source);
   } else if (msg.type === 'copy') {
@@ -503,26 +508,28 @@ async function revealLocation(loc: SourceLoc): Promise<void> {
   }
 }
 
-async function refreshMemoryMap(): Promise<void> {
-  if (!memoryMapPanel || memoryMapPanelDisposed || !lastTreeUri || !client) return;
+async function refreshMemoryMap(uri: string): Promise<void> {
+  const entry = memoryMapPanels.get(uri);
+  if (!entry || !client) return;
 
   try {
-    const tree = await client.sendRequest<ElaboratedTree>('rdl/elaboratedTree', {
-      uri: lastTreeUri,
-    });
-    safePostToWebview({ type: 'tree', tree });
-    lastTreeForStatusBar = tree;
-    updateStatusBar(tree);
+    const tree = await client.sendRequest<ElaboratedTree>('rdl/elaboratedTree', { uri });
+    safePostTo(entry, { type: 'tree', tree });
+    entry.lastTree = tree;
+    // Only update the status bar when the active editor is on this URI —
+    // otherwise the user sees the wrong file's count.
+    const active = vscode.window.activeTextEditor?.document.uri.toString();
+    if (active === uri) updateStatusBar(tree, uri);
   } catch (err) {
     outputChannel?.error(`rdl/elaboratedTree failed: ${err}`);
-    safePostToWebview({
+    safePostTo(entry, {
       type: 'error',
       message: `Could not fetch elaborated tree: ${err}`,
     });
   }
 }
 
-function updateStatusBar(tree: ElaboratedTree): void {
+function updateStatusBar(tree: ElaboratedTree, uri: string): void {
   if (!statusBarItem) return;
   if (!tree.roots.length) {
     statusBarItem.hide();
@@ -532,21 +539,15 @@ function updateStatusBar(tree: ElaboratedTree): void {
   const rootNames = tree.roots.map(r => r.name).join(', ');
   const stale = tree.stale ? ' $(warning) stale' : '';
 
-  // Count diagnostics for the URI the panel is currently showing. The
-  // language server emits errors+warnings on every parse; surfacing the
-  // tally next to the reg count saves a trip to the Problems panel.
   let diag = '';
-  if (lastTreeUri) {
-    const uri = vscode.Uri.parse(lastTreeUri);
-    const all = vscode.languages.getDiagnostics(uri);
-    let errors = 0, warnings = 0;
-    for (const d of all) {
-      if (d.severity === vscode.DiagnosticSeverity.Error) errors++;
-      else if (d.severity === vscode.DiagnosticSeverity.Warning) warnings++;
-    }
-    if (errors) diag += ` $(error) ${errors}`;
-    if (warnings) diag += ` $(warning) ${warnings}`;
+  const all = vscode.languages.getDiagnostics(vscode.Uri.parse(uri));
+  let errors = 0, warnings = 0;
+  for (const d of all) {
+    if (d.severity === vscode.DiagnosticSeverity.Error) errors++;
+    else if (d.severity === vscode.DiagnosticSeverity.Warning) warnings++;
   }
+  if (errors) diag += ` $(error) ${errors}`;
+  if (warnings) diag += ` $(warning) ${warnings}`;
 
   statusBarItem.text = `$(circuit-board) ${total} reg${total === 1 ? '' : 's'} · ${rootNames}${stale}${diag}`;
   statusBarItem.tooltip = stale
