@@ -257,10 +257,18 @@ if (args.open) {
     process.platform === 'win32' ? 'cmd' :
     'xdg-open';
   const openArgs = process.platform === 'win32' ? ['/c', 'start', url] : [url];
+  // Headless boxes (WSL2 without WSLg, CI, ssh -X off) don't have ``xdg-open``.
+  // ``child.on('error')`` swallows the async ENOENT that would otherwise crash
+  // Bun via an unhandled error event — the synchronous try/catch alone doesn't
+  // catch it. Falling back to "user opens the printed URL manually" is fine.
   try {
-    spawn(opener, openArgs, { stdio: 'ignore', detached: true }).unref();
+    const child = spawn(opener, openArgs, { stdio: 'ignore', detached: true });
+    child.on('error', () => {
+      console.error(`rdl-viewer: could not auto-open browser (${opener}). Open ${url} yourself.`);
+    });
+    child.unref();
   } catch {
-    // headless / no DE — user opens manually via printed URL.
+    console.error(`rdl-viewer: could not auto-open browser. Open ${url} yourself.`);
   }
 }
 

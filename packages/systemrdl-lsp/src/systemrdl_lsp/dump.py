@@ -66,6 +66,9 @@ def main(argv: list[str] | None = None) -> int:
     if not path.exists():
         print(f"error: file not found: {path}", file=sys.stderr)
         return 2
+    # ``Path.as_uri()`` rejects relative paths — resolve once so a user calling
+    # ``python -m systemrdl_lsp.dump examples/sample.rdl`` from anywhere works.
+    path = path.resolve()
 
     text = path.read_text(encoding="utf-8")
     messages, roots, tmp_path = _compile_text(path.as_uri(), text, args.include)

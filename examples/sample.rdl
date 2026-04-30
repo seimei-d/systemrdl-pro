@@ -1,0 +1,63 @@
+// Multi-feature SystemRDL demo for the rdl-viewer / VSCode extension.
+// Two top-level addrmaps so you see the tab strip; nested regfile so you
+// see container header rows; named field types so F12 (goto-def) has somewhere to go.
+
+reg ctrl_reg_t {
+    name = "Control register";
+    desc = "Master enable + per-channel run/halt.";
+    field {
+        name = "Enable";
+        desc = "Module-level enable. Clear to gate the clock.";
+        sw = rw; hw = r;
+    } enable[0:0] = 0;
+    field {
+        name = "Channel mask";
+        desc = "One bit per channel. 1=run, 0=halt.";
+        sw = rw; hw = r;
+    } chan_en[7:1] = 0;
+    field {
+        sw = r; hw = w;
+        desc = "Set when the engine is processing a transfer.";
+    } busy[8:8] = 0;
+    field {
+        sw = w; hw = r;
+        onwrite = woclr;
+        desc = "Write 1 to clear the IRQ status latch.";
+    } irq_clear[31:31] = 0;
+};
+
+reg status_reg_t {
+    name = "Status register";
+    desc = "Read-only counters and last-error code.";
+    field { sw = r; hw = w; } byte_count[15:0] = 0;
+    field { sw = r; hw = w; } last_error[23:16] = 0;
+    field { sw = r; hw = w; } reserved[31:24] = 0;
+};
+
+regfile dma_channel_t {
+    ctrl_reg_t   CTRL   @ 0x00;
+    status_reg_t STATUS @ 0x04;
+    reg {
+        field { sw = rw; hw = r; } addr[31:2] = 0x100;
+    } DMA_BASE_ADDR @ 0x08;
+};
+
+addrmap dma_engine {
+    name = "DMA engine";
+    desc = "Two-channel DMA controller, mapped at 0x4000_0000 in the SoC.";
+    dma_channel_t ch0 @ 0x000;
+    dma_channel_t ch1 @ 0x100;
+};
+
+addrmap uart {
+    name = "UART";
+    desc = "Single 16550-style UART. Independent address space — second tab in the viewer.";
+    ctrl_reg_t CTRL @ 0x0;
+    reg {
+        field { sw = rw; hw = r; desc = "Baud rate divisor."; } div[15:0] = 0x0010;
+        field { sw = rw; hw = r; desc = "1 = 8N1, 0 = 7N1."; } eight_bit[16:16] = 1;
+    } LCR @ 0x4;
+    reg {
+        field { sw = w; hw = r; } tx_data[7:0] = 0;
+    } TX @ 0x8;
+};
