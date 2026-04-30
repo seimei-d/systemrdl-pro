@@ -11,7 +11,6 @@ export function Viewer({ transport }: Props) {
   const [tree, setTree] = useState<ElaboratedTree | null>(null);
   const [activeRoot, setActiveRoot] = useState(0);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
-  const [focusedKey, setFocusedKey] = useState<string | null>(null);
   const [filter, setFilter] = useState('');
   const [filterScope, setFilterScope] = useState<FilterScope>('all');
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
@@ -59,16 +58,8 @@ export function Viewer({ transport }: Props) {
     if (!stillValid) {
       const first = findFirstReg(root, [root.name]);
       setSelectedKey(first?.key ?? null);
-      setFocusedKey(first?.key ?? null);
     }
   }, [root, selectedKey]);
-
-  // Keep focus visible — if focused row was hidden by collapse, drop to selection.
-  useEffect(() => {
-    if (focusedKey && !flatRows.some(r => r.key === focusedKey)) {
-      setFocusedKey(selectedKey ?? flatRows[0]?.key ?? null);
-    }
-  }, [flatRows, focusedKey, selectedKey]);
 
   const filterMatchCount = useMemo(
     () => flatRows.filter(r => r.kind === 'reg').length,
@@ -81,71 +72,12 @@ export function Viewer({ transport }: Props) {
       if (next.has(key)) next.delete(key); else next.add(key);
       return next;
     });
-    setFocusedKey(key);
   }, []);
 
   const selectReg = useCallback((row: FlatRow & { kind: 'reg' }) => {
     setSelectedKey(row.key);
-    setFocusedKey(row.key);
     if (row.node.source && transport.reveal) transport.reveal(row.node.source);
   }, [transport]);
-
-  // Keyboard handler attached at document level (see effect below). VSCode
-  // webviews don't reliably propagate focus to a tabindex=0 div on click,
-  // so anchoring to focus broke arrow-key nav. Document-level binding works
-  // regardless of where focus is — we just ignore keys when typing in an
-  // input/select/textarea or when the context menu is open.
-  const onKey = useCallback((e: KeyboardEvent) => {
-    if (ctxMenu) return;
-    const ae = document.activeElement as HTMLElement | null;
-    const tag = ae?.tagName;
-    if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
-
-    if (!flatRows.length) return;
-    const idx = flatRows.findIndex(r => r.key === focusedKey);
-    const cur = idx >= 0 ? flatRows[idx] : null;
-    const move = (j: number) => {
-      if (j < 0 || j >= flatRows.length) return;
-      setFocusedKey(flatRows[j].key);
-    };
-    const findParent = (of: number) => {
-      for (let j = of - 1; j >= 0; j--) if (flatRows[j].depth < flatRows[of].depth) return j;
-      return -1;
-    };
-    switch (e.key) {
-      case 'ArrowDown': move(idx + 1); e.preventDefault(); break;
-      case 'ArrowUp':   move(idx > 0 ? idx - 1 : 0); e.preventDefault(); break;
-      case 'Home':      move(0); e.preventDefault(); break;
-      case 'End':       move(flatRows.length - 1); e.preventDefault(); break;
-      case 'ArrowRight':
-        if (cur?.kind === 'container') {
-          if (!cur.expanded && cur.hasChildren) toggleCollapse(cur.key);
-          else if (idx + 1 < flatRows.length && flatRows[idx + 1].depth > cur.depth) move(idx + 1);
-        }
-        e.preventDefault();
-        break;
-      case 'ArrowLeft':
-        if (cur?.kind === 'container' && cur.expanded) toggleCollapse(cur.key);
-        else if (cur) {
-          const p = findParent(idx);
-          if (p >= 0) move(p);
-        }
-        e.preventDefault();
-        break;
-      case 'Enter':
-      case ' ':
-        if (!cur) break;
-        if (cur.kind === 'container') toggleCollapse(cur.key);
-        else if (cur.kind === 'reg') selectReg(cur);
-        e.preventDefault();
-        break;
-    }
-  }, [flatRows, focusedKey, toggleCollapse, selectReg, ctxMenu]);
-
-  useEffect(() => {
-    document.addEventListener('keydown', onKey);
-    return () => document.removeEventListener('keydown', onKey);
-  }, [onKey]);
 
   // Cmd/Ctrl-F to focus filter (the input is already in the page; we just focus it).
   useEffect(() => {
@@ -239,7 +171,6 @@ export function Viewer({ transport }: Props) {
               setActiveRoot(i);
               const first = findFirstReg(roots[i], [roots[i].name]);
               setSelectedKey(first?.key ?? null);
-              setFocusedKey(first?.key ?? null);
             }}
           >{r.name}</button>
         ))}
@@ -271,10 +202,8 @@ export function Viewer({ transport }: Props) {
           <Tree
             rows={flatRows}
             selectedKey={selectedKey}
-            focusedKey={focusedKey}
             onSelectReg={selectReg}
             onToggleCollapse={toggleCollapse}
-            onFocus={setFocusedKey}
             onContextMenu={onContextMenu}
             filter={filter}
             filterMatchCount={filterMatchCount}

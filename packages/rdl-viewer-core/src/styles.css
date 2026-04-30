@@ -74,7 +74,25 @@ html, body { margin: 0; padding: 0; background: var(--rdl-bg); color: var(--rdl-
 .rdl-row:hover { background: rgba(74,158,255,0.08); }
 .rdl-row.selected { background: var(--rdl-selected); border-left: 3px solid var(--rdl-accent);
   padding-left: 13px; }
-.rdl-row.focused { outline: 1px solid var(--rdl-accent); outline-offset: -1px; }
+/* Floating "scroll to top" button. Pulses gently so the user notices it on
+   long trees without it being annoying. Clicking smooth-scrolls the host. */
+.rdl-scroll-top {
+  position: sticky; bottom: 16px;
+  margin-left: auto; margin-right: 12px; margin-top: 8px;
+  display: block;
+  width: 32px; height: 32px; border: 0; border-radius: 50%;
+  background: var(--rdl-accent); color: #fff;
+  font-size: 14px; line-height: 32px; font-weight: 700;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+  animation: rdl-scroll-top-pulse 1.6s ease-in-out infinite;
+}
+.rdl-scroll-top:hover { animation: none; transform: translateY(-1px); }
+.rdl-scroll-top:focus { outline: 2px solid var(--rdl-accent); outline-offset: 2px; animation: none; }
+@keyframes rdl-scroll-top-pulse {
+  0%, 100% { box-shadow: 0 2px 8px rgba(74,158,255,0.45); transform: scale(1); }
+  50%      { box-shadow: 0 2px 16px rgba(74,158,255,0.85); transform: scale(1.06); }
+}
 .rdl-row .caret { color: var(--rdl-dim); font-size: 11px; text-align: right; }
 .rdl-row .caret-toggle { cursor: pointer; padding: 0 4px; border-radius: 2px;
   transition: background 0.08s; }

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Addrmap, Reg, SourceLoc, Transport, TreeNode } from './types';
 import { isContainer, subtreeMatches, type FilterScope } from './util';
 import type { CtxMenuItem } from './ContextMenu';
@@ -47,10 +47,8 @@ export function buildFlatList(
 type Props = {
   rows: FlatRow[];
   selectedKey: string | null;
-  focusedKey: string | null;
   onSelectReg: (row: FlatRow & { kind: 'reg' }) => void;
   onToggleCollapse: (key: string) => void;
-  onFocus: (key: string) => void;
   onContextMenu: (ev: React.MouseEvent, row: FlatRow) => void;
   filter: string;
   filterMatchCount: number;
@@ -58,22 +56,31 @@ type Props = {
 };
 
 export function Tree({
-  rows, selectedKey, focusedKey, onSelectReg, onToggleCollapse, onFocus, onContextMenu,
+  rows, selectedKey, onSelectReg, onToggleCollapse, onContextMenu,
   filter, filterMatchCount, hasRoots,
 }: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null);
+  const [showScrollTop, setShowScrollTop] = useState(false);
 
-  // Scroll focused row into view after each render.
+  // Scroll selected row into view after each render so click-to-reveal in the
+  // editor (which doesn't move the tree-pane scroll) doesn't leave the user
+  // looking at a different part of the tree than the detail pane describes.
   useEffect(() => {
-    if (!hostRef.current || !focusedKey) return;
-    const el = hostRef.current.querySelector<HTMLElement>(`[data-key="${cssAttr(focusedKey)}"]`);
+    if (!hostRef.current || !selectedKey) return;
+    const el = hostRef.current.querySelector<HTMLElement>(`[data-key="${cssAttr(selectedKey)}"]`);
     if (el) el.scrollIntoView({ block: 'nearest' });
-  }, [focusedKey, rows]);
+  }, [selectedKey, rows]);
 
-  // tabindex=0 + role=tree are kept for screen-reader semantics and so users
-  // who Tab into the panel still land here. Arrow-key handling lives at the
-  // document level in <Viewer/> so focus quirks in the webview iframe don't
-  // disable it.
+  // Show the scroll-to-top button once the user scrolls past ~one screen.
+  // Pulses to draw attention on long trees (1000-reg stress fixture) where
+  // returning to the top by hand is tedious.
+  const onScroll = () => {
+    if (!hostRef.current) return;
+    setShowScrollTop(hostRef.current.scrollTop > 200);
+  };
+  const scrollTop = () => {
+    if (hostRef.current) hostRef.current.scrollTo({ top: 0, behavior: 'smooth' });
+  };
 
   if (!hasRoots) {
     return (
@@ -99,6 +106,7 @@ export function Tree({
         tabIndex={0}
         role="tree"
         aria-label="Memory map tree"
+        onScroll={onScroll}
       >
         <div className="rdl-tree">
           {rows.map(row => (
@@ -106,14 +114,21 @@ export function Tree({
               key={row.key}
               row={row}
               selected={selectedKey === row.key}
-              focused={focusedKey === row.key}
               onSelectReg={onSelectReg}
               onToggleCollapse={onToggleCollapse}
-              onFocus={onFocus}
               onContextMenu={onContextMenu}
             />
           ))}
         </div>
+        {showScrollTop && (
+          <button
+            className="rdl-scroll-top"
+            type="button"
+            aria-label="Scroll to top"
+            title="Scroll to top"
+            onClick={scrollTop}
+          >▲</button>
+        )}
       </div>
     </>
   );
@@ -126,30 +141,22 @@ function cssAttr(s: string): string {
 type RowProps = {
   row: FlatRow;
   selected: boolean;
-  focused: boolean;
   onSelectReg: (row: FlatRow & { kind: 'reg' }) => void;
   onToggleCollapse: (key: string) => void;
-  onFocus: (key: string) => void;
   onContextMenu: (ev: React.MouseEvent, row: FlatRow) => void;
 };
 
-function TreeRow({ row, selected, focused, onSelectReg, onToggleCollapse, onFocus, onContextMenu }: RowProps) {
+function TreeRow({ row, selected, onSelectReg, onToggleCollapse, onContextMenu }: RowProps) {
   const indent = row.depth > 0 ? `rdl-indent-${Math.min(row.depth, 3)}` : '';
   const cls = ['rdl-row', indent];
   if (row.kind === 'container') cls.push('container');
   if (selected) cls.push('selected');
-  if (focused) cls.push('focused');
   const className = cls.filter(Boolean).join(' ');
 
   if (row.kind === 'container') {
     const node = row.node;
     const caret = row.expanded ? '▼' : '▶';
     const kindLabel = node.kind + (node.type ? ` (${node.type})` : '');
-    const handleClick = () => {
-      onFocus(row.key);
-      // Reveal in editor on body click — caret has its own listener with stopPropagation.
-      // (No direct reveal here; the parent decides via onSelectReg-like callback if needed.)
-    };
     return (
       <div
         className={className}
@@ -158,7 +165,6 @@ function TreeRow({ row, selected, focused, onSelectReg, onToggleCollapse, onFocu
         aria-expanded={row.expanded}
         data-key={row.key}
         title="Click caret to fold"
-        onClick={handleClick}
         onContextMenu={(e) => onContextMenu(e, row)}
       >
         <span
