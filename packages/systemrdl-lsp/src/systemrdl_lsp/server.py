@@ -59,7 +59,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 SERVER_NAME = "systemrdl-lsp"
-SERVER_VERSION = "0.8.0"
+SERVER_VERSION = "0.8.1"
 DEBOUNCE_SECONDS = 0.3
 ELABORATED_TREE_SCHEMA_VERSION = "0.1.0"
 # Eng-review safety net #3: cap a single elaborate pass at 10s wall-clock.
@@ -823,68 +823,189 @@ def _serialize_root(
 # ---------------------------------------------------------------------------
 
 
-# Static keyword tables. Categorised so the CompletionItemKind hint helps the
-# editor sort and icon-decorate suggestions correctly. The lists deliberately
-# under-cover the SystemRDL spec (no UDPs, no signal modifiers) — those would
-# need scope-aware completion to avoid noise. v1 covers the 80% case: writing
-# top-level addrmap/regfile/reg/field bodies with the most common properties.
-SYSTEMRDL_TOP_KEYWORDS = (
-    "addrmap", "regfile", "reg", "field", "enum", "mem", "signal",
-    "external", "internal",
-    "default", "property", "constraint",
-    "true", "false",
-)
+# Static catalogue: label → one-line markdown shown in the completion popup's
+# detail panel. Coverage is intentionally narrower than the full SystemRDL 2.0
+# spec — we cover the properties and access modes that matter for ~95% of real
+# register definitions. Adding more is cheap; getting them right (correct legal
+# domain, correct cross-property constraints) needs a scope-aware analyser.
+SYSTEMRDL_TOP_KEYWORDS: dict[str, str] = {
+    "addrmap": "Top-level address map. Wraps registers/regfiles into an addressable hierarchy.",
+    "regfile": "Logical group of registers sharing a base address.",
+    "reg": "Hardware register. Contains 1+ fields packed into `regwidth` bits (default 32).",
+    "field": "Bit field inside a register. Has `sw` and `hw` access modes plus a reset value.",
+    "enum": "Enumerated set of values, usable as a field value.",
+    "mem": "External memory region (no internal storage, uses `external` accessor).",
+    "signal": "External signal — wired to/from logic outside the register block.",
+    "external": "Marks an instance as external — backing logic lives outside the generated RTL.",
+    "internal": "Marks an instance as internal (default; usually omitted).",
+    "default": "Default-property assignment — applies to every later sibling unless overridden.",
+    "property": "User-defined property declaration.",
+    "constraint": "User-defined constraint declaration (rarely used).",
+    "true": "Boolean literal `true`.",
+    "false": "Boolean literal `false`.",
+}
 
-SYSTEMRDL_PROPERTIES = (
+SYSTEMRDL_PROPERTIES: dict[str, str] = {
     # Component metadata
-    "name", "desc",
+    "name": 'Human-readable name shown in docs/viewers, e.g. `name = "Control register"`.',
+    "desc": 'Long-form description, may contain multi-line markdown.',
     # Field access semantics
-    "sw", "hw",
-    "reset", "resetsignal",
-    "rclr", "rset", "ruser",
-    "onread", "onwrite",
-    "swacc", "swmod", "swwe", "swwel",
-    "we", "wel",
-    "anded", "ored", "xored",
-    "fieldwidth", "encode",
-    "singlepulse",
+    "sw": "Software access mode. Values: `rw`, `ro`, `wo`, `r`, `w`, `na`.",
+    "hw": "Hardware access mode. Values: `rw`, `ro`, `wo`, `r`, `w`, `na`.",
+    "reset": "Reset value (hex, dec, or binary). Applied on system reset.",
+    "resetsignal": "Override the reset signal driving this field.",
+    "rclr": "On software read: clear the field to 0.",
+    "rset": "On software read: set the field to all-ones.",
+    "ruser": "Custom on-read action (user-defined).",
+    "onread": "Read-side effect. Common values: `rclr`, `rset`, `ruser`.",
+    "onwrite": "Write-side effect. Common values: `woclr`, `woset`, `wzc`, `wzs`, `wclr`, `wset`, `wuser`.",
+    "swacc": "Status flag: software just accessed (read or write).",
+    "swmod": "Status flag: software just modified the field's value.",
+    "swwe": "Software write-enable signal.",
+    "swwel": "Software write-enable, active-low.",
+    "we": "Hardware write-enable.",
+    "wel": "Hardware write-enable, active-low.",
+    "anded": "Bitwise-AND output of all bits in the field.",
+    "ored": "Bitwise-OR output of all bits.",
+    "xored": "Bitwise-XOR output of all bits.",
+    "fieldwidth": "Force a field width independent of the bit-range.",
+    "encode": "Reference an `enum` definition that names the legal values.",
+    "singlepulse": "Field acts as a single-cycle strobe — auto-clears next cycle.",
     # Register
-    "regwidth", "accesswidth", "shared",
+    "regwidth": "Register width in bits (default `32`, also legal: `8`, `16`, `64`).",
+    "accesswidth": "Smallest access size in bits (must divide `regwidth`).",
+    "shared": "Register is shared across multiple addrmap instances.",
     # Addrmap / regfile
-    "alignment", "sharedextbus", "errextbus", "bigendian", "littleendian",
-    "addressing", "lsb0", "msb0",
+    "alignment": "Force address alignment for child instances.",
+    "sharedextbus": "All external children share one bus.",
+    "errextbus": "External errors propagate to the bus.",
+    "bigendian": "Use big-endian addressing.",
+    "littleendian": "Use little-endian addressing (default).",
+    "addressing": "Addressing mode: `compact`, `regalign`, `fullalign`.",
+    "lsb0": "Bit 0 is the LSB (default).",
+    "msb0": "Bit 0 is the MSB (uncommon).",
     # Counter
-    "counter", "incr", "decr", "incrwidth", "decrwidth",
-    "incrvalue", "decrvalue", "saturate",
-    "incrsaturate", "decrsaturate",
-    "threshold", "incrthreshold", "decrthreshold",
-    "overflow", "underflow",
+    "counter": "Field is an up/down counter.",
+    "incr": "Increment input signal.",
+    "decr": "Decrement input signal.",
+    "incrwidth": "Width of the increment value.",
+    "decrwidth": "Width of the decrement value.",
+    "incrvalue": "Constant increment.",
+    "decrvalue": "Constant decrement.",
+    "saturate": "Saturate at min/max instead of wrapping.",
+    "incrsaturate": "Saturate on overflow.",
+    "decrsaturate": "Saturate on underflow.",
+    "threshold": "Threshold flag triggers when the counter crosses the value.",
+    "incrthreshold": "Threshold for increment direction.",
+    "decrthreshold": "Threshold for decrement direction.",
+    "overflow": "Status: increment overflowed.",
+    "underflow": "Status: decrement underflowed.",
     # Interrupt
-    "intr", "intr type", "enable", "mask", "haltenable", "haltmask",
-    "stickybit", "sticky",
-)
+    "intr": "Field is an interrupt source.",
+    "enable": "Interrupt enable mask.",
+    "mask": "Interrupt mask (when `intr` is set).",
+    "haltenable": "Halts further interrupts when set.",
+    "haltmask": "Mask for halt-enable.",
+    "stickybit": "Field bit sticks until cleared by software.",
+    "sticky": "Whole field is sticky.",
+}
 
-SYSTEMRDL_ACCESS_VALUES = (
-    "rw", "ro", "wo", "r", "w", "na",
-    "woclr", "woset", "wclr", "wset",
-    "wzc", "wzs", "wzt",
-    "rclr", "rset",
-)
+# sw / hw access — the right-hand side of `sw =` / `hw =`.
+SYSTEMRDL_RW_VALUES: dict[str, str] = {
+    "rw": "Read-write.",
+    "ro": "Read-only — writes are ignored.",
+    "wo": "Write-only — reads return 0.",
+    "r":  "Readable (alias of `ro`).",
+    "w":  "Writable (alias of `wo`).",
+    "na": "No access — software can neither read nor write.",
+}
+
+# onwrite values — the right-hand side of `onwrite =`.
+SYSTEMRDL_ONWRITE_VALUES: dict[str, str] = {
+    "woclr": "Write-1-to-clear: writing 1 to a bit clears it; writing 0 leaves it.",
+    "woset": "Write-1-to-set: writing 1 to a bit sets it; writing 0 leaves it.",
+    "wzc":   "Write-0-to-clear.",
+    "wzs":   "Write-0-to-set.",
+    "wclr":  "Any write clears the field.",
+    "wset":  "Any write sets all field bits.",
+    "wzt":   "Write-0-to-toggle.",
+    "wuser": "User-defined write action.",
+}
+
+# onread values — the right-hand side of `onread =`.
+SYSTEMRDL_ONREAD_VALUES: dict[str, str] = {
+    "rclr":  "Read-to-clear: read clears the field after returning the old value.",
+    "rset":  "Read-to-set: read sets all bits after returning the old value.",
+    "ruser": "User-defined read action.",
+}
+
+
+def _completion_context(text: str, line_0b: int, char_0b: int) -> str:
+    """Detect what the cursor is right of, so we can narrow the suggestion list.
+
+    Looks at the line up to ``char_0b`` and matches the trailing token. Returns
+    one of:
+
+    - ``"sw_value"`` / ``"hw_value"`` — after ``sw =`` / ``hw =``
+    - ``"onwrite_value"`` — after ``onwrite =``
+    - ``"onread_value"`` — after ``onread =``
+    - ``"general"`` — anywhere else (full catalogue)
+
+    The match is single-line; SystemRDL property assignments rarely span lines
+    in practice, and supporting that would require a real parser.
+    """
+    import re
+    lines = text.splitlines()
+    if line_0b < 0 or line_0b >= len(lines):
+        return "general"
+    prefix = lines[line_0b][:char_0b]
+    m = re.search(r"\b(sw|hw|onwrite|onread)\s*=\s*\w*$", prefix)
+    if m:
+        return f"{m.group(1)}_value"
+    return "general"
+
+
+def _make_items(catalogue: dict[str, str], kind: CompletionItemKind) -> list[CompletionItem]:
+    return [
+        CompletionItem(label=label, kind=kind, detail=doc, documentation=doc)
+        for label, doc in catalogue.items()
+    ]
 
 
 def _completion_items_static() -> list[CompletionItem]:
-    """Build the keyword/property/value catalogue once per request — these never
-    change at runtime, but pygls can't reuse a list across requests safely (the
-    items get serialised in place), so we recreate cheaply.
+    """Full keyword + property + value catalogue with one-line docs.
+
+    Used for the ``"general"`` context. Each item carries both ``detail`` (shown
+    on the right side of the popup row) and ``documentation`` (shown when the
+    user expands the side panel) so the user sees the explanation without
+    extra interaction.
     """
     items: list[CompletionItem] = []
-    for kw in SYSTEMRDL_TOP_KEYWORDS:
-        items.append(CompletionItem(label=kw, kind=CompletionItemKind.Keyword))
-    for prop in SYSTEMRDL_PROPERTIES:
-        items.append(CompletionItem(label=prop, kind=CompletionItemKind.Property))
-    for val in SYSTEMRDL_ACCESS_VALUES:
-        items.append(CompletionItem(label=val, kind=CompletionItemKind.EnumMember))
+    items.extend(_make_items(SYSTEMRDL_TOP_KEYWORDS, CompletionItemKind.Keyword))
+    items.extend(_make_items(SYSTEMRDL_PROPERTIES, CompletionItemKind.Property))
+    # Combined access values — the union of all RHS catalogues so plain
+    # autocomplete (no `=` context) still surfaces them. Context-aware
+    # narrowing happens in the handler.
+    items.extend(_make_items(SYSTEMRDL_RW_VALUES, CompletionItemKind.EnumMember))
+    items.extend(_make_items(SYSTEMRDL_ONWRITE_VALUES, CompletionItemKind.EnumMember))
+    items.extend(_make_items(SYSTEMRDL_ONREAD_VALUES, CompletionItemKind.EnumMember))
     return items
+
+
+def _completion_items_for_context(context: str) -> list[CompletionItem]:
+    """Return the value subset for a property-RHS context, or [] for general.
+
+    ``"sw_value"`` / ``"hw_value"`` → access modes. ``"onwrite_value"`` →
+    woclr/woset/wzc/etc. ``"onread_value"`` → rclr/rset/ruser. Anything else
+    falls through to the static full catalogue.
+    """
+    if context in ("sw_value", "hw_value"):
+        return _make_items(SYSTEMRDL_RW_VALUES, CompletionItemKind.EnumMember)
+    if context == "onwrite_value":
+        return _make_items(SYSTEMRDL_ONWRITE_VALUES, CompletionItemKind.EnumMember)
+    if context == "onread_value":
+        return _make_items(SYSTEMRDL_ONREAD_VALUES, CompletionItemKind.EnumMember)
+    return []
 
 
 def _completion_items_for_types(roots: list["RootNode"]) -> list[CompletionItem]:
@@ -893,18 +1014,33 @@ def _completion_items_for_types(roots: list["RootNode"]) -> list[CompletionItem]
     Uses :func:`_comp_defs_from_cached` to read ``inst.comp_defs`` — the same
     registry textDocument/definition resolves against — so the two providers
     can never disagree on what types exist. ``detail`` carries the component
-    kind (``addrmap``, ``regfile``, ``reg``, ``field``, …) which VSCode shows
-    on the right side of the suggestion popup.
+    kind (``addrmap``, ``regfile``, ``reg``, ``field``, …); ``documentation``
+    surfaces the component's ``name`` and ``desc`` properties when set, so the
+    user sees the human-readable label and long description in the popup.
     """
     items: list[CompletionItem] = []
     defs = _comp_defs_from_cached(roots)
     for name, comp in defs.items():
         kind_label = type(comp).__name__.lower()  # "addrmap" / "regfile" / "reg" / "field"
+        # `properties` is a dict on the Component; values may be None or the
+        # actual property values. We surface ``name`` (display label) and
+        # ``desc`` (long description) into the popup's documentation panel.
+        props = getattr(comp, "properties", {}) or {}
+        display_name = props.get("name")
+        desc = props.get("desc")
+        doc_lines: list[str] = []
+        if display_name:
+            doc_lines.append(f"**{display_name}**")
+        if desc:
+            doc_lines.append(str(desc))
+        if not doc_lines:
+            doc_lines.append(f"User-defined {kind_label} type.")
         items.append(
             CompletionItem(
                 label=name,
                 kind=CompletionItemKind.Class,
                 detail=kind_label,
+                documentation="\n\n".join(doc_lines),
             )
         )
     return items
@@ -1279,14 +1415,20 @@ def build_server() -> LanguageServer:
         """Suggest SystemRDL keywords, common properties, access values, and
         every type defined in the cached compile.
 
-        v1 is **scope-blind**: the same catalogue is offered everywhere — VSCode
-        filters by what the user has typed so the noise rarely shows. Real
-        scope handling (don't suggest ``addrmap`` inside a field body, do
-        suggest ``reset`` only inside a field/reg) needs an LL position-aware
-        analyser; defer until users complain.
+        Context-aware: looks at the line prefix to detect property assignments
+        like ``sw =`` and narrows the catalogue accordingly. So typing ``sw =``
+        followed by Ctrl-Space surfaces only ``rw`` / ``ro`` / ``wo`` / ``r`` /
+        ``w`` / ``na`` rather than the full keyword soup.
+
+        Outside an RHS context the full catalogue + user-defined types are
+        offered; VSCode filters by what the user has typed.
         """
-        items = _completion_items_static()
         cached = state.cache.get(params.text_document.uri)
+        text = cached.text if cached is not None else _read_buffer(params.text_document.uri) or ""
+        ctx = _completion_context(text, params.position.line, params.position.character)
+        if ctx != "general":
+            return CompletionList(is_incomplete=False, items=_completion_items_for_context(ctx))
+        items = _completion_items_static()
         if cached is not None and cached.roots:
             items.extend(_completion_items_for_types(cached.roots))
         return CompletionList(is_incomplete=False, items=items)

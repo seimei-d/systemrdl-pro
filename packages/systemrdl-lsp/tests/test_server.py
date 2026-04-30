@@ -18,6 +18,8 @@ from systemrdl_lsp.server import (
     ElaborationCache,
     _comp_defs_from_cached,
     _compile_text,
+    _completion_context,
+    _completion_items_for_context,
     _completion_items_for_types,
     _completion_items_static,
     _definition_location,
@@ -246,6 +248,54 @@ def test_static_completion_includes_keywords_and_access_values():
     assert "rw" in labels and "ro" in labels and "woclr" in labels
 
 
+def test_static_completion_items_carry_documentation():
+    """Every static item must have a non-empty `documentation` so VSCode shows
+    an explanation in the popup detail pane — bare labels are useless."""
+    items = _completion_items_static()
+    blanks = [it.label for it in items if not it.documentation]
+    assert not blanks, f"items missing documentation: {blanks}"
+
+
+def test_completion_context_detects_sw_assignment():
+    """Cursor right after `sw =` returns 'sw_value' so the handler narrows
+    suggestions to access modes only."""
+    # cursor at the very end of the prefix
+    text = "    field { sw = "
+    assert _completion_context(text, 0, len(text)) == "sw_value"
+    # extra typed chars after `=` still count
+    text2 = "    field { sw = r"
+    assert _completion_context(text2, 0, len(text2)) == "sw_value"
+
+
+def test_completion_context_detects_onwrite_assignment():
+    text = "    onwrite = "
+    assert _completion_context(text, 0, len(text)) == "onwrite_value"
+
+
+def test_completion_context_general_outside_assignment():
+    text = "    "
+    assert _completion_context(text, 0, len(text)) == "general"
+    text2 = "addrmap top {"
+    assert _completion_context(text2, 0, len(text2)) == "general"
+
+
+def test_completion_context_offers_only_rw_values_for_sw():
+    """The whole point — sw_value context must NOT include keywords."""
+    items = _completion_items_for_context("sw_value")
+    labels = {it.label for it in items}
+    assert "rw" in labels and "ro" in labels and "na" in labels
+    # Must NOT leak keywords or onwrite/onread values
+    assert "addrmap" not in labels and "reg" not in labels
+    assert "woclr" not in labels and "rclr" not in labels
+
+
+def test_completion_context_offers_only_onwrite_values():
+    items = _completion_items_for_context("onwrite_value")
+    labels = {it.label for it in items}
+    assert "woclr" in labels and "woset" in labels and "wzc" in labels
+    assert "rw" not in labels and "addrmap" not in labels
+
+
 def test_completion_offers_user_defined_types(tmp_path):
     """The viewer's typed sample registers ``ctrl_t``, ``status_reg_t``, etc.
     Those names should appear in the completion list so the user can pick them
@@ -259,6 +309,8 @@ def test_completion_offers_user_defined_types(tmp_path):
         # Detail describes the kind so VSCode can group/filter intelligently.
         ctrl = next(it for it in items if it.label == "my_ctrl_t")
         assert ctrl.detail == "reg", f"expected 'reg', got {ctrl.detail!r}"
+        # Documentation should never be empty — at minimum a "User-defined type" fallback.
+        assert ctrl.documentation
     finally:
         tmp.unlink(missing_ok=True)
 
