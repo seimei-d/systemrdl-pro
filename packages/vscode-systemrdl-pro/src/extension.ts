@@ -699,7 +699,7 @@ function renderViewerHtml(): string {
   <div class="body">
     <div class="tree-pane">
       <div id="filter-bar" class="filter-bar">
-        <input id="filter-input" type="text" placeholder="Filter registers (Esc to clear)…" />
+        <input id="filter-input" type="text" placeholder="Filter by name, address (0x10), field, or access (rw)…" />
         <div id="filter-hint" class="filter-hint"></div>
       </div>
       <div id="tree-host" class="tree-host">
@@ -717,7 +717,10 @@ function renderViewerHtml(): string {
 const vscode = acquireVsCodeApi();
 
 // State persisted across messages within the same panel session.
-let state = { roots: [], activeRootIndex: 0, selectedRegKey: null, filter: '' };
+// collapsedKeys holds dotted paths of containers (addrmap/regfile) the user
+// has manually collapsed. Survives tree refreshes — paths are stable as long
+// as the user doesn't rename instances. Cleared on tab switch.
+let state = { roots: [], activeRootIndex: 0, selectedRegKey: null, filter: '', collapsedKeys: new Set() };
 
 window.addEventListener('message', (event) => {
   const m = event.data;
@@ -823,17 +826,34 @@ function renderTree() {
   if (sel) sel.scrollIntoView({ block: 'nearest' });
 }
 
-// Returns true if the subtree rooted at 'node' contains a reg/field whose
-// name matches the filter. Used to decide whether to keep container rows visible.
+// Returns true if the subtree rooted at 'node' matches the filter. The filter
+// is checked against (in order): the reg/container name, the register address,
+// every field's name, and every field's access mode. A filter that *looks* hex
+// (0x-prefixed or all hex digits) is normalised — "0x10", "10", "0010" all
+// match a register stored as "0x0000_0010" via substring on the canonical form.
+function looksLikeHex(s) {
+  if (!s) return false;
+  return /^(0x)?[0-9a-f_]+$/i.test(s);
+}
+function normalizeAddr(s) {
+  return String(s || '').toLowerCase().replace(/^0x/, '').replace(/_/g, '');
+}
 function subtreeMatches(node, filter) {
   if (!filter) return true;
+  const lower = filter.toLowerCase();
+  const hexFilter = looksLikeHex(filter) ? normalizeAddr(filter) : null;
   if (node.kind === 'reg') {
-    if (node.name.toLowerCase().includes(filter)) return true;
-    return (node.fields || []).some(f => f.name.toLowerCase().includes(filter));
+    if (node.name.toLowerCase().includes(lower)) return true;
+    if (hexFilter && normalizeAddr(node.address).includes(hexFilter)) return true;
+    return (node.fields || []).some(f =>
+      f.name.toLowerCase().includes(lower) ||
+      (f.access && f.access.toLowerCase().includes(lower))
+    );
   }
-  // For containers (addrmap/regfile), keep them if any descendant matches OR
-  // their own name matches.
-  if (node.name && node.name.toLowerCase().includes(filter)) return true;
+  // For containers (addrmap/regfile), keep them if their own name/address matches
+  // or if any descendant does.
+  if (node.name && node.name.toLowerCase().includes(lower)) return true;
+  if (hexFilter && normalizeAddr(node.address).includes(hexFilter)) return true;
   return (node.children || []).some(c => subtreeMatches(c, filter));
 }
 
@@ -848,19 +868,28 @@ function walk(node, host, depth, pathSegments) {
   if (node.kind === 'addrmap' || node.kind === 'regfile') {
     // Render container as a header row so nested addrmaps (cpu0, cpu1, …) are
     // visible — otherwise their child registers collide visually.
+    const containerKey = pathSegments.concat([node.name]).join('.');
+    // Filter active overrides manual collapse — otherwise filtering would hide
+    // matches that live inside a folded branch.
+    const isCollapsed = !state.filter && state.collapsedKeys.has(containerKey);
+    const caret = isCollapsed ? '▶' : '▼';
     const row = document.createElement('div');
     row.className = 'row container ' + indent;
     const kindLabel = node.kind + (node.type ? ' (' + node.type + ')' : '');
-    row.innerHTML = '<span class="caret">▼</span>' +
+    row.innerHTML = '<span class="caret">' + caret + '</span>' +
       '<span class="addr">' + node.address + '</span>' +
       '<span class="name">' + escapeHtml(node.name) + '</span>' +
       '<span class="access" title="' + escapeHtml(kindLabel) + '">' + escapeHtml(kindLabel) + '</span>';
-    if (node.source) {
-      row.title = 'Click to reveal in editor';
-      row.addEventListener('click', () => postReveal(node.source));
-    }
+    row.title = isCollapsed ? 'Click to expand' : 'Click to collapse';
+    row.addEventListener('click', () => {
+      if (state.collapsedKeys.has(containerKey)) state.collapsedKeys.delete(containerKey);
+      else state.collapsedKeys.add(containerKey);
+      renderTree();
+    });
     host.appendChild(row);
-    walkChildren(node, host, depth + 1, pathSegments.concat([node.name]));
+    if (!isCollapsed) {
+      walkChildren(node, host, depth + 1, pathSegments.concat([node.name]));
+    }
     return;
   }
   if (node.kind === 'reg') {

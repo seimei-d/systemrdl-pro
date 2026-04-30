@@ -337,7 +337,7 @@ if (args.open) {
 // ---------------------------------------------------------------------------
 
 const RENDER_JS = `
-let state = { roots: [], activeRootIndex: 0, selectedRegKey: null, filter: '' };
+let state = { roots: [], activeRootIndex: 0, selectedRegKey: null, filter: '', collapsedKeys: new Set() };
 
 function setConn(cls, text) {
   const el = document.getElementById('conn');
@@ -442,13 +442,27 @@ function renderTree() {
   if (sel) sel.scrollIntoView({ block: 'nearest' });
 }
 
+function looksLikeHex(s) {
+  if (!s) return false;
+  return /^(0x)?[0-9a-f_]+$/i.test(s);
+}
+function normalizeAddr(s) {
+  return String(s || '').toLowerCase().replace(/^0x/, '').replace(/_/g, '');
+}
 function subtreeMatches(node, filter) {
   if (!filter) return true;
+  const lower = filter.toLowerCase();
+  const hexFilter = looksLikeHex(filter) ? normalizeAddr(filter) : null;
   if (node.kind === 'reg') {
-    if (node.name.toLowerCase().includes(filter)) return true;
-    return (node.fields || []).some(f => f.name.toLowerCase().includes(filter));
+    if (node.name.toLowerCase().includes(lower)) return true;
+    if (hexFilter && normalizeAddr(node.address).includes(hexFilter)) return true;
+    return (node.fields || []).some(f =>
+      f.name.toLowerCase().includes(lower) ||
+      (f.access && f.access.toLowerCase().includes(lower))
+    );
   }
-  if (node.name && node.name.toLowerCase().includes(filter)) return true;
+  if (node.name && node.name.toLowerCase().includes(lower)) return true;
+  if (hexFilter && normalizeAddr(node.address).includes(hexFilter)) return true;
   return (node.children || []).some(c => subtreeMatches(c, filter));
 }
 
@@ -460,15 +474,26 @@ function walk(node, host, depth, segs) {
   const indent = 'indent-' + Math.min(depth, 3);
   if (state.filter && !subtreeMatches(node, state.filter)) return;
   if (node.kind === 'addrmap' || node.kind === 'regfile') {
+    const containerKey = segs.concat([node.name]).join('.');
+    const isCollapsed = !state.filter && state.collapsedKeys.has(containerKey);
+    const caret = isCollapsed ? '▶' : '▼';
     const row = document.createElement('div');
     row.className = 'row container ' + indent;
     const kindLabel = node.kind + (node.type ? ' (' + node.type + ')' : '');
-    row.innerHTML = '<span class="caret">▼</span>' +
+    row.innerHTML = '<span class="caret">' + caret + '</span>' +
       '<span class="addr">' + node.address + '</span>' +
       '<span class="name">' + escapeHtml(node.name) + '</span>' +
       '<span class="access">' + escapeHtml(kindLabel) + '</span>';
+    row.title = isCollapsed ? 'Click to expand' : 'Click to collapse';
+    row.addEventListener('click', () => {
+      if (state.collapsedKeys.has(containerKey)) state.collapsedKeys.delete(containerKey);
+      else state.collapsedKeys.add(containerKey);
+      renderTree();
+    });
     host.appendChild(row);
-    walkChildren(node, host, depth + 1, segs.concat([node.name]));
+    if (!isCollapsed) {
+      walkChildren(node, host, depth + 1, segs.concat([node.name]));
+    }
     return;
   }
   if (node.kind === 'reg') {
@@ -732,7 +757,7 @@ function renderHtml(filename: string): string {
   <div class="body">
     <div class="tree-pane">
       <div id="filter-bar" class="filter-bar">
-        <input id="filter-input" type="text" placeholder="Filter registers (Esc to clear)…" />
+        <input id="filter-input" type="text" placeholder="Filter by name, address (0x10), field, or access (rw)…" />
         <div id="filter-hint" class="filter-hint"></div>
       </div>
       <div id="tree-host" class="tree-host">
