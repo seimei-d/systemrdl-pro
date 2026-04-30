@@ -16,12 +16,15 @@ from systemrdl.messages import Severity
 from systemrdl_lsp import server as server_mod
 from systemrdl_lsp.server import (
     ElaborationCache,
+    _comp_defs_from_cached,
     _compile_text,
+    _definition_location,
     _document_symbols,
     _elaborate,
     _hover_text_for_node,
     _node_at_position,
     _src_ref_to_range,
+    _word_at_position,
 )
 
 VALID_RDL = textwrap.dedent("""
@@ -160,6 +163,69 @@ MULTI_ADDRMAP_RDL = textwrap.dedent("""
         reg { field { sw=rw; hw=r; } c[0:0]=0; } STATUS @ 0x4;
     };
 """).strip()
+
+
+# ---------------------------------------------------------------------------
+# textDocument/definition (W2-6)
+# ---------------------------------------------------------------------------
+
+
+TYPED_RDL = textwrap.dedent("""
+    reg my_ctrl_t {
+        field { sw=rw; hw=r; } enable[0:0] = 0;
+    };
+    addrmap top {
+        my_ctrl_t CTRL @ 0x0;
+        my_ctrl_t STATUS @ 0x4;
+    };
+""").strip()
+
+
+def test_word_at_position_extracts_identifier_under_cursor():
+    """Cursor inside, at start, and at trailing edge of an identifier all match."""
+    text = "  my_ctrl_t CTRL @ 0x0;\n"
+    # 0123456789012345678901234
+    assert _word_at_position(text, 0, 2) == "my_ctrl_t"  # at start
+    assert _word_at_position(text, 0, 6) == "my_ctrl_t"  # inside
+    assert _word_at_position(text, 0, 11) == "my_ctrl_t"  # trailing edge
+    assert _word_at_position(text, 0, 12) == "CTRL"  # next ident
+    assert _word_at_position(text, 0, 17) is None  # whitespace
+    assert _word_at_position(text, 0, 19) is None  # numeric (0x0)
+
+
+def test_word_at_position_handles_out_of_range():
+    text = "addrmap top {};"
+    assert _word_at_position(text, 999, 0) is None
+    assert _word_at_position(text, 0, 999) is None
+    assert _word_at_position("", 0, 0) is None
+
+
+def test_definition_resolves_top_level_type(tmp_path):
+    """F12 on ``my_ctrl_t`` (line 5, col 4) jumps to its ``reg`` definition (line 1)."""
+    uri = (tmp_path / "x.rdl").as_uri()
+    _msgs, roots, tmp = _compile_text(uri, TYPED_RDL)
+    try:
+        assert roots, "expected at least one elaborated root"
+        defs = _comp_defs_from_cached(roots)
+        assert "my_ctrl_t" in defs and "top" in defs
+        loc = _definition_location(defs["my_ctrl_t"], path_translate={tmp: tmp_path / "x.rdl"})
+        assert loc is not None
+        # ``reg my_ctrl_t {`` is line 1 in the source (1-based) → LSP line 0 (0-based).
+        assert loc.range.start.line == 0, f"expected LSP line 0, got {loc.range.start.line}"
+        # File path was translated from the temp file back to the workspace path.
+        assert loc.uri == (tmp_path / "x.rdl").as_uri()
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def test_definition_returns_none_for_unknown_word(tmp_path):
+    uri = (tmp_path / "x.rdl").as_uri()
+    _msgs, roots, tmp = _compile_text(uri, TYPED_RDL)
+    try:
+        defs = _comp_defs_from_cached(roots)
+        assert "doesnotexist" not in defs
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def test_multi_addrmap_elaborates_each_top_level_definition(tmp_path):
