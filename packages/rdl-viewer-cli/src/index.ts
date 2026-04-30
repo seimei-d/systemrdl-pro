@@ -24,6 +24,9 @@
  */
 
 import { spawnSync, spawn } from 'node:child_process';
+// `spawnSync` is still used for the synchronous python/module probes at startup —
+// those run once, the output is tiny, and we can block the event loop for a
+// few hundred ms. The recompile path uses async `spawn` to dodge maxBuffer.
 import { existsSync, watch } from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
@@ -115,27 +118,61 @@ function checkLspModule(python: string): boolean {
 
 type DumpResult = { ok: boolean; tree: unknown | null; stderr: string };
 
-function runDump(python: string, file: string): DumpResult {
-  const r = spawnSync(python, ['-m', 'systemrdl_lsp.dump', file], {
-    stdio: 'pipe',
-    timeout: 15_000,
+const DUMP_TIMEOUT_MS = 15_000;
+
+/**
+ * Spawn ``python -m systemrdl_lsp.dump`` and collect stdout/stderr without the
+ * 1 MB ``spawnSync`` ``maxBuffer`` ceiling — a 1000-register file emits ~8 MB
+ * of JSON and ``spawnSync`` would silently kill the child mid-stream. We use
+ * the async ``spawn`` + chunk concatenation, with a wall-clock timeout that
+ * matches the LSP's own ``ELABORATION_TIMEOUT_SECONDS``.
+ */
+function runDump(python: string, file: string): Promise<DumpResult> {
+  return new Promise((resolve) => {
+    const child = spawn(python, ['-m', 'systemrdl_lsp.dump', file], { stdio: 'pipe' });
+    const outChunks: Buffer[] = [];
+    const errChunks: Buffer[] = [];
+    let settled = false;
+
+    const finish = (r: DumpResult) => {
+      if (settled) return;
+      settled = true;
+      resolve(r);
+    };
+
+    const killTimer = setTimeout(() => {
+      child.kill('SIGTERM');
+      finish({ ok: false, tree: null, stderr: `dump exceeded ${DUMP_TIMEOUT_MS / 1000}s wall-clock` });
+    }, DUMP_TIMEOUT_MS);
+
+    child.stdout?.on('data', (c: Buffer) => outChunks.push(c));
+    child.stderr?.on('data', (c: Buffer) => errChunks.push(c));
+    child.on('error', err => {
+      clearTimeout(killTimer);
+      finish({ ok: false, tree: null, stderr: `dump spawn failed: ${err}` });
+    });
+    child.on('close', (code) => {
+      clearTimeout(killTimer);
+      const stdout = Buffer.concat(outChunks).toString('utf8');
+      const stderr = Buffer.concat(errChunks).toString('utf8');
+      let tree: unknown = null;
+      if (stdout.trim().length > 0) {
+        try {
+          tree = JSON.parse(stdout);
+        } catch (e) {
+          finish({
+            ok: false,
+            tree: null,
+            stderr: `dump JSON parse failed: ${e}\n${stdout.slice(0, 200)}\n${stderr}`,
+          });
+          return;
+        }
+      }
+      // exit 0 → ok; 1 → library file (envelope still valid); 2 → parse errors
+      // (envelope marked stale=true, still useful as last-good).
+      finish({ ok: code === 0, tree, stderr });
+    });
   });
-  const stdout = r.stdout?.toString() ?? '';
-  const stderr = r.stderr?.toString() ?? '';
-  if (r.status === null) {
-    return { ok: false, tree: null, stderr: 'dump child timed out' };
-  }
-  let tree: unknown = null;
-  if (stdout.trim().length > 0) {
-    try {
-      tree = JSON.parse(stdout);
-    } catch (e) {
-      return { ok: false, tree: null, stderr: `dump JSON parse failed: ${e}\n${stdout.slice(0, 200)}` };
-    }
-  }
-  // status 0 → ok with roots; status 1 → library file (no roots, but JSON envelope is fine);
-  // status 2 → parse errors (envelope already marked stale=true, still useful for last-good).
-  return { ok: r.status === 0, tree, stderr };
 }
 
 // ---------------------------------------------------------------------------
@@ -178,17 +215,37 @@ if (!checkLspModule(python)) {
 let latestTree: unknown = null;
 let latestStderr = '';
 
-function refresh(): void {
-  const r = runDump(python, args.file);
-  latestTree = r.tree;
-  latestStderr = r.stderr;
-  if (r.tree !== null) broadcast(JSON.stringify(r.tree));
-  if (r.stderr.trim().length > 0) {
-    process.stderr.write(`[${new Date().toISOString()}] systemrdl-lsp:\n${r.stderr}`);
+// Debounce concurrent refreshes — fs.watch can fire 2–3 times for an atomic
+// save (write + rename), and large files make each dump take seconds. We
+// queue at most one follow-up: if a save lands while the previous dump is
+// still running, we re-run once it finishes. Subsequent saves coalesce.
+let refreshInFlight = false;
+let refreshQueued = false;
+
+async function refresh(): Promise<void> {
+  if (refreshInFlight) {
+    refreshQueued = true;
+    return;
+  }
+  refreshInFlight = true;
+  try {
+    const r = await runDump(python, args.file);
+    latestTree = r.tree;
+    latestStderr = r.stderr;
+    if (r.tree !== null) broadcast(JSON.stringify(r.tree));
+    if (r.stderr.trim().length > 0) {
+      process.stderr.write(`[${new Date().toISOString()}] systemrdl-lsp:\n${r.stderr}`);
+    }
+  } finally {
+    refreshInFlight = false;
+    if (refreshQueued) {
+      refreshQueued = false;
+      void refresh();
+    }
   }
 }
 
-refresh();
+void refresh();
 
 let watchTimer: ReturnType<typeof setTimeout> | undefined;
 const watcher = watch(args.file, () => {
