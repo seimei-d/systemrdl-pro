@@ -19,6 +19,7 @@ from systemrdl_lsp.server import (
     _comp_defs_from_cached,
     _compile_text,
     _completion_context,
+    _peakrdl_toml_paths,
     _completion_items_for_context,
     _completion_items_for_types,
     _completion_items_static,
@@ -353,6 +354,43 @@ def test_completion_offers_user_defined_types(tmp_path):
         assert ctrl.documentation
     finally:
         tmp.unlink(missing_ok=True)
+
+
+def test_peakrdl_toml_extracts_relative_paths(tmp_path):
+    """peakrdl.toml in the file's directory contributes incl_search_paths."""
+    (tmp_path / "lib").mkdir()
+    (tmp_path / "common").mkdir()
+    (tmp_path / "peakrdl.toml").write_text(
+        "[parser]\nincl_search_paths = [\"lib\", \"common\"]\n",
+        encoding="utf-8",
+    )
+    rdl = tmp_path / "x.rdl"
+    rdl.write_text(VALID_RDL, encoding="utf-8")
+    paths = _peakrdl_toml_paths(rdl)
+    assert any(p.endswith("/lib") for p in paths)
+    assert any(p.endswith("/common") for p in paths)
+
+
+def test_peakrdl_toml_walks_up_to_find_config(tmp_path):
+    """A peakrdl.toml in an ancestor directory is honoured (workspace root case)."""
+    workspace = tmp_path / "ws"
+    sub = workspace / "src" / "blocks"
+    sub.mkdir(parents=True)
+    (workspace / "lib").mkdir()
+    (workspace / "peakrdl.toml").write_text(
+        "[parser]\nincl_search_paths = [\"lib\"]\n",
+        encoding="utf-8",
+    )
+    rdl = sub / "block.rdl"
+    rdl.write_text(VALID_RDL, encoding="utf-8")
+    paths = _peakrdl_toml_paths(rdl)
+    assert paths and paths[0].endswith("/lib")
+
+
+def test_peakrdl_toml_missing_returns_empty(tmp_path):
+    rdl = tmp_path / "x.rdl"
+    rdl.write_text(VALID_RDL, encoding="utf-8")
+    assert _peakrdl_toml_paths(rdl) == []
 
 
 def test_multi_addrmap_elaborates_each_top_level_definition(tmp_path):

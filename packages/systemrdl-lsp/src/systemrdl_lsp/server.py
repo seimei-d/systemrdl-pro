@@ -59,7 +59,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 SERVER_NAME = "systemrdl-lsp"
-SERVER_VERSION = "0.8.2"
+SERVER_VERSION = "0.9.0"
 DEBOUNCE_SECONDS = 0.3
 ELABORATED_TREE_SCHEMA_VERSION = "0.1.0"
 # Eng-review safety net #3: cap a single elaborate pass at 10s wall-clock.
@@ -134,6 +134,47 @@ class CapturingPrinter(MessagePrinter):
 # ---------------------------------------------------------------------------
 
 
+def _peakrdl_toml_paths(start: pathlib.Path) -> list[str]:
+    """Walk upward from ``start`` looking for ``peakrdl.toml`` and read its
+    ``[parser] incl_search_paths`` array.
+
+    PeakRDL's own CLI honours this same key, so a project that already builds
+    with PeakRDL just works in the editor without re-declaring its include
+    tree under ``systemrdl-pro.includePaths``. Workspace-relative paths are
+    resolved against the .toml's own directory, matching PeakRDL semantics.
+    """
+    try:
+        import tomllib  # Python 3.11+
+    except ImportError:
+        return []
+    parent = start.parent if start.is_file() else start
+    seen: set[pathlib.Path] = set()
+    for cur in [parent, *parent.parents]:
+        if cur in seen:
+            break
+        seen.add(cur)
+        toml_path = cur / "peakrdl.toml"
+        if not toml_path.is_file():
+            continue
+        try:
+            data = tomllib.loads(toml_path.read_text(encoding="utf-8"))
+        except Exception:
+            logger.debug("failed to parse %s", toml_path, exc_info=True)
+            return []
+        parser = data.get("parser") or {}
+        raw = parser.get("incl_search_paths") or []
+        out: list[str] = []
+        for p in raw:
+            if not isinstance(p, str):
+                continue
+            candidate = pathlib.Path(p)
+            if not candidate.is_absolute():
+                candidate = (cur / candidate).resolve()
+            out.append(str(candidate))
+        return out
+    return []
+
+
 def _compile_text(
     uri: str,
     text: str,
@@ -163,6 +204,9 @@ def _compile_text(
 
     original_path = _uri_to_path(uri)
     search_paths = list(incl_search_paths or [])
+    # peakrdl.toml's [parser] incl_search_paths are appended *after* the user's
+    # explicit setting, so per-workspace overrides win on collision.
+    search_paths.extend(_peakrdl_toml_paths(original_path))
     if original_path.parent.exists():
         search_paths.append(str(original_path.parent))
 
