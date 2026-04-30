@@ -244,7 +244,6 @@ export function Viewer({ transport }: Props) {
                 <option value="name">Name</option>
                 <option value="address">Address</option>
                 <option value="field">Field</option>
-                <option value="access">Access</option>
               </select>
               <input
                 id="rdl-filter-input"
@@ -285,8 +284,7 @@ function filterScopePlaceholder(scope: FilterScope): string {
     case 'name':    return 'Filter by register or container name…';
     case 'address': return 'Filter by address (e.g. 0x10, 0010)…';
     case 'field':   return 'Filter by field name…';
-    case 'access':  return 'Filter by access mode (rw, ro, woclr, …)…';
-    default:        return 'Filter (matches name/address/field/access)…';
+    default:        return 'Filter (matches name, address, or field name)…';
   }
 }
 

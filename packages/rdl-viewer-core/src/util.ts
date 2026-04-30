@@ -19,11 +19,12 @@ export function normalizeAddr(s: string | undefined): string {
 
 /**
  * Filter scope — which fields the user wants the filter text matched against.
- * 'all' is the default and matches everywhere; the others restrict so a literal
- * "rw" only finds registers with RW fields when the user picked Access scope,
- * not every register/container that happens to contain "rw" in its name.
+ * 'all' is the default and matches name + address + field name. Access mode
+ * is intentionally excluded — searching by "rw" surfaces too many false
+ * positives (every reg with at least one RW field), and there's no real use
+ * case where the user needs to enumerate "all RW registers" interactively.
  */
-export type FilterScope = 'all' | 'name' | 'address' | 'field' | 'access';
+export type FilterScope = 'all' | 'name' | 'address' | 'field';
 
 /**
  * Whether the subtree rooted at `node` matches the filter under the chosen
@@ -38,12 +39,8 @@ export function subtreeMatches(node: TreeNode, filter: string, scope: FilterScop
   if (node.kind === 'reg') {
     if (m('name') && node.name.toLowerCase().includes(lower)) return true;
     if (m('address') && hex && normalizeAddr(node.address).includes(hex)) return true;
-    if (m('field') || m('access')) {
-      return (node.fields || []).some(f => {
-        if (m('field') && f.name.toLowerCase().includes(lower)) return true;
-        if (m('access') && f.access && f.access.toLowerCase().includes(lower)) return true;
-        return false;
-      });
+    if (m('field')) {
+      return (node.fields || []).some(f => f.name.toLowerCase().includes(lower));
     }
     return false;
   }
