@@ -41,7 +41,7 @@ Powered by [`systemrdl-lsp`](https://pypi.org/project/systemrdl-lsp/) +
 
 ## Install
 
-1. Install from the [Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=madeinheaven-devv.vscode-systemrdl-pro).
+1. Install from the [Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=seimei-d.vscode-systemrdl-pro).
 2. Install the LSP backend in your Python interpreter:
 
    ```bash
@@ -76,7 +76,7 @@ Powered by [`systemrdl-lsp`](https://pypi.org/project/systemrdl-lsp/) +
 
 There's also a no-VSCode standalone viewer that serves the same UI in your
 browser — `bun rdl-viewer file.rdl` opens `http://localhost:5173/` with live
-fs.watch updates. See the [`rdl-viewer`](https://github.com/madeinheaven-devv/systemrdl-pro/tree/main/packages/rdl-viewer-cli)
+fs.watch updates. See the [`rdl-viewer`](https://github.com/seimei-d/systemrdl-pro/tree/main/packages/rdl-viewer-cli)
 package.
 
 ## Coexistence with `SystemRDL/vscode-systemrdl`

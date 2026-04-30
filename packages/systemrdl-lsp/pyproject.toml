@@ -5,7 +5,7 @@ description = "Language Server for SystemRDL 2.0 — diagnostics, hover, outline
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-authors = [{ name = "madeinheaven-devv" }]
+authors = [{ name = "seimei-d" }]
 keywords = ["systemrdl", "lsp", "language-server", "hardware", "registers"]
 classifiers = [
   "Development Status :: 3 - Alpha",
@@ -29,9 +29,9 @@ dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.6"]
 systemrdl-lsp = "systemrdl_lsp.__main__:main"
 
 [project.urls]
-Homepage = "https://github.com/madeinheaven-devv/systemrdl-pro"
-Issues = "https://github.com/madeinheaven-devv/systemrdl-pro/issues"
-Source = "https://github.com/madeinheaven-devv/systemrdl-pro/tree/main/packages/systemrdl-lsp"
+Homepage = "https://github.com/seimei-d/systemrdl-pro"
+Issues = "https://github.com/seimei-d/systemrdl-pro/issues"
+Source = "https://github.com/seimei-d/systemrdl-pro/tree/main/packages/systemrdl-lsp"
 
 [build-system]
 requires = ["hatchling"]

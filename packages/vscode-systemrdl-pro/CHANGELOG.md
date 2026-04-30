@@ -42,7 +42,7 @@ First public Marketplace release. Walking skeleton ➝ feature-complete viewer.
 ### Architecture
 
 - Renderer extracted from inline JS into shared
-  [`@systemrdl-pro/viewer-core`](https://github.com/madeinheaven-devv/systemrdl-pro/tree/main/packages/rdl-viewer-core)
+  [`@systemrdl-pro/viewer-core`](https://github.com/seimei-d/systemrdl-pro/tree/main/packages/rdl-viewer-core)
   React bundle, consumed by both the VSCode webview and the standalone
   `rdl-viewer` CLI
 
