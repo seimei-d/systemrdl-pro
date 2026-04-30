@@ -23,33 +23,37 @@ otherwise. Triggered when first user reports "viewer feels slow on my chip."
 
 ---
 
-### TODO-4: Perl preprocessor support (`<% ... %>` and `<%= $VAR %>`)
+### TODO-4: Perl preprocessor — surface options & document caveats (RESOLVED upstream)
 
-**What:** Add support for SystemRDL Perl-level preprocessor (clause 16 of spec).
+**STATUS update 2026-04-30:** systemrdl-compiler 1.32.x **already supports** the
+Perl preprocessor — `systemrdl/preprocessor/perl_preprocessor.py` shells out to a
+real `perl` binary via subprocess. ``compile_file()`` runs Perl + Verilog
+preprocessors in order before parsing. Earlier README claim was wrong.
 
-**Why:** Real industrial SystemRDL projects often use Perl directives for variables in
-include paths (e.g., `` `include "<%=$ENV{IP_ROOT}%>/lib.rdl" ``) and for loop-based
-register generation. Without support, these projects fail to load entirely.
+**Tested working** with `<% for my $i (0..3) { %>… <%=$i%> …<% } %>` register
+generation on the dev machine.
 
-**Pros:** Unblocks adoption from teams using commercial-tool conventions. Removes a
-hard limitation. Differentiator vs basic vscode-systemrdl extension.
-**Cons:** systemrdl-compiler itself does not support Perl preprocessing. Implementation
-must be a pre-pass (text transformation) before passing to systemrdl-compiler. Source
-locations get scrambled by the pre-pass — diagnostics need source map back to original.
+**What's left (small, surface-level):**
 
-**Context:** SystemRDL 2.0 spec defines two preprocessor levels:
-- Verilog-style (` `include`, ` `define`, ` `ifdef`) — supported by systemrdl-compiler
-- Perl-style (`<% %>`, `<%= %>`) — NOT supported by systemrdl-compiler
+- **Pre-flight check**: when `perl` is not on PATH, the LSP should detect it
+  and show a one-time "install Perl to enable Perl preprocessor" notification
+  instead of letting the fatal diagnostic fire on every save.
+- **Setting** `systemrdl-pro.perlSafeOpcodes`: the compiler's default Perl
+  ``Safe`` opcode set bans `print` and most I/O. Power users who do code
+  generation via `print` need to extend the list (add `:base_io`). Plumb the
+  setting through to `RDLCompiler(perl_safe_opcodes=…)`.
+- **Document the gotcha**: `<%=expr%>` rejects leading whitespace inside the
+  tags — `<%= $i %>` errors with "Invalid text found in Perl macro expansion".
+  README + a sample that demonstrates the working form.
 
-Implementation options:
-- External `m4` pre-step (limited but standard)
-- Embedded `Text::EP3` Perl module (matches spec, requires Perl interpreter)
-- Custom subset interpreter in Python (just env-var expansion, covers 80% of real use)
+**Not in scope:** my own `$VAR` substitution (committed 2026-04-30) overlaps
+with what Perl can do via `<%=$ENV{IP_ROOT}%>`. Keep the lightweight setting
+for users who don't have `perl` installed; users with perl can use the full
+preprocessor instead.
 
-For MVP (v1.0): document limitation in README. After first issue from user requesting it,
-choose implementation based on which use case they need.
-
-**Depends on / blocked by:** v1.0 must ship first. User issue driving prioritization.
+**Depends on / blocked by:** Nothing — incremental polish on an already-working
+feature. Promote to active when a user reports `perl` not detected or runs
+into the safe-opcode wall.
 
 ---
 
