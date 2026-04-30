@@ -2,7 +2,7 @@
   "name": "vscode-systemrdl-pro",
   "displayName": "SystemRDL Pro",
   "description": "Live diagnostics + interactive memory-map viewer for SystemRDL 2.0",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "publisher": "madeinheaven-dev",
   "license": "MIT",
   "icon": "media/icon.png",

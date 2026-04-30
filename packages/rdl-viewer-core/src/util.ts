@@ -18,27 +18,38 @@ export function normalizeAddr(s: string | undefined): string {
 }
 
 /**
- * Whether the subtree rooted at `node` matches the filter. Filter scope:
- * register/container name, register address, field name, and field access mode.
- * A filter that looks hex (`looksLikeHex`) is normalised and substring-matched
- * against the canonical address form (so "0x10" / "10" / "0010" all hit a
- * register at 0x0000_0010).
+ * Filter scope — which fields the user wants the filter text matched against.
+ * 'all' is the default and matches everywhere; the others restrict so a literal
+ * "rw" only finds registers with RW fields when the user picked Access scope,
+ * not every register/container that happens to contain "rw" in its name.
  */
-export function subtreeMatches(node: TreeNode, filter: string): boolean {
+export type FilterScope = 'all' | 'name' | 'address' | 'field' | 'access';
+
+/**
+ * Whether the subtree rooted at `node` matches the filter under the chosen
+ * scope. Hex normalisation still applies for address matches.
+ */
+export function subtreeMatches(node: TreeNode, filter: string, scope: FilterScope = 'all'): boolean {
   if (!filter) return true;
   const lower = filter.toLowerCase();
   const hex = looksLikeHex(filter) ? normalizeAddr(filter) : null;
+  const m = (s: FilterScope) => scope === 'all' || scope === s;
+
   if (node.kind === 'reg') {
-    if (node.name.toLowerCase().includes(lower)) return true;
-    if (hex && normalizeAddr(node.address).includes(hex)) return true;
-    return (node.fields || []).some(
-      f => f.name.toLowerCase().includes(lower) ||
-           (f.access && f.access.toLowerCase().includes(lower)),
-    );
+    if (m('name') && node.name.toLowerCase().includes(lower)) return true;
+    if (m('address') && hex && normalizeAddr(node.address).includes(hex)) return true;
+    if (m('field') || m('access')) {
+      return (node.fields || []).some(f => {
+        if (m('field') && f.name.toLowerCase().includes(lower)) return true;
+        if (m('access') && f.access && f.access.toLowerCase().includes(lower)) return true;
+        return false;
+      });
+    }
+    return false;
   }
-  if (node.name?.toLowerCase().includes(lower)) return true;
-  if (hex && normalizeAddr(node.address).includes(hex)) return true;
-  return (node.children || []).some(c => subtreeMatches(c, filter));
+  if (m('name') && node.name?.toLowerCase().includes(lower)) return true;
+  if (m('address') && hex && normalizeAddr(node.address).includes(hex)) return true;
+  return (node.children || []).some(c => subtreeMatches(c, filter, scope));
 }
 
 export function findFirstReg(node: TreeNode, segs: string[]): { reg: Reg; path: string[]; key: string } | null {

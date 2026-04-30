@@ -55,10 +55,16 @@ html, body { margin: 0; padding: 0; background: var(--rdl-bg); color: var(--rdl-
   border-bottom: 1px solid var(--rdl-border); }
 .rdl-filter-bar { padding: 6px 12px; border-bottom: 1px solid var(--rdl-border);
   background: var(--rdl-panel); }
-.rdl-filter-bar input { width: 100%; box-sizing: border-box; background: var(--rdl-bg);
+.rdl-filter-row { display: flex; gap: 6px; align-items: stretch; }
+.rdl-filter-scope { background: var(--rdl-bg); color: var(--rdl-fg);
+  border: 1px solid var(--rdl-border); border-radius: 2px;
+  padding: 4px 6px; font-size: 12px; font-family: var(--rdl-font-chrome);
+  outline: none; cursor: pointer; }
+.rdl-filter-scope:focus { border-color: var(--rdl-accent); }
+.rdl-filter-bar input { flex: 1; box-sizing: border-box; background: var(--rdl-bg);
   border: 1px solid var(--rdl-border); color: var(--rdl-fg);
   padding: 5px 9px; font-size: 13px; font-family: var(--rdl-font-chrome);
-  outline: none; border-radius: 2px; }
+  outline: none; border-radius: 2px; min-width: 0; }
 .rdl-filter-bar input:focus { border-color: var(--rdl-accent); }
 .rdl-filter-hint { color: var(--rdl-dim); font-size: 11px; margin-top: 4px; }
 .rdl-tree-host { overflow: auto; padding: 8px 0; min-height: 0; outline: none; }

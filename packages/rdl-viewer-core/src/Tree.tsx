@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef } from 'react';
 import type { Addrmap, Reg, SourceLoc, Transport, TreeNode } from './types';
-import { isContainer, subtreeMatches } from './util';
+import { isContainer, subtreeMatches, type FilterScope } from './util';
 import type { CtxMenuItem } from './ContextMenu';
 
 export type FlatRow =
@@ -16,11 +16,12 @@ export type FlatRow =
 export function buildFlatList(
   root: TreeNode,
   filter: string,
+  scope: FilterScope,
   collapsed: Set<string>,
 ): FlatRow[] {
   const out: FlatRow[] = [];
   function visit(node: TreeNode, depth: number, segs: string[]): void {
-    if (filter && !subtreeMatches(node, filter)) return;
+    if (filter && !subtreeMatches(node, filter, scope)) return;
     if (isContainer(node)) {
       const key = segs.concat([node.name]).join('.');
       const expanded = !!filter || !collapsed.has(key);
@@ -70,6 +71,22 @@ export function Tree({
     if (el) el.scrollIntoView({ block: 'nearest' });
   }, [focusedKey, rows]);
 
+  // Auto-focus the tree host on mount so arrow keys work without an extra
+  // click. VSCode webviews start with focus on the document body; if we don't
+  // grab it here the user has to click the tree first to get keyboard nav.
+  useEffect(() => {
+    if (hasRoots && hostRef.current) hostRef.current.focus();
+    // Run only on the first mount or when the empty-state flips to populated;
+    // re-focusing every render would steal focus from anywhere else (filter
+    // input, ctx menu).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasRoots]);
+
+  // Mousedown anywhere inside the tree host re-focuses the host. Without this,
+  // clicking a child row doesn't move focus to the tabindex=0 parent and the
+  // keydown handler stays silent.
+  const refocus = () => { hostRef.current?.focus(); };
+
   if (!hasRoots) {
     return (
       <div ref={hostRef} className="rdl-tree-host" tabIndex={0} role="tree" aria-label="Memory map tree">
@@ -95,6 +112,7 @@ export function Tree({
         role="tree"
         aria-label="Memory map tree"
         onKeyDown={onKey}
+        onMouseDown={refocus}
       >
         <div className="rdl-tree">
           {rows.map(row => (

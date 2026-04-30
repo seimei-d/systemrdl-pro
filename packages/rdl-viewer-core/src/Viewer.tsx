@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { ElaboratedTree, Reg, SourceLoc, Transport, TreeNode } from './types';
-import { findFirstReg, findRegByKey, isContainer, subtreeMatches } from './util';
+import { findFirstReg, findRegByKey, isContainer, subtreeMatches, type FilterScope } from './util';
 import { buildFlatList, FlatRow, Tree } from './Tree';
 import { Detail } from './Detail';
 import { ContextMenu, CtxMenuItem, CtxMenuState } from './ContextMenu';
@@ -13,6 +13,7 @@ export function Viewer({ transport }: Props) {
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [focusedKey, setFocusedKey] = useState<string | null>(null);
   const [filter, setFilter] = useState('');
+  const [filterScope, setFilterScope] = useState<FilterScope>('all');
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
   const [ctxMenu, setCtxMenu] = useState<CtxMenuState>(null);
   const [toast, setToast] = useState<string | null>(null);
@@ -47,8 +48,8 @@ export function Viewer({ transport }: Props) {
 
   // Compute flat list once per render — drives Tree and keyboard handler.
   const flatRows = useMemo<FlatRow[]>(
-    () => (root ? buildFlatList(root, filter, collapsed) : []),
-    [root, filter, collapsed],
+    () => (root ? buildFlatList(root, filter, filterScope, collapsed) : []),
+    [root, filter, filterScope, collapsed],
   );
 
   // Auto-select first reg when root changes or selection becomes invalid.
@@ -231,12 +232,27 @@ export function Viewer({ transport }: Props) {
       <div className="rdl-body">
         <div className="rdl-tree-pane">
           <div className="rdl-filter-bar">
-            <input
-              id="rdl-filter-input"
-              type="text"
-              placeholder="Filter by name, address (0x10), field, or access (rw)…"
-              onChange={e => setFilter(e.target.value.toLowerCase())}
-            />
+            <div className="rdl-filter-row">
+              <select
+                className="rdl-filter-scope"
+                value={filterScope}
+                onChange={e => setFilterScope(e.target.value as FilterScope)}
+                title="Limit filter to this column"
+                aria-label="Filter scope"
+              >
+                <option value="all">All</option>
+                <option value="name">Name</option>
+                <option value="address">Address</option>
+                <option value="field">Field</option>
+                <option value="access">Access</option>
+              </select>
+              <input
+                id="rdl-filter-input"
+                type="text"
+                placeholder={filterScopePlaceholder(filterScope)}
+                onChange={e => setFilter(e.target.value.toLowerCase())}
+              />
+            </div>
           </div>
           <Tree
             rows={flatRows}
@@ -262,6 +278,16 @@ export function Viewer({ transport }: Props) {
       {toast && <div className="rdl-toast shown" role="status" aria-live="polite">{toast}</div>}
     </div>
   );
+}
+
+function filterScopePlaceholder(scope: FilterScope): string {
+  switch (scope) {
+    case 'name':    return 'Filter by register or container name…';
+    case 'address': return 'Filter by address (e.g. 0x10, 0010)…';
+    case 'field':   return 'Filter by field name…';
+    case 'access':  return 'Filter by access mode (rw, ro, woclr, …)…';
+    default:        return 'Filter (matches name/address/field/access)…';
+  }
 }
 
 /**
