@@ -19,6 +19,7 @@ from systemrdl_lsp.server import (
     _comp_defs_from_cached,
     _compile_text,
     _completion_context,
+    _expand_include_vars,
     _peakrdl_toml_paths,
     _completion_items_for_context,
     _completion_items_for_types,
@@ -354,6 +355,32 @@ def test_completion_offers_user_defined_types(tmp_path):
         assert ctrl.documentation
     finally:
         tmp.unlink(missing_ok=True)
+
+
+def test_include_var_expansion_replaces_in_include_path():
+    """`$VAR and `${VAR} expand inside `include directives, body left alone."""
+    text = '''`include "$IP_ROOT/common.rdl"
+`include "${SHARED}/types.rdl"
+addrmap top { reg { field { sw=rw; hw=r; } a[0:0]=0; } R @ 0; };
+'''
+    out = _expand_include_vars(text, {"IP_ROOT": "/lib", "SHARED": "/sh"})
+    assert '`include "/lib/common.rdl"' in out
+    assert '`include "/sh/types.rdl"' in out
+    # Body untouched (no $-substitution outside include).
+    assert "addrmap top {" in out
+
+
+def test_include_var_expansion_falls_back_to_env(monkeypatch):
+    monkeypatch.setenv("XYZ_TEST_VAR", "/env-value")
+    out = _expand_include_vars('`include "$XYZ_TEST_VAR/x.rdl"', {})
+    assert '`include "/env-value/x.rdl"' in out
+
+
+def test_include_var_expansion_leaves_unknown_literal():
+    """Unresolved variable surfaces in the resulting path so the diagnostic
+    points at it ("include not found: $UNDEFINED/foo.rdl")."""
+    out = _expand_include_vars('`include "$UNDEFINED/foo.rdl"', {})
+    assert "$UNDEFINED" in out
 
 
 def test_peakrdl_toml_extracts_relative_paths(tmp_path):

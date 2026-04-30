@@ -2,7 +2,7 @@
   "name": "vscode-systemrdl-pro",
   "displayName": "SystemRDL Pro",
   "description": "Live diagnostics + interactive memory-map viewer for SystemRDL 2.0",
-  "version": "0.14.0",
+  "version": "0.15.0",
   "publisher": "madeinheaven-dev",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -61,6 +61,13 @@
           "default": [],
           "scope": "resource",
           "description": "Directories searched by `include directives. Workspace-relative paths supported."
+        },
+        "systemrdl-pro.includeVars": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "default": {},
+          "scope": "resource",
+          "description": "Variables expanded inside `include \"...\" paths. Use $NAME or ${NAME} in the include directive; values come from this map first, then process environment as fallback. Example: { \"IP_ROOT\": \"/home/user/lib\" } lets you write `include \"$IP_ROOT/common.rdl\"."
         },
         "systemrdl-pro.trace.server": {
           "type": "string",

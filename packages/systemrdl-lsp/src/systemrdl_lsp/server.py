@@ -59,7 +59,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 SERVER_NAME = "systemrdl-lsp"
-SERVER_VERSION = "0.9.0"
+SERVER_VERSION = "0.10.0"
 DEBOUNCE_SECONDS = 0.3
 ELABORATED_TREE_SCHEMA_VERSION = "0.1.0"
 # Eng-review safety net #3: cap a single elaborate pass at 10s wall-clock.
@@ -134,6 +134,44 @@ class CapturingPrinter(MessagePrinter):
 # ---------------------------------------------------------------------------
 
 
+# Matches ``$VAR`` and ``${VAR}`` inside a string. We only substitute inside
+# the path argument of ```include "..."`` directives (see _expand_include_vars)
+# so this regex doesn't accidentally chew on field values or property names.
+_INCLUDE_VAR_RE = __import__("re").compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?")
+_INCLUDE_DIRECTIVE_RE = __import__("re").compile(r'(`include\s+")([^"]*)(")')
+
+
+def _expand_include_vars(text: str, vars_map: dict[str, str]) -> str:
+    """Expand ``$VAR`` / ``${VAR}`` inside ```include "..."`` paths.
+
+    A subset of the SystemRDL Perl preprocessor (clause 16) that covers ~80%
+    of real-world use — env-var-driven include trees in shared IP libraries.
+    Only substitutes inside the path argument of an `include directive so
+    body code (which legitimately contains ``$``-prefixed identifiers in some
+    SystemVerilog constructs) is left alone.
+
+    Lookup order: ``vars_map`` first (explicit setting), then ``os.environ``.
+    Unresolved variables are left literal so the diagnostic surfaces a
+    "include not found: $UNDEFINED/foo.rdl" error rather than failing silently.
+    """
+    if not text:
+        return text
+    import os
+
+    def expand_one(match: "Any") -> str:
+        name = match.group(1)
+        if name in vars_map:
+            return vars_map[name]
+        if name in os.environ:
+            return os.environ[name]
+        return match.group(0)
+
+    def expand_path(match: "Any") -> str:
+        return match.group(1) + _INCLUDE_VAR_RE.sub(expand_one, match.group(2)) + match.group(3)
+
+    return _INCLUDE_DIRECTIVE_RE.sub(expand_path, text)
+
+
 def _peakrdl_toml_paths(start: pathlib.Path) -> list[str]:
     """Walk upward from ``start`` looking for ``peakrdl.toml`` and read its
     ``[parser] incl_search_paths`` array.
@@ -179,6 +217,7 @@ def _compile_text(
     uri: str,
     text: str,
     incl_search_paths: list[str] | None = None,
+    include_vars: dict[str, str] | None = None,
 ) -> tuple[list[CompilerMessage], list["RootNode"], pathlib.Path]:
     """Compile in-memory buffer text. Returns (messages, roots, temp_path).
 
@@ -213,6 +252,7 @@ def _compile_text(
     printer = CapturingPrinter()
     compiler = RDLCompiler(message_printer=printer)
 
+    expanded_text = _expand_include_vars(text, include_vars or {})
     with tempfile.NamedTemporaryFile(
         mode="w",
         suffix=".rdl",
@@ -220,7 +260,7 @@ def _compile_text(
         encoding="utf-8",
         delete=False,
     ) as tf:
-        tf.write(text)
+        tf.write(expanded_text)
         tmp_path = pathlib.Path(tf.name)
 
     roots: list[RootNode] = []
@@ -457,6 +497,9 @@ class ServerState:
     cache: ElaborationCache = dataclasses.field(default_factory=ElaborationCache)
     pending: dict[str, asyncio.Task] = dataclasses.field(default_factory=dict)
     include_paths: list[str] = dataclasses.field(default_factory=list)
+    # Substitution map for ``$VAR`` / ``${VAR}`` inside ```include "..."`` paths.
+    # Read from systemrdl-pro.includeVars; falls back to os.environ during expansion.
+    include_vars: dict[str, str] = dataclasses.field(default_factory=dict)
     # URIs whose latest parse attempt failed but for which we still have a last-good
     # cache entry. The viewer renders a stale-bar when a URI is in this set (D7).
     stale_uris: set[str] = dataclasses.field(default_factory=set)
@@ -1352,7 +1395,7 @@ def build_server() -> LanguageServer:
         # on timeout, so we attach a cleanup callback that unlinks the orphan temp file
         # whenever the late result eventually arrives.
         fut: asyncio.Future = loop.run_in_executor(
-            None, _compile_text, uri, buffer_text, state.include_paths
+            None, _compile_text, uri, buffer_text, state.include_paths, state.include_vars
         )
         try:
             messages, roots, tmp_path = await asyncio.wait_for(
@@ -1424,7 +1467,11 @@ def build_server() -> LanguageServer:
                 if configs and isinstance(configs[0], dict):
                     paths = configs[0].get("includePaths") or []
                     state.include_paths = [str(p) for p in paths if p]
+                    raw_vars = configs[0].get("includeVars") or {}
+                    if isinstance(raw_vars, dict):
+                        state.include_vars = {str(k): str(v) for k, v in raw_vars.items()}
                     logger.info("includePaths from initial config: %s", state.include_paths)
+                    logger.info("includeVars from initial config: %s", list(state.include_vars))
             except Exception:
                 logger.debug("could not fetch initial workspace configuration", exc_info=True)
 
@@ -1477,6 +1524,9 @@ def build_server() -> LanguageServer:
                 if configs and isinstance(configs[0], dict):
                     paths = configs[0].get("includePaths") or []
                     state.include_paths = [str(p) for p in paths if p]
+                    raw_vars = configs[0].get("includeVars") or {}
+                    if isinstance(raw_vars, dict):
+                        state.include_vars = {str(k): str(v) for k, v in raw_vars.items()}
             except Exception:
                 logger.debug("config refresh failed", exc_info=True)
 
