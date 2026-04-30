@@ -575,6 +575,11 @@ function walk(node, host, depth, segs) {
     }
     row.title = 'Click caret to fold';
     row.addEventListener('click', () => { state.focusedKey = containerKey; renderTree(); });
+    row.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      showCtxMenu(e, { kind: node.kind, name: node.name, address: node.address,
+        type: node.type, source: node.source, path: containerKey });
+    });
     host.appendChild(row);
     state.flatList.push({ key: containerKey, kind: 'container', depth, expanded: !isCollapsed, hasChildren: (node.children || []).length > 0 });
     if (!isCollapsed) {
@@ -602,6 +607,11 @@ function walk(node, host, depth, segs) {
       state.focusedKey = key;
       renderTree(); renderDetail();
     });
+    row.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      showCtxMenu(e, { kind: 'reg', name: node.name, address: node.address,
+        type: node.type, source: node.source, path: key });
+    });
     host.appendChild(row);
     state.flatList.push({ key, kind: 'reg', depth, expanded: false, hasChildren: false });
   }
@@ -613,6 +623,78 @@ function toggleCollapse(containerKey) {
   state.focusedKey = containerKey;
   renderTree();
 }
+
+function showCtxMenu(ev, ctx) {
+  const menu = document.getElementById('ctx-menu');
+  menu.innerHTML = '';
+  const items = [];
+  items.push({ label: 'Copy Name', hint: ctx.path, action: () => copyText(ctx.path, 'name') });
+  items.push({ label: 'Copy Address', hint: ctx.address, action: () => copyText(ctx.address, 'address') });
+  if (ctx.type) items.push({ label: 'Copy Type', hint: ctx.type, action: () => copyText(ctx.type, 'type') });
+  if (ctx.source && ctx.source.uri) {
+    items.push({ sep: true });
+    const fileName = (ctx.source.uri || '').split('/').pop() || ctx.source.uri;
+    const ref = fileName + ':' + ((ctx.source.line || 0) + 1);
+    items.push({ label: 'Copy Source Path', hint: ref, action: () => copyText(ref, 'source') });
+  }
+  items.forEach(it => {
+    if (it.sep) {
+      const s = document.createElement('div');
+      s.className = 'sep';
+      menu.appendChild(s);
+      return;
+    }
+    const el = document.createElement('div');
+    el.className = 'item';
+    el.setAttribute('role', 'menuitem');
+    el.innerHTML = '<span>' + escapeHtml(it.label) + '</span>' +
+      (it.hint ? '<span class="hint">' + escapeHtml(it.hint) + '</span>' : '');
+    el.addEventListener('click', () => { it.action(); hideCtxMenu(); });
+    menu.appendChild(el);
+  });
+  const x = Math.min(ev.clientX, window.innerWidth - 200);
+  const y = Math.min(ev.clientY, window.innerHeight - menu.offsetHeight - 8);
+  menu.style.left = x + 'px';
+  menu.style.top = y + 'px';
+  menu.classList.add('shown');
+}
+
+function hideCtxMenu() {
+  const menu = document.getElementById('ctx-menu');
+  if (menu) menu.classList.remove('shown');
+}
+
+function copyText(text, label) {
+  const t = String(text || '');
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(t).then(() => showToast('Copied ' + label + ': ' + t),
+      () => showToast('Copy failed — check browser permissions'));
+  } else {
+    showToast('Clipboard API unavailable');
+  }
+}
+
+let toastTimer = null;
+function showToast(text) {
+  const t = document.getElementById('toast');
+  if (!t) return;
+  t.textContent = text;
+  t.classList.add('shown');
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('shown'), 1800);
+}
+
+document.addEventListener('click', (e) => {
+  const menu = document.getElementById('ctx-menu');
+  if (!menu || !menu.classList.contains('shown')) return;
+  if (!menu.contains(e.target)) hideCtxMenu();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    const menu = document.getElementById('ctx-menu');
+    if (menu && menu.classList.contains('shown')) { hideCtxMenu(); e.preventDefault(); }
+  }
+});
 
 function findFirstRegPath(node, segs) {
   if (node.kind === 'reg') return { reg: node, path: segs, key: segs.join('.') };
@@ -791,6 +873,26 @@ function renderHtml(filename: string): string {
     padding-left: 13px; }
   .row.focused { outline: 1px solid var(--rdl-accent); outline-offset: -1px; }
   .tree-host:focus { outline: none; }
+  /* Right-click context menu — Copy Name/Address/Type. No "Reveal in Editor"
+     in the CLI surface (there is no editor); clipboard writes use the browser
+     navigator.clipboard API so no host round-trip is needed. */
+  .ctx-menu { position: fixed; z-index: 1000; background: var(--rdl-panel);
+    border: 1px solid var(--rdl-border); border-radius: 4px; min-width: 180px;
+    padding: 4px 0; font-size: 13px; box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+    display: none; }
+  .ctx-menu.shown { display: block; }
+  .ctx-menu .item { padding: 6px 14px; cursor: pointer; user-select: none;
+    display: flex; justify-content: space-between; gap: 16px; }
+  .ctx-menu .item:hover { background: var(--rdl-selected); }
+  .ctx-menu .item .hint { color: var(--rdl-dim); font-family: var(--rdl-font-mono);
+    font-size: 12px; }
+  .ctx-menu .sep { height: 1px; background: var(--rdl-border); margin: 4px 0; }
+  .toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+    background: var(--rdl-panel); border: 1px solid var(--rdl-border);
+    color: var(--rdl-fg); padding: 8px 14px; border-radius: 4px;
+    font-size: 13px; box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+    pointer-events: none; opacity: 0; transition: opacity 0.18s; z-index: 999; }
+  .toast.shown { opacity: 1; }
   .row .caret { color: var(--rdl-dim); font-size: 11px; text-align: right; }
   .row .caret-toggle { cursor: pointer; padding: 0 4px; border-radius: 2px;
     transition: background 0.08s; }
@@ -876,6 +978,8 @@ function renderHtml(filename: string): string {
       <div class="placeholder">Select a register to see details.</div>
     </div>
   </div>
+  <div id="ctx-menu" class="ctx-menu" role="menu" aria-label="Tree row actions"></div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
 <script>
 ${RENDER_JS}
 </script>

@@ -49,7 +49,7 @@ All design decisions D4-D15 from the design review are non-negotiable inputs.
 
 - [ ] Click register in viewer → editor `revealRange` smooth-scroll + 200ms line flash (U2)
 - [ ] Cursor position in editor → viewer auto-selects matching tree node (D10, 500ms debounce)
-- [ ] Right-click context menu in viewer: Copy Address / Copy Name / Reveal in Editor (U5)
+- [x] Right-click context menu in viewer: Copy Address / Copy Name / Reveal in Editor (U5)
 
 ## Deferred (TODOS.md)
 

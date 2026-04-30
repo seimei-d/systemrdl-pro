@@ -429,11 +429,16 @@ function safePostToWebview(message: unknown): void {
 // ---------------------------------------------------------------------------
 
 type WebviewMessage =
-  | { type: 'reveal'; source: SourceLoc };
+  | { type: 'reveal'; source: SourceLoc }
+  | { type: 'copy'; text: string; label?: string };
 
 async function handleWebviewMessage(msg: WebviewMessage): Promise<void> {
   if (msg.type === 'reveal') {
     await revealLocation(msg.source);
+  } else if (msg.type === 'copy') {
+    await vscode.env.clipboard.writeText(msg.text);
+    const label = msg.label || 'value';
+    vscode.window.setStatusBarMessage(`Copied ${label}: ${msg.text}`, 2_000);
   }
 }
 
@@ -691,6 +696,20 @@ function renderViewerHtml(): string {
   #detail .src-link:hover { text-decoration: underline; }
   #detail .placeholder { color: var(--rdl-dim); font-size: 13px; padding: 24px 0; }
 
+  /* Right-click menu — custom dropdown that posts back to the extension for
+     clipboard writes (vscode.env.clipboard) and reveal calls. */
+  .ctx-menu { position: fixed; z-index: 1000; background: var(--rdl-panel);
+    border: 1px solid var(--rdl-border); border-radius: 4px; min-width: 180px;
+    padding: 4px 0; font-size: 13px; box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+    display: none; }
+  .ctx-menu.shown { display: block; }
+  .ctx-menu .item { padding: 6px 14px; cursor: pointer; user-select: none;
+    display: flex; justify-content: space-between; gap: 16px; }
+  .ctx-menu .item:hover { background: var(--rdl-selected); }
+  .ctx-menu .item .hint { color: var(--rdl-dim); font-family: var(--rdl-font-mono);
+    font-size: 12px; }
+  .ctx-menu .sep { height: 1px; background: var(--rdl-border); margin: 4px 0; }
+
   .empty { padding: 32px 40px; max-width: 60ch; }
   .empty h2 { font-size: 15px; font-weight: 600; margin: 0 0 8px; }
   .empty p { margin: 4px 0; color: var(--rdl-dim); font-size: 13px; }
@@ -719,6 +738,7 @@ function renderViewerHtml(): string {
       <div class="placeholder">Select a register to see details.</div>
     </div>
   </div>
+  <div id="ctx-menu" class="ctx-menu" role="menu" aria-label="Tree row actions"></div>
 <script>
 const vscode = acquireVsCodeApi();
 
@@ -993,6 +1013,11 @@ function walk(node, host, depth, pathSegments) {
       row.title = 'Click caret to fold';
       row.addEventListener('click', () => { state.focusedKey = containerKey; renderTree(); });
     }
+    row.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      showCtxMenu(e, { kind: node.kind, name: node.name, address: node.address,
+        type: node.type, source: node.source, path: pathSegments.concat([node.name]).join('.') });
+    });
     host.appendChild(row);
     state.flatList.push({ key: containerKey, kind: 'container', depth, expanded: !isCollapsed, hasChildren: (node.children || []).length > 0, source: node.source });
     if (!isCollapsed) {
@@ -1022,6 +1047,11 @@ function walk(node, host, depth, pathSegments) {
       renderDetail();
       if (node.source) postReveal(node.source);
     });
+    row.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      showCtxMenu(e, { kind: 'reg', name: node.name, address: node.address,
+        type: node.type, source: node.source, path: key });
+    });
     host.appendChild(row);
     state.flatList.push({ key, kind: 'reg', depth, expanded: false, hasChildren: false, source: node.source });
   }
@@ -1033,6 +1063,69 @@ function toggleCollapse(containerKey) {
   state.focusedKey = containerKey;
   renderTree();
 }
+
+// Right-click context menu (W6 / U5). Mirrors VSCode's own context-menu UX:
+// items are kind-aware, secondary text shows the value that will be copied.
+function showCtxMenu(ev, ctx) {
+  const menu = document.getElementById('ctx-menu');
+  menu.innerHTML = '';
+  const items = [];
+  items.push({ label: 'Copy Name', hint: ctx.path, action: () => copyToHost(ctx.path, 'name') });
+  items.push({ label: 'Copy Address', hint: ctx.address, action: () => copyToHost(ctx.address, 'address') });
+  if (ctx.type) {
+    items.push({ label: 'Copy Type', hint: ctx.type, action: () => copyToHost(ctx.type, 'type') });
+  }
+  if (ctx.source) {
+    items.push({ sep: true });
+    items.push({ label: 'Reveal in Editor', hint: '', action: () => postReveal(ctx.source) });
+  }
+  items.forEach(it => {
+    if (it.sep) {
+      const s = document.createElement('div');
+      s.className = 'sep';
+      menu.appendChild(s);
+      return;
+    }
+    const el = document.createElement('div');
+    el.className = 'item';
+    el.setAttribute('role', 'menuitem');
+    el.innerHTML = '<span>' + escapeHtml(it.label) + '</span>' +
+      (it.hint ? '<span class="hint">' + escapeHtml(it.hint) + '</span>' : '');
+    el.addEventListener('click', () => { it.action(); hideCtxMenu(); });
+    menu.appendChild(el);
+  });
+  // Position — keep it in viewport.
+  const x = Math.min(ev.clientX, window.innerWidth - 200);
+  const y = Math.min(ev.clientY, window.innerHeight - menu.offsetHeight - 8);
+  menu.style.left = x + 'px';
+  menu.style.top = y + 'px';
+  menu.classList.add('shown');
+}
+
+function hideCtxMenu() {
+  const menu = document.getElementById('ctx-menu');
+  if (menu) menu.classList.remove('shown');
+}
+
+function copyToHost(text, label) {
+  vscode.postMessage({ type: 'copy', text: String(text || ''), label });
+}
+
+// Dismiss menu on any click outside it, or on Escape.
+document.addEventListener('click', (e) => {
+  const menu = document.getElementById('ctx-menu');
+  if (!menu || !menu.classList.contains('shown')) return;
+  if (!menu.contains(e.target)) hideCtxMenu();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    const menu = document.getElementById('ctx-menu');
+    if (menu && menu.classList.contains('shown')) {
+      hideCtxMenu();
+      e.preventDefault();
+    }
+  }
+});
 
 // Returns { key, reg, path } for the first register in DFS order.
 function findFirstRegPath(node, pathSegments) {
