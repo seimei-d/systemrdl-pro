@@ -1,14 +1,32 @@
 {
   "name": "@systemrdl-pro/viewer-core",
   "version": "0.1.0",
-  "description": "Shared Svelte components for the SystemRDL memory-map viewer (workspace-internal package). Source: docs/design.md Viewer UX section.",
+  "description": "Shared React components for the SystemRDL memory-map viewer (workspace-internal package). Source: docs/design.md Viewer UX section.",
   "license": "MIT",
   "private": true,
   "type": "module",
-  "main": "./src/index.ts",
+  "main": "./dist/viewer.js",
+  "exports": {
+    ".": {
+      "types": "./dist/viewer.d.ts",
+      "default": "./dist/viewer.js"
+    },
+    "./style.css": "./dist/viewer.css"
+  },
   "scripts": {
-    "build": "echo 'rdl-viewer-core: scaffold only — Svelte components arrive in Week 4'",
-    "typecheck": "echo 'rdl-viewer-core: scaffold only'",
-    "lint": "echo 'rdl-viewer-core: scaffold only'"
+    "build": "node build.mjs",
+    "typecheck": "tsc --noEmit",
+    "lint": "echo 'rdl-viewer-core: lint not configured'"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.7.0"
   }
 }

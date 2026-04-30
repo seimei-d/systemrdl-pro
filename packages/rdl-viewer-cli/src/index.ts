@@ -27,9 +27,15 @@ import { spawnSync, spawn } from 'node:child_process';
 // `spawnSync` is still used for the synchronous python/module probes at startup —
 // those run once, the output is tiny, and we can block the event loop for a
 // few hundred ms. The recompile path uses async `spawn` to dodge maxBuffer.
-import { existsSync, watch } from 'node:fs';
+import { existsSync, readFileSync, watch } from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
+
+// Resolve the @systemrdl-pro/viewer-core build output. In dev (running from
+// packages/rdl-viewer-cli/src/index.ts) this is two directories up; once we
+// publish the CLI as a standalone binary the build step will copy the assets
+// next to the bundled JS and this path will need to change.
+const VIEWER_CORE_DIST = path.resolve(import.meta.dir, '../../rdl-viewer-core/dist');
 
 type CliArgs = {
   file: string;
@@ -278,6 +284,12 @@ const server = Bun.serve({
         headers: { 'content-type': 'text/plain; charset=utf-8' },
       });
     }
+    if (url.pathname === '/viewer.js') {
+      return staticAsset('viewer.js', 'application/javascript; charset=utf-8');
+    }
+    if (url.pathname === '/viewer.css') {
+      return staticAsset('viewer.css', 'text/css; charset=utf-8');
+    }
     if (url.pathname === '/events') {
       const stream = new ReadableStream<string>({
         start(controller) {
@@ -302,6 +314,27 @@ const server = Bun.serve({
     return new Response('not found', { status: 404 });
   },
 });
+
+/**
+ * Serve a static asset out of `@systemrdl-pro/viewer-core/dist/`. The package
+ * is workspace-internal, so we read from the filesystem directly instead of
+ * bundling — keeps the CLI binary lightweight and lets the user re-run
+ * `bun --filter @systemrdl-pro/viewer-core build` to refresh the SPA without
+ * rebuilding the CLI.
+ */
+function staticAsset(name: string, contentType: string): Response {
+  const full = path.join(VIEWER_CORE_DIST, name);
+  if (!existsSync(full)) {
+    return new Response(
+      `viewer-core asset missing: ${name}. Run \`bun --filter @systemrdl-pro/viewer-core build\`.`,
+      { status: 500, headers: { 'content-type': 'text/plain; charset=utf-8' } },
+    );
+  }
+  const body = readFileSync(full);
+  return new Response(body, {
+    headers: { 'content-type': contentType, 'cache-control': 'no-cache' },
+  });
+}
 
 const url = `http://localhost:${server.port}/`;
 console.log(`rdl-viewer: serving ${args.file}`);
@@ -330,459 +363,11 @@ if (args.open) {
 }
 
 // ---------------------------------------------------------------------------
-// Inline SPA — defined before renderHtml so the template literal sees it.
-// Mirrors the VSCode webview's vanilla DOM walking skeleton minus VSCode-specific
-// bits (no acquireVsCodeApi, no postMessage 'reveal'). Once rdl-viewer-core lands,
-// both surfaces import it; until then this is a separate copy.
+// Browser SPA shell — loads the React bundle from @systemrdl-pro/viewer-core
+// and wires up a fetch+SSE transport. The renderer lives in viewer.js; this
+// only declares the host element, transport, and CLI-specific chrome (the
+// connection-status top bar) that doesn't belong in the shared package.
 // ---------------------------------------------------------------------------
-
-const RENDER_JS = `
-let state = {
-  roots: [], activeRootIndex: 0,
-  selectedRegKey: null, focusedKey: null,
-  filter: '', collapsedKeys: new Set(),
-  flatList: []
-};
-
-function setConn(cls, text) {
-  const el = document.getElementById('conn');
-  el.className = 'conn ' + cls;
-  el.textContent = text;
-}
-
-function load() {
-  fetch('/tree').then(r => r.json()).then(applyTree).catch(err => {
-    setConn('err', 'fetch failed');
-    console.error(err);
-  });
-}
-
-function connectEvents() {
-  const es = new EventSource('/events');
-  es.addEventListener('ready', () => setConn('ok', 'live'));
-  es.onmessage = ev => {
-    try { applyTree(JSON.parse(ev.data)); }
-    catch (e) { console.error('bad SSE frame', e); }
-  };
-  es.onerror = () => setConn('err', 'disconnected — retrying');
-}
-
-document.addEventListener('keydown', (e) => {
-  if ((e.metaKey || e.ctrlKey) && (e.key === 'f' || e.key === 'F')) {
-    const bar = document.getElementById('filter-bar');
-    const input = document.getElementById('filter-input');
-    bar.classList.add('shown');
-    input.focus();
-    input.select();
-    e.preventDefault();
-  } else if (e.key === 'Escape') {
-    const input = document.getElementById('filter-input');
-    if (document.activeElement === input || state.filter) {
-      input.value = '';
-      state.filter = '';
-      document.getElementById('filter-bar').classList.remove('shown');
-      input.blur();
-      renderTree();
-      e.preventDefault();
-    }
-  }
-});
-
-document.getElementById('filter-input').addEventListener('input', (e) => {
-  state.filter = e.target.value.toLowerCase();
-  renderTree();
-});
-
-// Keyboard navigation. Same WAI-ARIA tree pattern as the VSCode webview:
-//   ↑/↓        — prev/next visible row
-//   →          — expand collapsed container, else first child
-//   ←          — collapse expanded container, else parent
-//   Enter / Space — toggle (container) or select (reg)
-//   Home / End — first / last
-document.getElementById('tree-host').addEventListener('keydown', (e) => {
-  const list = state.flatList;
-  if (!list.length) return;
-  const idx = list.findIndex(it => it.key === state.focusedKey);
-  const cur = idx >= 0 ? list[idx] : null;
-
-  function moveTo(j) {
-    if (j < 0 || j >= list.length) return;
-    state.focusedKey = list[j].key;
-    renderTree();
-  }
-  function findParentIdx(of) {
-    for (let j = of - 1; j >= 0; j--) if (list[j].depth < list[of].depth) return j;
-    return -1;
-  }
-
-  switch (e.key) {
-    case 'ArrowDown': moveTo(idx + 1); e.preventDefault(); break;
-    case 'ArrowUp':   moveTo(idx > 0 ? idx - 1 : 0); e.preventDefault(); break;
-    case 'Home':      moveTo(0); e.preventDefault(); break;
-    case 'End':       moveTo(list.length - 1); e.preventDefault(); break;
-    case 'ArrowRight':
-      if (cur && cur.kind === 'container') {
-        if (!cur.expanded && cur.hasChildren) toggleCollapse(cur.key);
-        else if (idx + 1 < list.length && list[idx + 1].depth > cur.depth) moveTo(idx + 1);
-      }
-      e.preventDefault();
-      break;
-    case 'ArrowLeft':
-      if (cur && cur.kind === 'container' && cur.expanded) toggleCollapse(cur.key);
-      else if (cur) {
-        const p = findParentIdx(idx);
-        if (p >= 0) moveTo(p);
-      }
-      e.preventDefault();
-      break;
-    case 'Enter':
-    case ' ':
-      if (!cur) break;
-      if (cur.kind === 'container') toggleCollapse(cur.key);
-      else {
-        state.selectedRegKey = cur.key;
-        renderTree(); renderDetail();
-      }
-      e.preventDefault();
-      break;
-  }
-});
-
-function applyTree(tree) {
-  state.roots = tree.roots || [];
-  if (state.activeRootIndex >= state.roots.length) state.activeRootIndex = 0;
-  document.getElementById('stale-bar').classList.toggle('shown', !!tree.stale);
-  document.getElementById('stale-text').textContent = tree.stale
-    ? 'Showing last good elaboration · current parse failed'
-    : 'Showing last good elaboration';
-  if (!state.roots.length) { showEmpty(); return; }
-  const root = state.roots[state.activeRootIndex];
-  if (!state.selectedRegKey || !findRegByKey(root, state.selectedRegKey)) {
-    const firstPath = findFirstRegPath(root, [root.name]);
-    state.selectedRegKey = firstPath ? firstPath.key : null;
-  }
-  renderTabs();
-  renderTree();
-  renderDetail();
-}
-
-function renderTabs() {
-  const host = document.getElementById('tabs');
-  host.innerHTML = '';
-  state.roots.forEach((r, i) => {
-    const t = document.createElement('div');
-    t.className = 'tab' + (i === state.activeRootIndex ? ' active' : '');
-    t.textContent = r.name;
-    t.title = (r.type ? r.type + ' · ' : '') + r.address;
-    t.addEventListener('click', () => {
-      if (i === state.activeRootIndex) return;
-      state.activeRootIndex = i;
-      const first = findFirstRegPath(state.roots[i], [state.roots[i].name]);
-      state.selectedRegKey = first ? first.key : null;
-      renderTabs(); renderTree(); renderDetail();
-    });
-    host.appendChild(t);
-  });
-}
-
-function renderTree() {
-  const root = state.roots[state.activeRootIndex];
-  const host = document.getElementById('tree-host');
-  host.innerHTML = '';
-  state.flatList = [];
-  const tree = document.createElement('div');
-  tree.className = 'tree';
-  walk(root, tree, 0, []);
-  host.appendChild(tree);
-  const hint = document.getElementById('filter-hint');
-  if (state.filter) {
-    const visible = host.querySelectorAll('.row:not(.container)').length;
-    hint.textContent = visible + ' match' + (visible === 1 ? '' : 'es');
-  } else { hint.textContent = ''; }
-
-  const focusVisible = state.focusedKey && state.flatList.some(it => it.key === state.focusedKey);
-  if (!focusVisible) {
-    state.focusedKey = state.selectedRegKey || (state.flatList[0] && state.flatList[0].key) || null;
-  }
-  const focusedEl = state.focusedKey
-    ? host.querySelector('[data-key="' + cssEscape(state.focusedKey) + '"]')
-    : null;
-  if (focusedEl) {
-    focusedEl.classList.add('focused');
-    focusedEl.scrollIntoView({ block: 'nearest' });
-  } else {
-    const sel = host.querySelector('.row.selected');
-    if (sel) sel.scrollIntoView({ block: 'nearest' });
-  }
-}
-
-function cssEscape(s) { return String(s).replace(/"/g, '\\\\"'); }
-
-function looksLikeHex(s) {
-  if (!s) return false;
-  return /^(0x)?[0-9a-f_]+$/i.test(s);
-}
-function normalizeAddr(s) {
-  return String(s || '').toLowerCase().replace(/^0x/, '').replace(/_/g, '');
-}
-function subtreeMatches(node, filter) {
-  if (!filter) return true;
-  const lower = filter.toLowerCase();
-  const hexFilter = looksLikeHex(filter) ? normalizeAddr(filter) : null;
-  if (node.kind === 'reg') {
-    if (node.name.toLowerCase().includes(lower)) return true;
-    if (hexFilter && normalizeAddr(node.address).includes(hexFilter)) return true;
-    return (node.fields || []).some(f =>
-      f.name.toLowerCase().includes(lower) ||
-      (f.access && f.access.toLowerCase().includes(lower))
-    );
-  }
-  if (node.name && node.name.toLowerCase().includes(lower)) return true;
-  if (hexFilter && normalizeAddr(node.address).includes(hexFilter)) return true;
-  return (node.children || []).some(c => subtreeMatches(c, filter));
-}
-
-function walkChildren(parent, host, depth, segs) {
-  (parent.children || []).forEach(child => walk(child, host, depth, segs));
-}
-
-function walk(node, host, depth, segs) {
-  const indent = 'indent-' + Math.min(depth, 3);
-  if (state.filter && !subtreeMatches(node, state.filter)) return;
-  if (node.kind === 'addrmap' || node.kind === 'regfile') {
-    const containerKey = segs.concat([node.name]).join('.');
-    const isCollapsed = !state.filter && state.collapsedKeys.has(containerKey);
-    const caretChar = isCollapsed ? '▶' : '▼';
-    const row = document.createElement('div');
-    row.className = 'row container ' + indent;
-    const kindLabel = node.kind + (node.type ? ' (' + node.type + ')' : '');
-    row.setAttribute('role', 'treeitem');
-    row.setAttribute('aria-level', String(depth + 1));
-    row.setAttribute('aria-expanded', isCollapsed ? 'false' : 'true');
-    row.setAttribute('data-key', containerKey);
-    row.setAttribute('data-kind', 'container');
-    row.innerHTML = '<span class="caret caret-toggle" title="' +
-      (isCollapsed ? 'Click to expand' : 'Click to collapse') + '">' + caretChar + '</span>' +
-      '<span class="addr">' + node.address + '</span>' +
-      '<span class="name">' + escapeHtml(node.name) + '</span>' +
-      '<span class="access">' + escapeHtml(kindLabel) + '</span>';
-    const caretEl = row.querySelector('.caret-toggle');
-    if (caretEl) {
-      caretEl.addEventListener('click', (e) => {
-        e.stopPropagation();
-        toggleCollapse(containerKey);
-      });
-    }
-    row.title = 'Click caret to fold';
-    row.addEventListener('click', () => { state.focusedKey = containerKey; renderTree(); });
-    row.addEventListener('contextmenu', (e) => {
-      e.preventDefault();
-      showCtxMenu(e, { kind: node.kind, name: node.name, address: node.address,
-        type: node.type, source: node.source, path: containerKey });
-    });
-    host.appendChild(row);
-    state.flatList.push({ key: containerKey, kind: 'container', depth, expanded: !isCollapsed, hasChildren: (node.children || []).length > 0 });
-    if (!isCollapsed) {
-      walkChildren(node, host, depth + 1, segs.concat([node.name]));
-    }
-    return;
-  }
-  if (node.kind === 'reg') {
-    const path = segs.concat([node.name]);
-    const key = path.join('.');
-    const selected = state.selectedRegKey === key;
-    const row = document.createElement('div');
-    row.className = 'row ' + indent + (selected ? ' selected' : '');
-    row.setAttribute('role', 'treeitem');
-    row.setAttribute('aria-level', String(depth + 1));
-    row.setAttribute('aria-selected', selected ? 'true' : 'false');
-    row.setAttribute('data-key', key);
-    row.setAttribute('data-kind', 'reg');
-    row.innerHTML = '<span class="caret"> </span>' +
-      '<span class="addr">' + node.address + '</span>' +
-      '<span class="name">' + escapeHtml(node.name) + '</span>' +
-      '<span class="access">' + (node.accessSummary || '') + '</span>';
-    row.addEventListener('click', () => {
-      state.selectedRegKey = key;
-      state.focusedKey = key;
-      renderTree(); renderDetail();
-    });
-    row.addEventListener('contextmenu', (e) => {
-      e.preventDefault();
-      showCtxMenu(e, { kind: 'reg', name: node.name, address: node.address,
-        type: node.type, source: node.source, path: key });
-    });
-    host.appendChild(row);
-    state.flatList.push({ key, kind: 'reg', depth, expanded: false, hasChildren: false });
-  }
-}
-
-function toggleCollapse(containerKey) {
-  if (state.collapsedKeys.has(containerKey)) state.collapsedKeys.delete(containerKey);
-  else state.collapsedKeys.add(containerKey);
-  state.focusedKey = containerKey;
-  renderTree();
-}
-
-function showCtxMenu(ev, ctx) {
-  const menu = document.getElementById('ctx-menu');
-  menu.innerHTML = '';
-  const items = [];
-  items.push({ label: 'Copy Name', hint: ctx.path, action: () => copyText(ctx.path, 'name') });
-  items.push({ label: 'Copy Address', hint: ctx.address, action: () => copyText(ctx.address, 'address') });
-  if (ctx.type) items.push({ label: 'Copy Type', hint: ctx.type, action: () => copyText(ctx.type, 'type') });
-  if (ctx.source && ctx.source.uri) {
-    items.push({ sep: true });
-    const fileName = (ctx.source.uri || '').split('/').pop() || ctx.source.uri;
-    const ref = fileName + ':' + ((ctx.source.line || 0) + 1);
-    items.push({ label: 'Copy Source Path', hint: ref, action: () => copyText(ref, 'source') });
-  }
-  items.forEach(it => {
-    if (it.sep) {
-      const s = document.createElement('div');
-      s.className = 'sep';
-      menu.appendChild(s);
-      return;
-    }
-    const el = document.createElement('div');
-    el.className = 'item';
-    el.setAttribute('role', 'menuitem');
-    el.innerHTML = '<span>' + escapeHtml(it.label) + '</span>' +
-      (it.hint ? '<span class="hint">' + escapeHtml(it.hint) + '</span>' : '');
-    el.addEventListener('click', () => { it.action(); hideCtxMenu(); });
-    menu.appendChild(el);
-  });
-  const x = Math.min(ev.clientX, window.innerWidth - 200);
-  const y = Math.min(ev.clientY, window.innerHeight - menu.offsetHeight - 8);
-  menu.style.left = x + 'px';
-  menu.style.top = y + 'px';
-  menu.classList.add('shown');
-}
-
-function hideCtxMenu() {
-  const menu = document.getElementById('ctx-menu');
-  if (menu) menu.classList.remove('shown');
-}
-
-function copyText(text, label) {
-  const t = String(text || '');
-  if (navigator.clipboard && navigator.clipboard.writeText) {
-    navigator.clipboard.writeText(t).then(() => showToast('Copied ' + label + ': ' + t),
-      () => showToast('Copy failed — check browser permissions'));
-  } else {
-    showToast('Clipboard API unavailable');
-  }
-}
-
-let toastTimer = null;
-function showToast(text) {
-  const t = document.getElementById('toast');
-  if (!t) return;
-  t.textContent = text;
-  t.classList.add('shown');
-  if (toastTimer) clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => t.classList.remove('shown'), 1800);
-}
-
-document.addEventListener('click', (e) => {
-  const menu = document.getElementById('ctx-menu');
-  if (!menu || !menu.classList.contains('shown')) return;
-  if (!menu.contains(e.target)) hideCtxMenu();
-});
-document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') {
-    const menu = document.getElementById('ctx-menu');
-    if (menu && menu.classList.contains('shown')) { hideCtxMenu(); e.preventDefault(); }
-  }
-});
-
-function findFirstRegPath(node, segs) {
-  if (node.kind === 'reg') return { reg: node, path: segs, key: segs.join('.') };
-  for (const c of node.children || []) {
-    const r = findFirstRegPath(c, segs.concat([c.name]));
-    if (r) return r;
-  }
-  return null;
-}
-
-function findRegByKey(rootNode, key) {
-  function walk(node, segs) {
-    if (node.kind === 'reg') {
-      const k = segs.join('.');
-      return k === key ? { reg: node, path: segs } : null;
-    }
-    for (const c of node.children || []) {
-      const r = walk(c, segs.concat([c.name]));
-      if (r) return r;
-    }
-    return null;
-  }
-  return walk(rootNode, [rootNode.name]);
-}
-
-function renderDetail() {
-  const host = document.getElementById('detail');
-  if (!state.selectedRegKey) {
-    host.innerHTML = '<div class="placeholder">Select a register to see details.</div>';
-    return;
-  }
-  const found = findRegByKey(state.roots[state.activeRootIndex], state.selectedRegKey);
-  if (!found) {
-    host.innerHTML = '<div class="placeholder">Selected register no longer exists.</div>';
-    return;
-  }
-  const reg = found.reg;
-  const path = found.path.join('.');
-  let html = '';
-  html += '<h2>' + escapeHtml(reg.name) + '</h2>';
-  if (reg.displayName && reg.displayName !== reg.name) {
-    html += '<div class="display-name">' + escapeHtml(reg.displayName) + '</div>';
-  }
-  html += '<div class="breadcrumb">' + escapeHtml(path) + '</div>';
-  html += '<div class="meta">';
-  html += '<span class="k">Address</span><span class="v">' + reg.address + '</span>';
-  html += '<span class="k">Width</span><span class="v">' + reg.width + '</span>';
-  html += '<span class="k">Reset</span><span class="v">' + (reg.reset !== undefined ? reg.reset : '—') + '</span>';
-  html += '<span class="k">Access</span><span class="v">' + (reg.accessSummary || '—') + '</span>';
-  html += '</div>';
-  if (reg.desc) html += '<div class="desc">' + escapeHtml(reg.desc) + '</div>';
-  html += '<div class="fields-title">Bit fields</div>';
-  (reg.fields || []).forEach(f => {
-    const acc = (f.access || 'na').toLowerCase();
-    const blurb = f.desc || (f.displayName !== f.name ? f.displayName : '') || '';
-    html += '<div class="field">' +
-      '<b>[' + f.msb + ':' + f.lsb + ']</b>' +
-      '<b>' + escapeHtml(f.name) + '</b>' +
-      '<span class="pill ' + acc + '">' + acc.toUpperCase() + '</span>' +
-      '<span>' + (f.reset || '—') + '</span>' +
-      '<span class="desc">' + escapeHtml(blurb) + '</span>' +
-      '</div>';
-  });
-  if (reg.source) {
-    const fileName = (reg.source.uri || '').split('/').pop() || reg.source.uri;
-    html += '<div class="src-link">→ ' + escapeHtml(fileName) + ':' + ((reg.source.line || 0) + 1) + '</div>';
-  }
-  host.innerHTML = html;
-}
-
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, c => ({
-    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
-  }[c]));
-}
-
-function showEmpty() {
-  document.getElementById('tabs').innerHTML = '';
-  document.getElementById('tree-host').innerHTML =
-    '<div class="empty"><h2>No top-level addrmap found</h2>' +
-    '<p>The file has no top-level <code>addrmap</code>, or the latest compile failed. ' +
-    'See terminal for diagnostics.</p></div>';
-  document.getElementById('detail').innerHTML = '<div class="placeholder">No selection.</div>';
-}
-
-load();
-connectEvents();
-`;
 
 function renderHtml(filename: string): string {
   return /* html */ `<!doctype html>
@@ -790,48 +375,9 @@ function renderHtml(filename: string): string {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>SystemRDL — ${escapeAttr(filename)}</title>
+<link rel="stylesheet" href="/viewer.css">
 <style>
-  :root {
-    color-scheme: dark light;
-    --rdl-bg: #1e1e1e;
-    --rdl-panel: #252526;
-    --rdl-chrome: #2d2d30;
-    --rdl-border: #3c3c3c;
-    --rdl-fg: #d4d4d4;
-    --rdl-dim: #858585;
-    --rdl-selected: #213c5a;
-    --rdl-accent: #4a9eff;
-    --rdl-warning: #d7a85a;
-    --rdl-acc-ro:  #8aa6b8;
-    --rdl-acc-rw:  #6fb98f;
-    --rdl-acc-w1c: #d7a85a;
-    --rdl-acc-wo:  #7a87b8;
-    --rdl-acc-rsv: #5a3a3a;
-    --rdl-font-chrome: 'Inter', system-ui, sans-serif;
-    --rdl-font-mono: 'JetBrains Mono', 'SF Mono', Consolas, monospace;
-  }
-  @media (prefers-color-scheme: light) {
-    :root {
-      --rdl-bg: #ffffff;
-      --rdl-panel: #f5f5f5;
-      --rdl-chrome: #ececec;
-      --rdl-border: #d4d4d4;
-      --rdl-fg: #1a1a1a;
-      --rdl-dim: #6b6b6b;
-      --rdl-selected: #d6e7fa;
-      --rdl-accent: #0066cc;
-      --rdl-warning: #b87a18;
-      --rdl-acc-ro:  #5a7a90;
-      --rdl-acc-rw:  #3a8a5f;
-      --rdl-acc-w1c: #b87a18;
-      --rdl-acc-wo:  #4a5a90;
-      --rdl-acc-rsv: #8a3a3a;
-    }
-  }
-  *, *::before, *::after { box-sizing: border-box; }
-  html, body { margin: 0; padding: 0; background: var(--rdl-bg); color: var(--rdl-fg);
-    font-family: var(--rdl-font-chrome); font-size: 14px; height: 100vh; }
-  body { display: grid; grid-template-rows: auto auto auto 1fr; min-height: 0; }
+  body { margin: 0; }
   .topbar { background: var(--rdl-chrome); padding: 8px 14px;
     border-bottom: 1px solid var(--rdl-border);
     display: flex; align-items: center; gap: 12px; font-size: 13px; }
@@ -839,150 +385,48 @@ function renderHtml(filename: string): string {
   .topbar .conn { color: var(--rdl-dim); margin-left: auto; font-size: 12px; }
   .topbar .conn.ok::before { content: '●  '; color: var(--rdl-acc-rw); }
   .topbar .conn.err::before { content: '●  '; color: #d75a5a; }
-  .stale-bar { background: rgba(215,168,90,0.12); border-bottom: 1px solid var(--rdl-warning);
-    color: var(--rdl-warning); padding: 7px 14px; font-size: 13px;
-    display: none; align-items: center; gap: 8px; }
-  .stale-bar.shown { display: flex; }
-  .tabs { display: flex; border-bottom: 1px solid var(--rdl-border); background: var(--rdl-chrome);
-    overflow-x: auto; }
-  .tab { padding: 9px 16px; font-size: 13px; color: var(--rdl-dim); cursor: pointer;
-    border-right: 1px solid var(--rdl-border); white-space: nowrap; user-select: none; }
-  .tab:hover { color: var(--rdl-fg); }
-  .tab.active { color: var(--rdl-fg); background: var(--rdl-bg);
-    border-bottom: 2px solid var(--rdl-accent); margin-bottom: -1px; }
-  .body { display: grid;
-    grid-template-rows: minmax(120px, min(50%, max-content)) 1fr;
-    min-height: 0; }
-  .tree-pane { display: grid; grid-template-rows: auto 1fr; min-height: 0;
-    border-bottom: 1px solid var(--rdl-border); }
-  .filter-bar { padding: 6px 12px; border-bottom: 1px solid var(--rdl-border);
-    background: var(--rdl-panel); display: none; }
-  .filter-bar.shown { display: block; }
-  .filter-bar input { width: 100%; box-sizing: border-box; background: var(--rdl-bg);
-    border: 1px solid var(--rdl-border); color: var(--rdl-fg);
-    padding: 5px 9px; font-size: 13px; font-family: var(--rdl-font-chrome);
-    outline: none; border-radius: 2px; }
-  .filter-bar input:focus { border-color: var(--rdl-accent); }
-  .filter-hint { color: var(--rdl-dim); font-size: 11px; margin-top: 4px; }
-  .tree-host { overflow: auto; padding: 8px 0; min-height: 0; }
-  .tree { font-family: var(--rdl-font-mono); font-size: 13px; }
-  .row { display: grid; grid-template-columns: 28px 140px 1fr 100px; gap: 12px;
-    align-items: baseline; padding: 3px 16px; cursor: pointer; user-select: none; }
-  .row:hover { background: rgba(74,158,255,0.08); }
-  .row.selected { background: var(--rdl-selected); border-left: 3px solid var(--rdl-accent);
-    padding-left: 13px; }
-  .row.focused { outline: 1px solid var(--rdl-accent); outline-offset: -1px; }
-  .tree-host:focus { outline: none; }
-  /* Right-click context menu — Copy Name/Address/Type. No "Reveal in Editor"
-     in the CLI surface (there is no editor); clipboard writes use the browser
-     navigator.clipboard API so no host round-trip is needed. */
-  .ctx-menu { position: fixed; z-index: 1000; background: var(--rdl-panel);
-    border: 1px solid var(--rdl-border); border-radius: 4px; min-width: 180px;
-    padding: 4px 0; font-size: 13px; box-shadow: 0 4px 12px rgba(0,0,0,0.4);
-    display: none; }
-  .ctx-menu.shown { display: block; }
-  .ctx-menu .item { padding: 6px 14px; cursor: pointer; user-select: none;
-    display: flex; justify-content: space-between; gap: 16px; }
-  .ctx-menu .item:hover { background: var(--rdl-selected); }
-  .ctx-menu .item .hint { color: var(--rdl-dim); font-family: var(--rdl-font-mono);
-    font-size: 12px; }
-  .ctx-menu .sep { height: 1px; background: var(--rdl-border); margin: 4px 0; }
-  .toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
-    background: var(--rdl-panel); border: 1px solid var(--rdl-border);
-    color: var(--rdl-fg); padding: 8px 14px; border-radius: 4px;
-    font-size: 13px; box-shadow: 0 4px 12px rgba(0,0,0,0.4);
-    pointer-events: none; opacity: 0; transition: opacity 0.18s; z-index: 999; }
-  .toast.shown { opacity: 1; }
-  .row .caret { color: var(--rdl-dim); font-size: 11px; text-align: right; }
-  .row .caret-toggle { cursor: pointer; padding: 0 4px; border-radius: 2px;
-    transition: background 0.08s; }
-  .row .caret-toggle:hover { background: rgba(74,158,255,0.18); color: var(--rdl-fg); }
-  .row .addr { color: var(--rdl-dim); }
-  .row .name { font-weight: 600; }
-  .row .access { color: var(--rdl-dim); font-size: 12px; text-align: right;
-    font-family: var(--rdl-font-chrome); }
-  .row.container .name { color: var(--rdl-accent); }
-  .row.container .access { font-style: italic; }
-  .indent-1 { padding-left: 32px; }
-  .indent-2 { padding-left: 56px; }
-  .indent-3 { padding-left: 80px; }
-  .indent-1.selected { padding-left: 29px; }
-  .indent-2.selected { padding-left: 53px; }
-  .indent-3.selected { padding-left: 77px; }
-  .pill { display: inline-block; padding: 0 6px; border-radius: 2px; color: #1a1a1a;
-    font-size: 11px; line-height: 17px; font-family: var(--rdl-font-chrome); font-weight: 500;
-    text-align: center; }
-  .pill.rw  { background: var(--rdl-acc-rw); }
-  .pill.ro  { background: var(--rdl-acc-ro); }
-  .pill.w1c { background: var(--rdl-acc-w1c); }
-  .pill.w0c { background: var(--rdl-acc-w1c); opacity: 0.8; }
-  .pill.w1s { background: var(--rdl-acc-rw); opacity: 0.8; }
-  .pill.w0s { background: var(--rdl-acc-rw); opacity: 0.6; }
-  .pill.wo  { background: var(--rdl-acc-wo); }
-  .pill.wclr,.pill.wset { background: var(--rdl-acc-w1c); opacity: 0.7; }
-  .pill.rclr,.pill.rset { background: var(--rdl-acc-ro); opacity: 0.7; }
-  .pill.rsv,.pill.na { background: var(--rdl-acc-rsv); color: var(--rdl-fg); opacity: 0.8; }
-  #detail { padding: 16px 20px; overflow: auto; min-height: 0; }
-  #detail h2 { margin: 0 0 2px; font-size: 17px; font-weight: 600;
-    font-family: var(--rdl-font-mono); }
-  #detail .display-name { color: var(--rdl-fg); font-size: 13px; margin-bottom: 4px; }
-  #detail .breadcrumb { color: var(--rdl-dim); font-size: 12px;
-    font-family: var(--rdl-font-mono); margin-bottom: 12px; }
-  #detail .meta { display: grid; grid-template-columns: auto 1fr auto 1fr;
-    column-gap: 12px; row-gap: 4px; max-width: 520px; font-size: 13px; margin-bottom: 16px; }
-  #detail .meta .k { color: var(--rdl-dim); }
-  #detail .meta .v { color: var(--rdl-fg); font-family: var(--rdl-font-mono); }
-  #detail .desc { color: var(--rdl-dim); font-size: 13px; line-height: 1.5;
-    margin-bottom: 16px; max-width: 60ch; }
-  #detail .fields-title { font-size: 11px; color: var(--rdl-dim);
-    text-transform: uppercase; letter-spacing: 0.06em;
-    border-bottom: 1px solid var(--rdl-border); padding-bottom: 6px;
-    margin: 16px 0 8px; }
-  #detail .field { display: grid; grid-template-columns: 60px 140px 60px 90px 1fr;
-    column-gap: 12px; padding: 4px 0; border-bottom: 1px dotted #2a2a2a;
-    font-family: var(--rdl-font-mono); font-size: 13px; align-items: baseline; }
-  #detail .field .desc { color: var(--rdl-dim); font-family: var(--rdl-font-chrome);
-    font-style: normal; }
-  #detail .src-link { display: inline-block; margin-top: 16px;
-    color: var(--rdl-accent); font-family: var(--rdl-font-mono); font-size: 13px; }
-  #detail .placeholder { color: var(--rdl-dim); font-size: 13px; padding: 24px 0; }
-  .empty { padding: 32px 40px; max-width: 60ch; }
-  .empty h2 { font-size: 15px; font-weight: 600; margin: 0 0 8px; }
-  .empty p { margin: 4px 0; color: var(--rdl-dim); font-size: 13px; }
-  .empty code { font-family: var(--rdl-font-mono); background: var(--rdl-panel);
-    padding: 1px 5px; border-radius: 2px; }
-</style></head>
+  #app-shell { display: grid; grid-template-rows: auto 1fr; height: 100vh; }
+  #app-root { min-height: 0; }
+</style>
+</head>
 <body>
-  <div class="topbar">
-    <span class="title">${escapeAttr(filename)}</span>
-    <span id="conn" class="conn">connecting…</span>
-  </div>
-  <div id="stale-bar" class="stale-bar">
-    <span>⚠</span><span id="stale-text">Showing last good elaboration</span>
-  </div>
-  <div id="tabs" class="tabs"></div>
-  <div class="body">
-    <div class="tree-pane">
-      <div id="filter-bar" class="filter-bar">
-        <input id="filter-input" type="text" placeholder="Filter by name, address (0x10), field, or access (rw)…" />
-        <div id="filter-hint" class="filter-hint"></div>
-      </div>
-      <div id="tree-host" class="tree-host" tabindex="0" role="tree" aria-label="Memory map tree">
-        <div class="empty">
-          <h2>Memory map viewer</h2>
-          <p>Waiting for first compile of <code>${escapeAttr(filename)}</code>…</p>
-        </div>
-      </div>
+  <div id="app-shell">
+    <div class="topbar">
+      <span class="title">${escapeAttr(filename)}</span>
+      <span id="conn" class="conn">connecting…</span>
     </div>
-    <div id="detail">
-      <div class="placeholder">Select a register to see details.</div>
-    </div>
+    <div id="app-root"></div>
   </div>
-  <div id="ctx-menu" class="ctx-menu" role="menu" aria-label="Tree row actions"></div>
-  <div id="toast" class="toast" role="status" aria-live="polite"></div>
-<script>
-${RENDER_JS}
-</script>
+  <script src="/viewer.js"></script>
+  <script>
+  (function() {
+    const conn = document.getElementById('conn');
+    const setConn = (cls, txt) => { conn.className = 'conn ' + cls; conn.textContent = txt; };
+
+    const updaters = new Set();
+    function startSse() {
+      const es = new EventSource('/events');
+      es.addEventListener('ready', () => setConn('ok', 'live'));
+      es.onmessage = ev => {
+        try {
+          const tree = JSON.parse(ev.data);
+          updaters.forEach(cb => cb(tree));
+        } catch (e) { console.error('bad SSE frame', e); }
+      };
+      es.onerror = () => setConn('err', 'disconnected — retrying');
+    }
+
+    const transport = {
+      getTree: () => fetch('/tree').then(r => r.json()),
+      onTreeUpdate(cb) { updaters.add(cb); return () => updaters.delete(cb); },
+      // No reveal: there is no editor here. Copy falls back to
+      // navigator.clipboard inside the viewer when transport.copy is absent.
+    };
+
+    RdlViewer.mount(document.getElementById('app-root'), transport);
+    startSse();
+  })();
+  </script>
 </body></html>`;
 }
 
@@ -991,4 +435,3 @@ function escapeAttr(s: string): string {
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
   } as Record<string, string>)[c]);
 }
-

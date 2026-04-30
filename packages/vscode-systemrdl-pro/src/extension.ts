@@ -358,6 +358,10 @@ async function showMemoryMap(context: vscode.ExtensionContext): Promise<void> {
   lastTreeUri = targetUri.toString();
 
   if (!memoryMapPanel) {
+    // viewer-core's bundled JS + CSS live under media/viewer/ (copied at build
+    // time from packages/rdl-viewer-core/dist/). The webview must whitelist
+    // that directory via localResourceRoots before it can load /viewer.js.
+    const viewerDist = vscode.Uri.joinPath(context.extensionUri, 'media', 'viewer');
     memoryMapPanel = vscode.window.createWebviewPanel(
       'systemrdl-pro.memoryMap',
       'SystemRDL Memory Map',
@@ -365,8 +369,7 @@ async function showMemoryMap(context: vscode.ExtensionContext): Promise<void> {
       {
         enableScripts: true,
         retainContextWhenHidden: true,
-        // The webview only loads inline content from us; no remote resources.
-        localResourceRoots: [],
+        localResourceRoots: [viewerDist],
       },
     );
     memoryMapPanelDisposed = false;
@@ -401,7 +404,7 @@ async function showMemoryMap(context: vscode.ExtensionContext): Promise<void> {
       undefined,
       context.subscriptions,
     );
-    memoryMapPanel.webview.html = renderViewerHtml();
+    memoryMapPanel.webview.html = renderViewerHtml(memoryMapPanel.webview, context.extensionUri);
   } else {
     memoryMapPanel.reveal(vscode.ViewColumn.Beside);
   }
@@ -540,791 +543,79 @@ function pickTargetUri(): vscode.Uri | undefined {
   return undefined;
 }
 
-function renderViewerHtml(): string {
-  // CSP — only inline styles + inline scripts. No remote resources.
-  // Design tokens mirror docs/design.md "Viewer UX → Design Tokens" (D11/D12/D14).
-  // Vanilla-DOM walking skeleton — Week 5 swaps it for rdl-viewer-core Svelte without
-  // changing the postMessage protocol (`tree` in, `reveal` out).
+// ---------------------------------------------------------------------------
+// Webview shell — loads the @systemrdl-pro/viewer-core React bundle and wires
+// up a postMessage transport. The renderer (Tree, Detail, ContextMenu, etc.)
+// lives in viewer.js shared with the rdl-viewer CLI; this shell only declares
+// the host element, transport bridge, and CSP.
+// ---------------------------------------------------------------------------
+
+function renderViewerHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
+  const viewerJs = webview.asWebviewUri(
+    vscode.Uri.joinPath(extensionUri, 'media', 'viewer', 'viewer.js'),
+  );
+  const viewerCss = webview.asWebviewUri(
+    vscode.Uri.joinPath(extensionUri, 'media', 'viewer', 'viewer.css'),
+  );
+  // CSP: only allow scripts/styles from the webview source. The init script is
+  // inline; we use a nonce so VSCode's webview CSP enforcement doesn't block it.
+  const nonce = makeNonce();
   return /* html */ `<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy"
-      content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
+      content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src ${webview.cspSource} 'nonce-${nonce}'; font-src ${webview.cspSource};">
 <title>SystemRDL Memory Map</title>
-<style>
-  :root {
-    color-scheme: dark light;
-    --rdl-bg: #1e1e1e;
-    --rdl-panel: #252526;
-    --rdl-chrome: #2d2d30;
-    --rdl-border: #3c3c3c;
-    --rdl-fg: #d4d4d4;
-    --rdl-dim: #858585;
-    --rdl-selected: #213c5a;
-    --rdl-accent: #4a9eff;
-    --rdl-warning: #d7a85a;
-    --rdl-acc-ro:  #8aa6b8;
-    --rdl-acc-rw:  #6fb98f;
-    --rdl-acc-w1c: #d7a85a;
-    --rdl-acc-wo:  #7a87b8;
-    --rdl-acc-rsv: #5a3a3a;
-    --rdl-font-chrome: 'Inter', system-ui, sans-serif;
-    --rdl-font-mono: 'JetBrains Mono', 'SF Mono', Consolas, monospace;
-  }
-  @media (prefers-color-scheme: light) {
-    :root {
-      --rdl-bg: #ffffff;
-      --rdl-panel: #f5f5f5;
-      --rdl-chrome: #ececec;
-      --rdl-border: #d4d4d4;
-      --rdl-fg: #1a1a1a;
-      --rdl-dim: #6b6b6b;
-      --rdl-selected: #d6e7fa;
-      --rdl-accent: #0066cc;
-      --rdl-warning: #b87a18;
-      --rdl-acc-ro:  #5a7a90;
-      --rdl-acc-rw:  #3a8a5f;
-      --rdl-acc-w1c: #b87a18;
-      --rdl-acc-wo:  #4a5a90;
-      --rdl-acc-rsv: #8a3a3a;
-    }
-  }
-  *, *::before, *::after { box-sizing: border-box; }
-  html, body { margin: 0; padding: 0; background: var(--rdl-bg); color: var(--rdl-fg);
-    font-family: var(--rdl-font-chrome); font-size: 14px; height: 100vh; }
-  /* Status info lives in the VSCode status bar — webview footer removed.
-     Future rdl-viewer-cli (browser, no VSCode chrome) will reintroduce a slim status row. */
-  body { display: grid; grid-template-rows: auto auto 1fr; min-height: 0; }
-  .stale-bar { background: rgba(215,168,90,0.12); border-bottom: 1px solid var(--rdl-warning);
-    color: var(--rdl-warning); padding: 7px 14px; font-size: 13px;
-    display: none; align-items: center; gap: 8px; }
-  .stale-bar.shown { display: flex; }
-  .tabs { display: flex; border-bottom: 1px solid var(--rdl-border); background: var(--rdl-chrome);
-    overflow-x: auto; }
-  .tab { padding: 9px 16px; font-size: 13px; color: var(--rdl-dim); cursor: pointer;
-    border-right: 1px solid var(--rdl-border); white-space: nowrap; user-select: none; }
-  .tab:hover { color: var(--rdl-fg); }
-  .tab.active { color: var(--rdl-fg); background: var(--rdl-bg);
-    border-bottom: 2px solid var(--rdl-accent); margin-bottom: -1px; }
-  /* Always-stack: tree on top (auto-sized to content up to 50% — small chips show
-     all regs without scrolling), detail below filling the rest. Each pane has
-     overflow:auto so large register maps still scroll within their pane. */
-  .body { display: grid;
-    grid-template-rows: minmax(120px, min(50%, max-content)) 1fr;
-    min-height: 0; }
-  .tree-pane { display: grid; grid-template-rows: auto 1fr; min-height: 0;
-    border-bottom: 1px solid var(--rdl-border); }
-  .filter-bar { padding: 6px 12px; border-bottom: 1px solid var(--rdl-border);
-    background: var(--rdl-panel); display: none; }
-  .filter-bar.shown { display: block; }
-  .filter-bar input { width: 100%; box-sizing: border-box; background: var(--rdl-bg);
-    border: 1px solid var(--rdl-border); color: var(--rdl-fg);
-    padding: 5px 9px; font-size: 13px; font-family: var(--rdl-font-chrome);
-    outline: none; border-radius: 2px; }
-  .filter-bar input:focus { border-color: var(--rdl-accent); }
-  .filter-hint { color: var(--rdl-dim); font-size: 11px; margin-top: 4px;
-    font-family: var(--rdl-font-chrome); }
-  .tree-host { overflow: auto; padding: 8px 0; min-height: 0; }
-  .row.filter-hidden { display: none; }
-  .tree { font-family: var(--rdl-font-mono); font-size: 13px; }
-  .row { display: grid; grid-template-columns: 28px 140px 1fr 100px; gap: 12px;
-    align-items: baseline; padding: 3px 16px; cursor: pointer; user-select: none; }
-  .row:hover { background: rgba(74,158,255,0.08); }
-  .row.selected { background: var(--rdl-selected); border-left: 3px solid var(--rdl-accent);
-    padding-left: 13px; }
-  .row.focused { outline: 1px solid var(--rdl-accent); outline-offset: -1px; }
-  .tree-host:focus { outline: none; }
-  .tree-host:focus .row.focused { outline-color: var(--rdl-accent); }
-  .row .caret { color: var(--rdl-dim); font-size: 11px; text-align: right; }
-  .row .caret-toggle { cursor: pointer; padding: 0 4px; border-radius: 2px;
-    transition: background 0.08s; }
-  .row .caret-toggle:hover { background: rgba(74,158,255,0.18); color: var(--rdl-fg); }
-  .row .addr { color: var(--rdl-dim); }
-  .row .name { font-weight: 600; }
-  .row .access { color: var(--rdl-dim); font-size: 12px; text-align: right;
-    font-family: var(--rdl-font-chrome); }
-  /* Container rows (addrmap/regfile) — slightly different chrome to read as headers. */
-  .row.container .name { color: var(--rdl-accent); }
-  .row.container .access { font-style: italic; }
-  .indent-1 { padding-left: 32px; }
-  .indent-2 { padding-left: 56px; }
-  .indent-3 { padding-left: 80px; }
-  .indent-1.selected { padding-left: 29px; }
-  .indent-2.selected { padding-left: 53px; }
-  .indent-3.selected { padding-left: 77px; }
-  .pill { display: inline-block; padding: 0 6px; border-radius: 2px; color: #1a1a1a;
-    font-size: 11px; line-height: 17px; font-family: var(--rdl-font-chrome); font-weight: 500;
-    text-align: center; }
-  .pill.rw  { background: var(--rdl-acc-rw); }
-  .pill.ro  { background: var(--rdl-acc-ro); }
-  .pill.w1c { background: var(--rdl-acc-w1c); }
-  .pill.w0c { background: var(--rdl-acc-w1c); opacity: 0.8; }
-  .pill.w1s { background: var(--rdl-acc-rw); opacity: 0.8; }
-  .pill.w0s { background: var(--rdl-acc-rw); opacity: 0.6; }
-  .pill.wo  { background: var(--rdl-acc-wo); }
-  .pill.wclr,.pill.wset { background: var(--rdl-acc-w1c); opacity: 0.7; }
-  .pill.rclr,.pill.rset { background: var(--rdl-acc-ro); opacity: 0.7; }
-  .pill.rsv,.pill.na { background: var(--rdl-acc-rsv); color: var(--rdl-fg); opacity: 0.8; }
-
-  /* Detail pane */
-  #detail { padding: 16px 20px; overflow: auto; min-height: 0; }
-  #detail h2 { margin: 0 0 2px; font-size: 17px; font-weight: 600;
-    font-family: var(--rdl-font-mono); }
-  #detail .display-name { color: var(--rdl-fg); font-size: 13px;
-    margin-bottom: 4px; }
-  #detail .breadcrumb { color: var(--rdl-dim); font-size: 12px;
-    font-family: var(--rdl-font-mono); margin-bottom: 12px; }
-  #detail .meta { display: grid; grid-template-columns: auto 1fr auto 1fr;
-    column-gap: 12px; row-gap: 4px; max-width: 520px; font-size: 13px;
-    margin-bottom: 16px; }
-  #detail .meta .k { color: var(--rdl-dim); }
-  #detail .meta .v { color: var(--rdl-fg); font-family: var(--rdl-font-mono); }
-  #detail .desc { color: var(--rdl-dim); font-size: 13px; line-height: 1.5;
-    margin-bottom: 16px; max-width: 60ch; }
-  #detail .fields-title { font-size: 11px; color: var(--rdl-dim);
-    text-transform: uppercase; letter-spacing: 0.06em;
-    border-bottom: 1px solid var(--rdl-border); padding-bottom: 6px;
-    margin: 16px 0 8px; }
-  #detail .field { display: grid; grid-template-columns: 60px 140px 60px 90px 1fr;
-    column-gap: 12px; padding: 4px 0; border-bottom: 1px dotted #2a2a2a;
-    font-family: var(--rdl-font-mono); font-size: 13px; align-items: baseline; }
-  #detail .field .desc { color: var(--rdl-dim); font-family: var(--rdl-font-chrome);
-    font-style: normal; }
-  #detail .src-link { display: inline-block; margin-top: 16px;
-    color: var(--rdl-accent); cursor: pointer;
-    font-family: var(--rdl-font-mono); font-size: 13px; }
-  #detail .src-link:hover { text-decoration: underline; }
-  #detail .placeholder { color: var(--rdl-dim); font-size: 13px; padding: 24px 0; }
-
-  /* Right-click menu — custom dropdown that posts back to the extension for
-     clipboard writes (vscode.env.clipboard) and reveal calls. */
-  .ctx-menu { position: fixed; z-index: 1000; background: var(--rdl-panel);
-    border: 1px solid var(--rdl-border); border-radius: 4px; min-width: 180px;
-    padding: 4px 0; font-size: 13px; box-shadow: 0 4px 12px rgba(0,0,0,0.4);
-    display: none; }
-  .ctx-menu.shown { display: block; }
-  .ctx-menu .item { padding: 6px 14px; cursor: pointer; user-select: none;
-    display: flex; justify-content: space-between; gap: 16px; }
-  .ctx-menu .item:hover { background: var(--rdl-selected); }
-  .ctx-menu .item .hint { color: var(--rdl-dim); font-family: var(--rdl-font-mono);
-    font-size: 12px; }
-  .ctx-menu .sep { height: 1px; background: var(--rdl-border); margin: 4px 0; }
-
-  .empty { padding: 32px 40px; max-width: 60ch; }
-  .empty h2 { font-size: 15px; font-weight: 600; margin: 0 0 8px; }
-  .empty p { margin: 4px 0; color: var(--rdl-dim); font-size: 13px; }
-  .empty code { font-family: var(--rdl-font-mono); background: var(--rdl-panel);
-    padding: 1px 5px; border-radius: 2px; }
-</style></head>
+<link rel="stylesheet" href="${viewerCss}">
+<style>html,body,#app-root{height:100%;margin:0;}</style>
+</head>
 <body>
-  <div id="stale-bar" class="stale-bar">
-    <span>⚠</span><span id="stale-text">Showing last good elaboration</span>
-  </div>
-  <div id="tabs" class="tabs"></div>
-  <div class="body">
-    <div class="tree-pane">
-      <div id="filter-bar" class="filter-bar">
-        <input id="filter-input" type="text" placeholder="Filter by name, address (0x10), field, or access (rw)…" />
-        <div id="filter-hint" class="filter-hint"></div>
-      </div>
-      <div id="tree-host" class="tree-host" tabindex="0" role="tree" aria-label="Memory map tree">
-        <div class="empty">
-          <h2>Memory map viewer</h2>
-          <p>Waiting for elaborated tree from <code>systemrdl-lsp</code>…</p>
-        </div>
-      </div>
-    </div>
-    <div id="detail">
-      <div class="placeholder">Select a register to see details.</div>
-    </div>
-  </div>
-  <div id="ctx-menu" class="ctx-menu" role="menu" aria-label="Tree row actions"></div>
-<script>
-const vscode = acquireVsCodeApi();
+  <div id="app-root"></div>
+  <script nonce="${nonce}" src="${viewerJs}"></script>
+  <script nonce="${nonce}">
+  (function() {
+    const vscode = acquireVsCodeApi();
+    const updaters = new Set();
+    const cursorListeners = new Set();
+    let pendingTree = null;
 
-// State persisted across messages within the same panel session.
-// - collapsedKeys: dotted paths of containers the user has manually folded.
-// - focusedKey: keyboard-driven cursor position (independent of selectedRegKey
-//   so arrow keys can move through containers without changing the detail pane).
-// - flatList: rebuilt every renderTree() — ordered list of visible rows with
-//   metadata, used by the keyboard handler to jump to the next/prev/parent/child.
-let state = {
-  roots: [], activeRootIndex: 0,
-  selectedRegKey: null, focusedKey: null,
-  filter: '', collapsedKeys: new Set(),
-  flatList: []
-};
-
-window.addEventListener('message', (event) => {
-  const m = event.data;
-  if (m.type === 'tree')  applyTree(m.tree);
-  else if (m.type === 'cursor') applyCursor(m.line);
-  else if (m.type === 'error') showError(m.message);
-});
-
-// Cmd/Ctrl-F focuses the filter input. Esc clears + blurs.
-document.addEventListener('keydown', (e) => {
-  if ((e.metaKey || e.ctrlKey) && (e.key === 'f' || e.key === 'F')) {
-    const bar = document.getElementById('filter-bar');
-    const input = document.getElementById('filter-input');
-    bar.classList.add('shown');
-    input.focus();
-    input.select();
-    e.preventDefault();
-  } else if (e.key === 'Escape') {
-    const input = document.getElementById('filter-input');
-    if (document.activeElement === input || state.filter) {
-      input.value = '';
-      state.filter = '';
-      document.getElementById('filter-bar').classList.remove('shown');
-      input.blur();
-      renderTree();
-      e.preventDefault();
-    }
-  }
-});
-
-document.getElementById('filter-input').addEventListener('input', (e) => {
-  state.filter = e.target.value.toLowerCase();
-  renderTree();
-});
-
-// Keyboard navigation on the tree host. Standard WAI-ARIA tree pattern:
-//   ↑/↓        — move focus to previous/next visible row
-//   →          — expand a collapsed container, else move to first child
-//   ←          — collapse an expanded container, else move to parent
-//   Enter / Space — reveal in editor (reg) or toggle (container)
-//   Home / End — first / last visible row
-document.getElementById('tree-host').addEventListener('keydown', (e) => {
-  const list = state.flatList;
-  if (!list.length) return;
-  const idx = list.findIndex(it => it.key === state.focusedKey);
-  const cur = idx >= 0 ? list[idx] : null;
-
-  function moveTo(j) {
-    if (j < 0 || j >= list.length) return;
-    state.focusedKey = list[j].key;
-    renderTree();
-  }
-  function findParentIdx(of) {
-    for (let j = of - 1; j >= 0; j--) {
-      if (list[j].depth < list[of].depth) return j;
-    }
-    return -1;
-  }
-
-  switch (e.key) {
-    case 'ArrowDown': moveTo(idx + 1); e.preventDefault(); break;
-    case 'ArrowUp':   moveTo(idx > 0 ? idx - 1 : 0); e.preventDefault(); break;
-    case 'Home':      moveTo(0); e.preventDefault(); break;
-    case 'End':       moveTo(list.length - 1); e.preventDefault(); break;
-    case 'ArrowRight':
-      if (cur && cur.kind === 'container') {
-        if (!cur.expanded && cur.hasChildren) toggleCollapse(cur.key);
-        else if (idx + 1 < list.length && list[idx + 1].depth > cur.depth) moveTo(idx + 1);
+    window.addEventListener('message', (e) => {
+      const m = e.data;
+      if (m && m.type === 'tree') {
+        pendingTree = m.tree;
+        updaters.forEach(cb => cb(m.tree));
+      } else if (m && m.type === 'cursor') {
+        cursorListeners.forEach(cb => cb(m.line));
       }
-      e.preventDefault();
-      break;
-    case 'ArrowLeft':
-      if (cur && cur.kind === 'container' && cur.expanded) toggleCollapse(cur.key);
-      else if (cur) {
-        const p = findParentIdx(idx);
-        if (p >= 0) moveTo(p);
-      }
-      e.preventDefault();
-      break;
-    case 'Enter':
-    case ' ':
-      if (!cur) break;
-      if (cur.kind === 'container') {
-        toggleCollapse(cur.key);
-      } else {
-        state.selectedRegKey = cur.key;
-        renderTree();
-        renderDetail();
-        if (cur.source) postReveal(cur.source);
-      }
-      e.preventDefault();
-      break;
-  }
-});
-
-function applyTree(tree) {
-  state.roots = tree.roots || [];
-  if (state.activeRootIndex >= state.roots.length) state.activeRootIndex = 0;
-  document.getElementById('stale-bar').classList.toggle('shown', !!tree.stale);
-  document.getElementById('stale-text').textContent = tree.stale
-    ? 'Showing last good elaboration · current parse failed'
-    : 'Showing last good elaboration';
-  if (!state.roots.length) {
-    showEmpty();
-    return;
-  }
-
-  // Auto-select the first reg in the active root if nothing valid is selected (D4).
-  const root = state.roots[state.activeRootIndex];
-  if (!state.selectedRegKey || !findRegByKey(root, state.selectedRegKey)) {
-    const firstPath = findFirstRegPath(root, [root.name]);
-    state.selectedRegKey = firstPath ? firstPath.key : null;
-  }
-
-  renderTabs();
-  renderTree();
-  renderDetail();
-}
-
-function renderTabs() {
-  const host = document.getElementById('tabs');
-  host.innerHTML = '';
-  state.roots.forEach((r, i) => {
-    const t = document.createElement('div');
-    t.className = 'tab' + (i === state.activeRootIndex ? ' active' : '');
-    t.textContent = r.name;
-    t.title = (r.type ? r.type + ' · ' : '') + r.address;
-    t.addEventListener('click', () => {
-      if (i === state.activeRootIndex) return;
-      state.activeRootIndex = i;
-      const first = findFirstRegPath(state.roots[i], [state.roots[i].name]);
-      state.selectedRegKey = first ? first.key : null;
-      renderTabs();
-      renderTree();
-      renderDetail();
     });
-    host.appendChild(t);
-  });
-}
 
-function renderTree() {
-  const root = state.roots[state.activeRootIndex];
-  const host = document.getElementById('tree-host');
-  host.innerHTML = '';
-  // flatList drives keyboard navigation — one entry per visible row in DFS order.
-  state.flatList = [];
-  const tree = document.createElement('div');
-  tree.className = 'tree';
-  walk(root, tree, 0, []);
-  host.appendChild(tree);
+    const transport = {
+      // The host pushes the initial tree via the same 'tree' postMessage.
+      // We resolve getTree() on the first one — if the host has already
+      // sent it (cached pendingTree) we return immediately.
+      getTree() {
+        if (pendingTree) return Promise.resolve(pendingTree);
+        return new Promise(resolve => {
+          const off = (tree) => { updaters.delete(off); resolve(tree); };
+          updaters.add(off);
+        });
+      },
+      onTreeUpdate(cb) { updaters.add(cb); return () => updaters.delete(cb); },
+      onCursorMove(cb) { cursorListeners.add(cb); return () => cursorListeners.delete(cb); },
+      reveal(source) { vscode.postMessage({ type: 'reveal', source }); },
+      copy(text, label) { vscode.postMessage({ type: 'copy', text, label }); },
+    };
 
-  // Update filter hint with match count if filter is active.
-  const hint = document.getElementById('filter-hint');
-  if (state.filter) {
-    const visibleRegs = host.querySelectorAll('.row:not(.container):not(.filter-hidden)').length;
-    hint.textContent = visibleRegs + ' match' + (visibleRegs === 1 ? '' : 'es');
-  } else {
-    hint.textContent = '';
-  }
-
-  // Default focus to selection if nothing focused yet, or if focus points
-  // at a row that's no longer visible (e.g. parent collapsed the focused child).
-  const focusVisible = state.focusedKey && state.flatList.some(it => it.key === state.focusedKey);
-  if (!focusVisible) {
-    state.focusedKey = state.selectedRegKey || (state.flatList[0] && state.flatList[0].key) || null;
-  }
-  // Mark the focused row visually + scroll it into view.
-  const focusedEl = state.focusedKey
-    ? host.querySelector('[data-key="' + cssEscape(state.focusedKey) + '"]')
-    : null;
-  if (focusedEl) {
-    focusedEl.classList.add('focused');
-    focusedEl.scrollIntoView({ block: 'nearest' });
-  } else {
-    const sel = host.querySelector('.row.selected');
-    if (sel) sel.scrollIntoView({ block: 'nearest' });
-  }
-}
-
-// Quoted attribute selector — paths can contain '.' which collide with class
-// selectors, but [data-key="..."] handles dots fine. We still need to escape
-// embedded quotes; SystemRDL identifiers don't allow them, so this is a no-op
-// for the typical case but keeps the selector safe for paranoid inputs.
-function cssEscape(s) { return String(s).replace(/"/g, '\\\\"'); }
-
-// Returns true if the subtree rooted at 'node' matches the filter. The filter
-// is checked against (in order): the reg/container name, the register address,
-// every field's name, and every field's access mode. A filter that *looks* hex
-// (0x-prefixed or all hex digits) is normalised — "0x10", "10", "0010" all
-// match a register stored as "0x0000_0010" via substring on the canonical form.
-function looksLikeHex(s) {
-  if (!s) return false;
-  return /^(0x)?[0-9a-f_]+$/i.test(s);
-}
-function normalizeAddr(s) {
-  return String(s || '').toLowerCase().replace(/^0x/, '').replace(/_/g, '');
-}
-function subtreeMatches(node, filter) {
-  if (!filter) return true;
-  const lower = filter.toLowerCase();
-  const hexFilter = looksLikeHex(filter) ? normalizeAddr(filter) : null;
-  if (node.kind === 'reg') {
-    if (node.name.toLowerCase().includes(lower)) return true;
-    if (hexFilter && normalizeAddr(node.address).includes(hexFilter)) return true;
-    return (node.fields || []).some(f =>
-      f.name.toLowerCase().includes(lower) ||
-      (f.access && f.access.toLowerCase().includes(lower))
-    );
-  }
-  // For containers (addrmap/regfile), keep them if their own name/address matches
-  // or if any descendant does.
-  if (node.name && node.name.toLowerCase().includes(lower)) return true;
-  if (hexFilter && normalizeAddr(node.address).includes(hexFilter)) return true;
-  return (node.children || []).some(c => subtreeMatches(c, filter));
-}
-
-function walkChildren(parent, host, depth, pathSegments) {
-  (parent.children || []).forEach(child => walk(child, host, depth, pathSegments));
-}
-
-function walk(node, host, depth, pathSegments) {
-  const indent = 'indent-' + Math.min(depth, 3);
-  // Filter: skip entire subtree if nothing inside matches.
-  if (state.filter && !subtreeMatches(node, state.filter)) return;
-  if (node.kind === 'addrmap' || node.kind === 'regfile') {
-    const containerKey = pathSegments.concat([node.name]).join('.');
-    const isCollapsed = !state.filter && state.collapsedKeys.has(containerKey);
-    const caretChar = isCollapsed ? '▶' : '▼';
-    const row = document.createElement('div');
-    row.className = 'row container ' + indent;
-    const kindLabel = node.kind + (node.type ? ' (' + node.type + ')' : '');
-    // ARIA: role=treeitem, aria-level (1-based), aria-expanded for containers.
-    row.setAttribute('role', 'treeitem');
-    row.setAttribute('aria-level', String(depth + 1));
-    row.setAttribute('aria-expanded', isCollapsed ? 'false' : 'true');
-    row.setAttribute('data-key', containerKey);
-    row.setAttribute('data-kind', 'container');
-    row.innerHTML = '<span class="caret caret-toggle" title="' +
-      (isCollapsed ? 'Click to expand' : 'Click to collapse') + '">' + caretChar + '</span>' +
-      '<span class="addr">' + node.address + '</span>' +
-      '<span class="name">' + escapeHtml(node.name) + '</span>' +
-      '<span class="access" title="' + escapeHtml(kindLabel) + '">' + escapeHtml(kindLabel) + '</span>';
-    const caretEl = row.querySelector('.caret-toggle');
-    if (caretEl) {
-      caretEl.addEventListener('click', (e) => {
-        e.stopPropagation();
-        toggleCollapse(containerKey);
-      });
-    }
-    if (node.source) {
-      row.title = 'Click to reveal in editor (caret to fold)';
-      row.addEventListener('click', () => {
-        state.focusedKey = containerKey;
-        postReveal(node.source);
-      });
-    } else {
-      row.title = 'Click caret to fold';
-      row.addEventListener('click', () => { state.focusedKey = containerKey; renderTree(); });
-    }
-    row.addEventListener('contextmenu', (e) => {
-      e.preventDefault();
-      showCtxMenu(e, { kind: node.kind, name: node.name, address: node.address,
-        type: node.type, source: node.source, path: pathSegments.concat([node.name]).join('.') });
-    });
-    host.appendChild(row);
-    state.flatList.push({ key: containerKey, kind: 'container', depth, expanded: !isCollapsed, hasChildren: (node.children || []).length > 0, source: node.source });
-    if (!isCollapsed) {
-      walkChildren(node, host, depth + 1, pathSegments.concat([node.name]));
-    }
-    return;
-  }
-  if (node.kind === 'reg') {
-    const path = pathSegments.concat([node.name]);
-    const key = path.join('.');
-    const selected = state.selectedRegKey === key;
-    const row = document.createElement('div');
-    row.className = 'row ' + indent + (selected ? ' selected' : '');
-    row.setAttribute('role', 'treeitem');
-    row.setAttribute('aria-level', String(depth + 1));
-    row.setAttribute('aria-selected', selected ? 'true' : 'false');
-    row.setAttribute('data-key', key);
-    row.setAttribute('data-kind', 'reg');
-    row.innerHTML = '<span class="caret"> </span>' +
-      '<span class="addr">' + node.address + '</span>' +
-      '<span class="name">' + escapeHtml(node.name) + '</span>' +
-      '<span class="access">' + (node.accessSummary || '') + '</span>';
-    row.addEventListener('click', () => {
-      state.selectedRegKey = key;
-      state.focusedKey = key;
-      renderTree();
-      renderDetail();
-      if (node.source) postReveal(node.source);
-    });
-    row.addEventListener('contextmenu', (e) => {
-      e.preventDefault();
-      showCtxMenu(e, { kind: 'reg', name: node.name, address: node.address,
-        type: node.type, source: node.source, path: key });
-    });
-    host.appendChild(row);
-    state.flatList.push({ key, kind: 'reg', depth, expanded: false, hasChildren: false, source: node.source });
-  }
-}
-
-function toggleCollapse(containerKey) {
-  if (state.collapsedKeys.has(containerKey)) state.collapsedKeys.delete(containerKey);
-  else state.collapsedKeys.add(containerKey);
-  state.focusedKey = containerKey;
-  renderTree();
-}
-
-// Right-click context menu (W6 / U5). Mirrors VSCode's own context-menu UX:
-// items are kind-aware, secondary text shows the value that will be copied.
-function showCtxMenu(ev, ctx) {
-  const menu = document.getElementById('ctx-menu');
-  menu.innerHTML = '';
-  const items = [];
-  items.push({ label: 'Copy Name', hint: ctx.path, action: () => copyToHost(ctx.path, 'name') });
-  items.push({ label: 'Copy Address', hint: ctx.address, action: () => copyToHost(ctx.address, 'address') });
-  if (ctx.type) {
-    items.push({ label: 'Copy Type', hint: ctx.type, action: () => copyToHost(ctx.type, 'type') });
-  }
-  if (ctx.source) {
-    items.push({ sep: true });
-    items.push({ label: 'Reveal in Editor', hint: '', action: () => postReveal(ctx.source) });
-  }
-  items.forEach(it => {
-    if (it.sep) {
-      const s = document.createElement('div');
-      s.className = 'sep';
-      menu.appendChild(s);
-      return;
-    }
-    const el = document.createElement('div');
-    el.className = 'item';
-    el.setAttribute('role', 'menuitem');
-    el.innerHTML = '<span>' + escapeHtml(it.label) + '</span>' +
-      (it.hint ? '<span class="hint">' + escapeHtml(it.hint) + '</span>' : '');
-    el.addEventListener('click', () => { it.action(); hideCtxMenu(); });
-    menu.appendChild(el);
-  });
-  // Position — keep it in viewport.
-  const x = Math.min(ev.clientX, window.innerWidth - 200);
-  const y = Math.min(ev.clientY, window.innerHeight - menu.offsetHeight - 8);
-  menu.style.left = x + 'px';
-  menu.style.top = y + 'px';
-  menu.classList.add('shown');
-}
-
-function hideCtxMenu() {
-  const menu = document.getElementById('ctx-menu');
-  if (menu) menu.classList.remove('shown');
-}
-
-function copyToHost(text, label) {
-  vscode.postMessage({ type: 'copy', text: String(text || ''), label });
-}
-
-// Dismiss menu on any click outside it, or on Escape.
-document.addEventListener('click', (e) => {
-  const menu = document.getElementById('ctx-menu');
-  if (!menu || !menu.classList.contains('shown')) return;
-  if (!menu.contains(e.target)) hideCtxMenu();
-});
-document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') {
-    const menu = document.getElementById('ctx-menu');
-    if (menu && menu.classList.contains('shown')) {
-      hideCtxMenu();
-      e.preventDefault();
-    }
-  }
-});
-
-// Returns { key, reg, path } for the first register in DFS order.
-function findFirstRegPath(node, pathSegments) {
-  if (node.kind === 'reg') {
-    return { reg: node, path: pathSegments, key: pathSegments.join('.') };
-  }
-  for (const c of node.children || []) {
-    const r = findFirstRegPath(c, pathSegments.concat([c.name]));
-    if (r) return r;
-  }
-  return null;
-}
-
-function findRegByKey(rootOrNode, key) {
-  // Walk and reconstruct the same dotted path as the renderer.
-  const startPath = [rootOrNode.name];
-  function walk(node, segs) {
-    if (node.kind === 'reg') {
-      const k = segs.join('.');
-      return k === key ? { reg: node, path: segs } : null;
-    }
-    for (const c of node.children || []) {
-      const r = walk(c, segs.concat([c.name]));
-      if (r) return r;
-    }
-    return null;
-  }
-  return walk(rootOrNode, startPath);
-}
-
-function postReveal(source) {
-  if (!source) return;
-  vscode.postMessage({ type: 'reveal', source });
-}
-
-// D10: editor cursor moved → select the matching tree node in the viewer
-// (no editor jump back). Resolution order, most specific first:
-//
-//   1. Field whose source line matches exactly → select parent reg
-//   2. Reg whose source line matches → select the reg
-//   3. Container (addrmap/regfile) whose source line matches:
-//      - if it's a top-level root → switch active tab
-//      - if it's a nested container → scroll its row into view
-//
-// Falls through silently if nothing matches (e.g. cursor on a comment line).
-function applyCursor(line0b) {
-  if (!state.roots.length) return;
-
-  // First check whether the cursor is on a top-level addrmap declaration —
-  // if so we want to switch tabs, not just scroll within the current root.
-  for (let i = 0; i < state.roots.length; i++) {
-    const r = state.roots[i];
-    if (r.source && r.source.line === line0b) {
-      if (state.activeRootIndex !== i) {
-        state.activeRootIndex = i;
-        const first = findFirstRegPath(state.roots[i], [state.roots[i].name]);
-        state.selectedRegKey = first ? first.key : null;
-        renderTabs();
-        renderTree();
-        renderDetail();
-      }
-      return;
-    }
-  }
-
-  const root = state.roots[state.activeRootIndex];
-
-  function search(node, segs) {
-    if (node.kind === 'reg') {
-      for (const f of node.fields || []) {
-        if (f.source && f.source.line === line0b) {
-          return { kind: 'reg', path: segs };
-        }
-      }
-      if (node.source && node.source.line === line0b) {
-        return { kind: 'reg', path: segs };
-      }
-      return null;
-    }
-    // Container: addrmap/regfile.
-    if (node.source && node.source.line === line0b) {
-      return { kind: 'container', path: segs, node };
-    }
-    for (const c of node.children || []) {
-      const r = search(c, segs.concat([c.name]));
-      if (r) return r;
-    }
-    return null;
-  }
-
-  const found = search(root, [root.name]);
-  if (!found) return;
-
-  if (found.kind === 'reg') {
-    const newKey = found.path.join('.');
-    if (newKey === state.selectedRegKey) return;
-    state.selectedRegKey = newKey;
-    renderTree();
-    renderDetail();
-    return;
-  }
-
-  // Nested container — scroll its row into view without changing selection.
-  const targetName = found.node.name;
-  renderTree();
-  const host = document.getElementById('tree-host');
-  const rows = host.querySelectorAll('.row.container');
-  for (const r of rows) {
-    const nameEl = r.querySelector('.name');
-    if (nameEl && nameEl.textContent === targetName) {
-      r.scrollIntoView({ block: 'nearest' });
-      break;
-    }
-  }
-}
-
-function renderDetail() {
-  const host = document.getElementById('detail');
-  if (!state.selectedRegKey) {
-    host.innerHTML = '<div class="placeholder">Select a register to see details.</div>';
-    return;
-  }
-  const found = findRegByKey(state.roots[state.activeRootIndex], state.selectedRegKey);
-  if (!found) {
-    host.innerHTML = '<div class="placeholder">Selected register no longer exists.</div>';
-    return;
-  }
-  const reg = found.reg;
-  const path = found.path.join('.');
-  let html = '';
-  html += '<h2>' + escapeHtml(reg.name) + '</h2>';
-  if (reg.displayName) {
-    html += '<div class="display-name">' + escapeHtml(reg.displayName) + '</div>';
-  }
-  html += '<div class="breadcrumb">' + escapeHtml(path) + '</div>';
-  html += '<div class="meta">';
-  html += '<span class="k">Address</span><span class="v">' + reg.address + '</span>';
-  html += '<span class="k">Width</span><span class="v">' + reg.width + '</span>';
-  html += '<span class="k">Reset</span><span class="v">' + (reg.reset !== undefined ? reg.reset : '—') + '</span>';
-  html += '<span class="k">Access</span><span class="v">' + (reg.accessSummary || '—') + '</span>';
-  html += '</div>';
-  if (reg.desc) html += '<div class="desc">' + escapeHtml(reg.desc) + '</div>';
-  html += '<div class="fields-title">Bit fields</div>';
-  (reg.fields || []).forEach(f => {
-    const accLower = (f.access || 'na').toLowerCase();
-    const cursor = f.source ? 'cursor:pointer' : '';
-    const title = f.source ? 'Click to reveal in editor' : '';
-    // Prefer the long desc; fall back to the SystemRDL "name" property (displayName).
-    const blurb = f.desc || f.displayName || '';
-    html += '<div class="field" data-source="' + (f.source ? encodeURIComponent(JSON.stringify(f.source)) : '') + '"' +
-      ' style="' + cursor + '" title="' + title + '">' +
-      '<b>[' + f.msb + ':' + f.lsb + ']</b>' +
-      '<b>' + escapeHtml(f.name) + '</b>' +
-      '<span class="pill ' + accLower + '">' + accLower.toUpperCase() + '</span>' +
-      '<span>' + (f.reset || '—') + '</span>' +
-      '<span class="desc">' + escapeHtml(blurb) + '</span>' +
-      '</div>';
-  });
-  if (reg.source) {
-    const fileName = (reg.source.uri || '').split('/').pop() || reg.source.uri;
-    html += '<div class="src-link" data-source="' + encodeURIComponent(JSON.stringify(reg.source)) + '">' +
-      '→ ' + escapeHtml(fileName) + ':' + ((reg.source.line || 0) + 1) + '</div>';
-  }
-  host.innerHTML = html;
-
-  host.querySelectorAll('[data-source]').forEach(el => {
-    const raw = el.getAttribute('data-source');
-    if (!raw) return;
-    el.addEventListener('click', () => {
-      try { postReveal(JSON.parse(decodeURIComponent(raw))); } catch (e) { /* ignore */ }
-    });
-  });
-}
-
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, c => ({
-    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
-  }[c]));
-}
-
-function showEmpty() {
-  document.getElementById('tabs').innerHTML = '';
-  document.getElementById('tree-host').innerHTML =
-    '<div class="empty">' +
-    '<h2>No top-level addrmap found</h2>' +
-    '<p>The viewer renders only elaborated maps. For library files (regfile/reg without addrmap), ' +
-    'use hover and the Outline view in the editor.</p>' +
-    '</div>';
-  document.getElementById('detail').innerHTML =
-    '<div class="placeholder">No selection.</div>';
-}
-
-function showError(msg) {
-  document.getElementById('tree-host').innerHTML =
-    '<div class="empty">' +
-    '<h2>Could not load tree</h2>' +
-    '<p><code>' + escapeHtml(msg) + '</code></p>' +
-    '</div>';
-}
-</script>
+    RdlViewer.mount(document.getElementById('app-root'), transport);
+  })();
+  </script>
 </body></html>`;
 }
+
+function makeNonce(): string {
+  const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  let s = '';
+  for (let i = 0; i < 32; i++) s += chars[Math.floor(Math.random() * chars.length)];
+  return s;
+}
+

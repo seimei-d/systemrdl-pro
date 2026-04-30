@@ -13,6 +13,9 @@
     "typecheck": "tsc --noEmit",
     "lint": "echo 'rdl-viewer-cli: lint not configured'"
   },
+  "dependencies": {
+    "@systemrdl-pro/viewer-core": "workspace:*"
+  },
   "devDependencies": {
     "@types/bun": "^1.1.0",
     "typescript": "^5.7.0"

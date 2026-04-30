@@ -2,7 +2,7 @@
   "name": "vscode-systemrdl-pro",
   "displayName": "SystemRDL Pro",
   "description": "Live diagnostics + interactive memory-map viewer for SystemRDL 2.0",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "publisher": "madeinheaven-dev",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -73,13 +73,14 @@
     }
   },
   "scripts": {
-    "build": "esbuild src/extension.ts --bundle --outfile=out/extension.js --external:vscode --format=cjs --platform=node --target=node18 --minify",
+    "build": "node build.mjs",
     "watch": "esbuild src/extension.ts --bundle --outfile=out/extension.js --external:vscode --format=cjs --platform=node --target=node18 --sourcemap --watch",
     "typecheck": "tsc --noEmit",
     "package": "vsce package --no-dependencies --no-yarn",
     "publish": "vsce publish --no-dependencies --no-yarn"
   },
   "dependencies": {
+    "@systemrdl-pro/viewer-core": "workspace:*",
     "vscode-languageclient": "^9.0.1"
   },
   "devDependencies": {
