@@ -2,7 +2,7 @@
   "name": "vscode-systemrdl-pro",
   "displayName": "SystemRDL Pro",
   "description": "Live diagnostics + interactive memory-map viewer for SystemRDL 2.0",
-  "version": "0.15.0",
+  "version": "0.15.1",
   "publisher": "seimei-d",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -44,6 +44,14 @@
         "command": "systemrdl-pro.restartServer",
         "title": "SystemRDL: Restart Language Server",
         "category": "SystemRDL"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "systemrdl-pro.showMemoryMap",
+        "key": "ctrl+shift+v",
+        "mac": "cmd+shift+v",
+        "when": "editorLangId == systemrdl-pro"
       }
     ],
     "configuration": {

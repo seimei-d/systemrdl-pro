@@ -67,10 +67,10 @@ Powered by [`systemrdl-lsp`](https://pypi.org/project/systemrdl-lsp/) +
 
 ## Commands
 
-| Command | What |
-|---------|------|
-| `SystemRDL: Show Memory Map` | Open the memory-map viewer panel beside the editor. |
-| `SystemRDL: Restart Language Server` | Manually restart `systemrdl-lsp` (the extension also auto-restarts up to three times in 60 s on crash). |
+| Command | Default shortcut | What |
+|---------|------------------|------|
+| `SystemRDL: Show Memory Map` | **Ctrl+Shift+V** (Cmd+Shift+V on macOS), only on `.rdl` files | Open the memory-map viewer panel beside the editor. |
+| `SystemRDL: Restart Language Server` | — | Manually restart `systemrdl-lsp` (the extension also auto-restarts up to three times in 60 s on crash). |
 
 ## Standalone CLI
 

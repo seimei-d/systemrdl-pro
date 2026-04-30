@@ -4,6 +4,14 @@ All notable changes to **SystemRDL Pro** are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [SemVer](https://semver.org/).
 
+## [0.15.1] — 2026-04-30
+
+### Added
+
+- Keybinding **Ctrl+Shift+V** (Cmd+Shift+V on macOS) opens the Memory Map
+  panel when a `.rdl` file is focused in the editor. Mirrors the markdown
+  preview shortcut so the muscle memory carries over.
+
 ## [0.15.0] — 2026-04-30
 
 First public Marketplace release. Walking skeleton ➝ feature-complete viewer.
