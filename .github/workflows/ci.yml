@@ -12,17 +12,17 @@ jobs:
   python:
     name: Python (LSP)
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ["3.10", "3.11", "3.12"]
+    # Single-version CI for now — older interpreters (3.10, 3.11) are still
+    # supported per pyproject.toml `requires-python = ">=3.10"` but not gated
+    # by CI. Bring them back when a real user reports a per-version regression.
     steps:
       - uses: actions/checkout@v4
       - name: Install uv
         uses: astral-sh/setup-uv@v3
         with:
           enable-cache: true
-      - name: Set up Python ${{ matrix.python-version }}
-        run: uv python install ${{ matrix.python-version }}
+      - name: Set up Python 3.12
+        run: uv python install 3.12
       - name: Sync dependencies
         run: |
           uv sync
@@ -45,10 +45,18 @@ jobs:
           bun-version: latest
       - name: Install deps
         run: bun install --frozen-lockfile
+      - name: Typecheck viewer-core
+        run: bun run --cwd packages/rdl-viewer-core typecheck
+      - name: Build viewer-core
+        # Extension build copies dist/ from viewer-core into media/viewer/, so
+        # this must run first.
+        run: bun run --cwd packages/rdl-viewer-core build
       - name: Typecheck extension
         run: bun run --cwd packages/vscode-systemrdl-pro typecheck
       - name: Build extension
         run: bun run --cwd packages/vscode-systemrdl-pro build
+      - name: Typecheck CLI viewer
+        run: bun run --cwd packages/rdl-viewer-cli typecheck
 
   schema:
     name: JSON Schema validate

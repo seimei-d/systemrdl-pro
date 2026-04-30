@@ -16,3 +16,14 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "RUF"]
+ignore = [
+  # Fire-and-forget asyncio.ensure_future is intentional in our config-refresh
+  # handlers; we don't need the task reference for cancellation.
+  "RUF006",
+  # EN DASH characters in docstrings are an editorial choice, not ambiguity.
+  "RUF002",
+  # Unused unpacked tuple elements in tests are explicit about ignoring values
+  # while still verifying tuple shape (msgs, root, tmp) — prefixing with _ would
+  # obscure intent.
+  "RUF059",
+]

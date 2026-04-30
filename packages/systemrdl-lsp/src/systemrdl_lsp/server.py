@@ -96,7 +96,7 @@ class CompilerMessage:
         text: str,
         src_ref: Any,
         translate_path: dict[pathlib.Path, pathlib.Path] | None = None,
-    ) -> "CompilerMessage":
+    ) -> CompilerMessage:
         if src_ref is None:
             return cls(severity, text, None, None, None, None)
 
@@ -158,7 +158,7 @@ def _expand_include_vars(text: str, vars_map: dict[str, str]) -> str:
         return text
     import os
 
-    def expand_one(match: "Any") -> str:
+    def expand_one(match: Any) -> str:
         name = match.group(1)
         if name in vars_map:
             return vars_map[name]
@@ -166,7 +166,7 @@ def _expand_include_vars(text: str, vars_map: dict[str, str]) -> str:
             return os.environ[name]
         return match.group(0)
 
-    def expand_path(match: "Any") -> str:
+    def expand_path(match: Any) -> str:
         return match.group(1) + _INCLUDE_VAR_RE.sub(expand_one, match.group(2)) + match.group(3)
 
     return _INCLUDE_DIRECTIVE_RE.sub(expand_path, text)
@@ -218,7 +218,7 @@ def _compile_text(
     text: str,
     incl_search_paths: list[str] | None = None,
     include_vars: dict[str, str] | None = None,
-) -> tuple[list[CompilerMessage], list["RootNode"], pathlib.Path]:
+) -> tuple[list[CompilerMessage], list[RootNode], pathlib.Path]:
     """Compile in-memory buffer text. Returns (messages, roots, temp_path).
 
     ``roots`` is a list of RootNode instances — one per top-level ``addrmap``
@@ -321,7 +321,7 @@ def _elaborate(path: pathlib.Path) -> list[tuple[Severity, str, Any]]:
 
 @dataclasses.dataclass(frozen=True)
 class _SimpleRef:
-    filename: pathlib.Path | None  # noqa: F841 (referenced via getattr)
+    filename: pathlib.Path | None
     line: int
     _col_start: int
     _col_end: int
@@ -340,7 +340,7 @@ class _SimpleRef:
 class CachedElaboration:
     # One $root meta-component per top-level addrmap definition in the file
     # (Decision 3C). Empty list means the file has no addrmaps (a library file).
-    roots: list["RootNode"]
+    roots: list[RootNode]
     text: str
     elaborated_at: float
     # Path to the temp file that backs lazy source refs in every RootNode's
@@ -370,7 +370,7 @@ class ElaborationCache:
     def put(
         self,
         uri: str,
-        roots: list["RootNode"],
+        roots: list[RootNode],
         text: str,
         temp_path: pathlib.Path | None = None,
     ) -> None:
@@ -515,14 +515,14 @@ def _format_hex(value: int, width_hex_chars: int = 8) -> str:
 
 
 def _node_at_position(
-    roots: list["RootNode"] | "RootNode", line_0b: int, char_0b: int
+    roots: list[RootNode] | RootNode, line_0b: int, char_0b: int
 ) -> Any | None:
-    """Walk the elaborated tree(s), returning the deepest node whose source span contains the cursor.
+    """Return the deepest elaborated node whose source span contains the cursor.
 
     Accepts either a single ``RootNode`` (legacy/test convenience) or the list
     stored in :class:`CachedElaboration` (multi-root, Decision 3C).
     """
-    from systemrdl.node import AddressableNode, FieldNode
+    from systemrdl.node import AddressableNode
 
     best: Any = None
     best_span: int = 10**9
@@ -562,7 +562,7 @@ def _node_at_position(
     return best
 
 
-def _hover_for_word(word: str, roots: list["RootNode"]) -> str | None:
+def _hover_for_word(word: str, roots: list[RootNode]) -> str | None:
     """Resolve a SystemRDL identifier to its hover documentation.
 
     Resolution order — most specific first, so a token that's both a keyword
@@ -917,7 +917,7 @@ def _serialize_addressable(
 
 
 def _serialize_root(
-    roots_input: list["RootNode"] | "RootNode | None",
+    roots_input: list[RootNode] | RootNode | None,
     stale: bool,
     path_translate: dict[pathlib.Path, pathlib.Path] | None = None,
 ) -> dict[str, Any]:
@@ -997,7 +997,9 @@ SYSTEMRDL_PROPERTIES: dict[str, str] = {
     "rset": "On software read: set the field to all-ones.",
     "ruser": "Custom on-read action (user-defined).",
     "onread": "Read-side effect. Common values: `rclr`, `rset`, `ruser`.",
-    "onwrite": "Write-side effect. Common values: `woclr`, `woset`, `wzc`, `wzs`, `wclr`, `wset`, `wuser`.",
+    "onwrite": (
+        "Write-side effect. Common: `woclr`, `woset`, `wzc`, `wzs`, `wclr`, `wset`, `wuser`."
+    ),
     "swacc": "Status flag: software just accessed (read or write).",
     "swmod": "Status flag: software just modified the field's value.",
     "swwe": "Software write-enable signal.",
@@ -1147,7 +1149,7 @@ def _completion_items_for_context(context: str) -> list[CompletionItem]:
     return []
 
 
-def _completion_items_for_types(roots: list["RootNode"]) -> list[CompletionItem]:
+def _completion_items_for_types(roots: list[RootNode]) -> list[CompletionItem]:
     """Pull every top-level component definition out of the cached compile.
 
     Uses :func:`_comp_defs_from_cached` to read ``inst.comp_defs`` — the same
@@ -1235,7 +1237,7 @@ def _word_at_position(text: str, line_0b: int, col_0b: int) -> str | None:
     return word
 
 
-def _comp_defs_from_cached(roots: list["RootNode"]) -> dict[str, Any]:
+def _comp_defs_from_cached(roots: list[RootNode]) -> dict[str, Any]:
     """Pick the first cached root and read its ``inst.comp_defs`` registry.
 
     All cached roots from the same buffer share the same compiler-internal
@@ -1272,7 +1274,7 @@ def _definition_location(
     return Location(uri=file_path.as_uri(), range=_build_range(line_1b, cs, ce))
 
 
-def _document_symbols(roots: list["RootNode"] | "RootNode") -> list[Any]:
+def _document_symbols(roots: list[RootNode] | RootNode) -> list[Any]:
     """Build a tree of LSP DocumentSymbols mirroring addrmap → regfile → reg → field.
 
     Accepts either a single RootNode (test convenience) or the list stored in
@@ -1365,7 +1367,7 @@ def build_server() -> LanguageServer:
         uri: str,
         buffer_text: str,
         messages: list[CompilerMessage],
-        roots: list["RootNode"],
+        roots: list[RootNode],
         tmp_path: pathlib.Path,
     ) -> None:
         if roots:
@@ -1407,7 +1409,7 @@ def build_server() -> LanguageServer:
                 uri, ELABORATION_TIMEOUT_SECONDS,
             )
 
-            def _drop_late_result(f: "asyncio.Future") -> None:
+            def _drop_late_result(f: asyncio.Future) -> None:
                 try:
                     _msgs, _root, late_tmp = f.result()
                     late_tmp.unlink(missing_ok=True)

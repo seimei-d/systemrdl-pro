@@ -12,24 +12,23 @@ import textwrap
 
 import pytest
 from systemrdl.messages import Severity
-
 from systemrdl_lsp import server as server_mod
 from systemrdl_lsp.server import (
     ElaborationCache,
     _comp_defs_from_cached,
     _compile_text,
     _completion_context,
-    _expand_include_vars,
-    _peakrdl_toml_paths,
     _completion_items_for_context,
     _completion_items_for_types,
     _completion_items_static,
     _definition_location,
     _document_symbols,
     _elaborate,
+    _expand_include_vars,
     _hover_for_word,
     _hover_text_for_node,
     _node_at_position,
+    _peakrdl_toml_paths,
     _src_ref_to_range,
     _word_at_position,
 )
