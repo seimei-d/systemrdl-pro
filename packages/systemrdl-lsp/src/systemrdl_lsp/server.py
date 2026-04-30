@@ -55,9 +55,13 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 SERVER_NAME = "systemrdl-lsp"
-SERVER_VERSION = "0.5.0"
+SERVER_VERSION = "0.6.0"
 DEBOUNCE_SECONDS = 0.3
 ELABORATED_TREE_SCHEMA_VERSION = "0.1.0"
+# Eng-review safety net #3: cap a single elaborate pass at 10s wall-clock.
+# Past that we keep last-good (D7) and surface a synthetic diagnostic. A pathological
+# Perl-style include cycle in a third-party RDL pack should NOT freeze the editor.
+ELABORATION_TIMEOUT_SECONDS = 10.0
 
 
 # ---------------------------------------------------------------------------
@@ -130,8 +134,14 @@ def _compile_text(
     uri: str,
     text: str,
     incl_search_paths: list[str] | None = None,
-) -> tuple[list[CompilerMessage], "RootNode | None", pathlib.Path]:
-    """Compile in-memory buffer text. Returns (messages, root_or_None, temp_path).
+) -> tuple[list[CompilerMessage], list["RootNode"], pathlib.Path]:
+    """Compile in-memory buffer text. Returns (messages, roots, temp_path).
+
+    ``roots`` is a list of RootNode instances — one per top-level ``addrmap``
+    *definition* in the file (Decision 3C). ``compiler.elaborate()`` with no
+    ``top_def_name`` only elaborates the *last* defined addrmap, so we enumerate
+    ``compiler.root.comp_defs`` and elaborate each one separately. An empty list
+    means parse failed or the file has no top-level addrmap (a library file).
 
     Implementation: write ``text`` to a temp file (preserves line numbers verbatim),
     point ``incl_search_paths`` at the original file's directory so relative
@@ -145,6 +155,8 @@ def _compile_text(
     :class:`ElaborationCache.put` (which unlinks the previous entry's temp file
     on replacement) or call ``unlink`` when discarding.
     """
+    from systemrdl.component import Addrmap
+
     original_path = _uri_to_path(uri)
     search_paths = list(incl_search_paths or [])
     if original_path.parent.exists():
@@ -163,15 +175,32 @@ def _compile_text(
         tf.write(text)
         tmp_path = pathlib.Path(tf.name)
 
-    root: RootNode | None = None
+    roots: list[RootNode] = []
     try:
         compiler.compile_file(str(tmp_path), incl_search_paths=search_paths)
-        root = compiler.elaborate()
+        # Enumerate every top-level addrmap definition in declaration order, then
+        # elaborate each. Per the systemrdl-compiler docstring, the compiler must
+        # be discarded if elaborate() raises — we still keep prior successful
+        # roots so a single bad addrmap doesn't blank the viewer.
+        addrmap_names = [
+            name for name, comp in compiler.root.comp_defs.items()
+            if isinstance(comp, Addrmap)
+        ]
+        for name in addrmap_names:
+            try:
+                roots.append(compiler.elaborate(top_def_name=name))
+            except RDLCompileError:
+                # Diagnostics for the failure are already in the printer.
+                continue
+            except Exception:
+                logger.exception("elaborate failed for top_def_name=%r", name)
+                continue
     except RDLCompileError:
-        root = None
+        roots = []
     except Exception as exc:  # defensive: never crash the server
         logger.exception("unexpected error while compiling %s", original_path)
         printer.captured.append((Severity.ERROR, f"internal: {exc}", None))
+        roots = []
 
     # Snapshot diagnostics while the temp file is still on disk — line/col are lazy.
     translate = {tmp_path: original_path}
@@ -179,7 +208,7 @@ def _compile_text(
         CompilerMessage.from_compiler(sev, text, src_ref, translate)
         for sev, text, src_ref in printer.captured
     ]
-    return messages, root, tmp_path
+    return messages, roots, tmp_path
 
 
 def _elaborate(path: pathlib.Path) -> list[tuple[Severity, str, Any]]:
@@ -190,7 +219,7 @@ def _elaborate(path: pathlib.Path) -> list[tuple[Severity, str, Any]]:
         return printer.captured
 
     text = path.read_text(encoding="utf-8")
-    messages, _, tmp_path = _compile_text(path.as_uri(), text)
+    messages, _roots, tmp_path = _compile_text(path.as_uri(), text)
     tmp_path.unlink(missing_ok=True)  # legacy path doesn't cache, safe to drop now
     out: list[tuple[Severity, str, Any]] = []
     for m in messages:
@@ -221,16 +250,19 @@ class _SimpleRef:
 
 @dataclasses.dataclass
 class CachedElaboration:
-    root: "RootNode"
+    # One $root meta-component per top-level addrmap definition in the file
+    # (Decision 3C). Empty list means the file has no addrmaps (a library file).
+    roots: list["RootNode"]
     text: str
     elaborated_at: float
-    # Path to the temp file that backs ``root``'s lazy source refs. Owned by the cache;
-    # unlinked when the entry is replaced or the cache is dropped.
+    # Path to the temp file that backs lazy source refs in every RootNode's
+    # underlying inst/SourceRef chain. Owned by the cache; unlinked when the
+    # entry is replaced or cleared.
     temp_path: pathlib.Path | None = None
 
 
 class ElaborationCache:
-    """Per-URI cache of the last successful ``RootNode``.
+    """Per-URI cache of the last successful list of ``RootNode``\\ s.
 
     Hover / documentSymbol read from this cache. When a fresh parse fails we keep
     the prior entry so the viewer (Week 4) and hover can still answer about
@@ -238,7 +270,7 @@ class ElaborationCache:
 
     The cache also owns the temp file backing each ``RootNode`` (see
     :func:`_compile_text` for why). When ``put`` replaces an entry, the previous
-    temp file is unlinked. ``clear`` and ``__del__`` drop everything.
+    temp file is unlinked. ``clear`` drops everything.
     """
 
     def __init__(self) -> None:
@@ -250,7 +282,7 @@ class ElaborationCache:
     def put(
         self,
         uri: str,
-        root: "RootNode",
+        roots: list["RootNode"],
         text: str,
         temp_path: pathlib.Path | None = None,
     ) -> None:
@@ -258,7 +290,7 @@ class ElaborationCache:
         if old is not None and old.temp_path is not None:
             old.temp_path.unlink(missing_ok=True)
         self._entries[uri] = CachedElaboration(
-            root=root, text=text, elaborated_at=time.time(), temp_path=temp_path
+            roots=roots, text=text, elaborated_at=time.time(), temp_path=temp_path
         )
 
     def clear(self) -> None:
@@ -391,8 +423,14 @@ def _format_hex(value: int, width_hex_chars: int = 8) -> str:
     return f"0x{value:0{width_hex_chars}X}"
 
 
-def _node_at_position(root: "RootNode", line_0b: int, char_0b: int) -> Any | None:
-    """Walk the elaborated tree, returning the deepest node whose source span contains the cursor."""
+def _node_at_position(
+    roots: list["RootNode"] | "RootNode", line_0b: int, char_0b: int
+) -> Any | None:
+    """Walk the elaborated tree(s), returning the deepest node whose source span contains the cursor.
+
+    Accepts either a single ``RootNode`` (legacy/test convenience) or the list
+    stored in :class:`CachedElaboration` (multi-root, Decision 3C).
+    """
     from systemrdl.node import AddressableNode, FieldNode
 
     best: Any = None
@@ -425,7 +463,11 @@ def _node_at_position(root: "RootNode", line_0b: int, char_0b: int) -> Any | Non
             except Exception:
                 pass
 
-    visit(root)
+    if isinstance(roots, list):
+        for r in roots:
+            visit(r)
+    else:
+        visit(roots)
     return best
 
 
@@ -732,23 +774,35 @@ def _serialize_addressable(
 
 
 def _serialize_root(
-    root: "RootNode | None",
+    roots_input: list["RootNode"] | "RootNode | None",
     stale: bool,
     path_translate: dict[pathlib.Path, pathlib.Path] | None = None,
 ) -> dict[str, Any]:
     """Build the JSON envelope matching ``schemas/elaborated-tree.json`` v0.1.0.
 
+    ``roots_input`` is either a list of ``RootNode`` (multi-root, Decision 3C —
+    one per top-level ``addrmap`` definition) or a single ``RootNode | None``
+    for legacy/test calls. Each ``RootNode``'s elaborated child addrmap becomes
+    one entry in the output ``roots`` array — the viewer renders one tab per entry.
+
     ``path_translate`` rewrites filenames in source refs — used to swap the LSP's
     internal compile temp path for the user's real workspace path so that
     click-to-reveal in the viewer (Week 6) jumps to the editor's actual file.
     """
-    roots: list[dict[str, Any]] = []
-    if root is not None:
+    if isinstance(roots_input, list):
+        root_list = roots_input
+    elif roots_input is None:
+        root_list = []
+    else:
+        root_list = [roots_input]
+
+    serialized_roots: list[dict[str, Any]] = []
+    for r in root_list:
         try:
-            for top in root.children(unroll=True):
+            for top in r.children(unroll=True):
                 serialized = _serialize_addressable(top, path_translate)
                 if serialized is not None and serialized.get("kind") == "addrmap":
-                    roots.append(serialized)
+                    serialized_roots.append(serialized)
         except Exception:
             logger.exception("failed to serialize elaborated tree")
 
@@ -756,12 +810,17 @@ def _serialize_root(
         "schemaVersion": ELABORATED_TREE_SCHEMA_VERSION,
         "elaboratedAt": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "stale": stale,
-        "roots": roots,
+        "roots": serialized_roots,
     }
 
 
-def _document_symbols(root: "RootNode") -> list[Any]:
-    """Build a tree of LSP DocumentSymbols mirroring addrmap → regfile → reg → field."""
+def _document_symbols(roots: list["RootNode"] | "RootNode") -> list[Any]:
+    """Build a tree of LSP DocumentSymbols mirroring addrmap → regfile → reg → field.
+
+    Accepts either a single RootNode (test convenience) or the list stored in
+    the elaboration cache (one per top-level addrmap definition). Returns a
+    flat list of top-level symbols across all roots.
+    """
     from lsprotocol.types import DocumentSymbol, SymbolKind
     from systemrdl.node import AddrmapNode, FieldNode, RegfileNode, RegNode
 
@@ -818,11 +877,13 @@ def _document_symbols(root: "RootNode") -> list[Any]:
             children=children,
         )
 
+    root_list = roots if isinstance(roots, list) else [roots]
     out: list[DocumentSymbol] = []
-    for top in root.children(unroll=True):
-        sym = build(top)
-        if sym is not None:
-            out.append(sym)
+    for r in root_list:
+        for top in r.children(unroll=True):
+            sym = build(top)
+            if sym is not None:
+                out.append(sym)
     return out
 
 
@@ -842,25 +903,83 @@ def build_server() -> LanguageServer:
             return None
         return doc.source
 
-    def _full_pass(uri: str, buffer_text: str | None) -> None:
+    def _apply_compile_result(
+        uri: str,
+        buffer_text: str,
+        messages: list[CompilerMessage],
+        roots: list["RootNode"],
+        tmp_path: pathlib.Path,
+    ) -> None:
+        if roots:
+            # Cache takes ownership of the temp file (it backs lazy src_ref reads
+            # for hover/documentSymbol). Old entry's temp file is unlinked there.
+            state.cache.put(uri, roots, buffer_text, tmp_path)
+            state.stale_uris.discard(uri)
+        else:
+            # Parse failed (or library-only file) — keep the previous cache entry
+            # intact (last-good D7). The just-written temp file isn't backing
+            # anything we'll read again, drop it.
+            tmp_path.unlink(missing_ok=True)
+            if state.cache.get(uri) is not None:
+                state.stale_uris.add(uri)
+        _publish_diagnostics(server, uri, messages)
+
+    async def _full_pass_async(uri: str, buffer_text: str | None) -> None:
         if buffer_text is None:
             try:
                 buffer_text = _uri_to_path(uri).read_text(encoding="utf-8")
             except (OSError, ValueError):
                 return
-        messages, root, tmp_path = _compile_text(uri, buffer_text, state.include_paths)
-        if root is not None:
-            # Cache takes ownership of the temp file (it backs lazy src_ref reads
-            # for hover/documentSymbol). Old entry's temp file is unlinked there.
-            state.cache.put(uri, root, buffer_text, tmp_path)
-            state.stale_uris.discard(uri)
-        else:
-            # Parse failed and we keep the previous cache entry intact (last-good D7).
-            # The just-written temp file isn't backing anything we'll read again — drop it.
-            tmp_path.unlink(missing_ok=True)
+
+        loop = asyncio.get_running_loop()
+        # Run the synchronous compiler off the event loop so a pathological elaborate
+        # can't block hover/cancel/etc. wait_for() can't actually kill the worker thread
+        # on timeout, so we attach a cleanup callback that unlinks the orphan temp file
+        # whenever the late result eventually arrives.
+        fut: asyncio.Future = loop.run_in_executor(
+            None, _compile_text, uri, buffer_text, state.include_paths
+        )
+        try:
+            messages, roots, tmp_path = await asyncio.wait_for(
+                asyncio.shield(fut), timeout=ELABORATION_TIMEOUT_SECONDS
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "elaborate timeout on %s after %.0fs; keeping last-good",
+                uri, ELABORATION_TIMEOUT_SECONDS,
+            )
+
+            def _drop_late_result(f: "asyncio.Future") -> None:
+                try:
+                    _msgs, _root, late_tmp = f.result()
+                    late_tmp.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+            fut.add_done_callback(_drop_late_result)
             if state.cache.get(uri) is not None:
                 state.stale_uris.add(uri)
-        _publish_diagnostics(server, uri, messages)
+            try:
+                target_path = _uri_to_path(uri)
+            except ValueError:
+                return
+            timeout_msg = CompilerMessage(
+                severity=Severity.ERROR,
+                text=(
+                    f"systemrdl-lsp: elaborate exceeded {ELABORATION_TIMEOUT_SECONDS:.0f}s — "
+                    "viewer is showing last-good tree."
+                ),
+                file_path=target_path,
+                line_1b=1,
+                col_start_1b=1,
+                col_end_1b=1,
+            )
+            _publish_diagnostics(server, uri, [timeout_msg])
+            return
+        except Exception:
+            logger.exception("unexpected error during async full-pass for %s", uri)
+            return
+        _apply_compile_result(uri, buffer_text, messages, roots, tmp_path)
 
     async def _debounced_full_pass(uri: str) -> None:
         try:
@@ -868,7 +987,7 @@ def build_server() -> LanguageServer:
         except asyncio.CancelledError:
             return
         try:
-            _full_pass(uri, _read_buffer(uri))
+            await _full_pass_async(uri, _read_buffer(uri))
         finally:
             state.pending.pop(uri, None)
 
@@ -898,11 +1017,15 @@ def build_server() -> LanguageServer:
 
     @server.feature(TEXT_DOCUMENT_DID_OPEN)
     def _on_open(_ls: LanguageServer, params: DidOpenTextDocumentParams) -> None:
-        _full_pass(params.text_document.uri, params.text_document.text)
+        asyncio.ensure_future(
+            _full_pass_async(params.text_document.uri, params.text_document.text)
+        )
 
     @server.feature(TEXT_DOCUMENT_DID_SAVE)
     def _on_save(_ls: LanguageServer, params: DidSaveTextDocumentParams) -> None:
-        _full_pass(params.text_document.uri, _read_buffer(params.text_document.uri))
+        asyncio.ensure_future(
+            _full_pass_async(params.text_document.uri, _read_buffer(params.text_document.uri))
+        )
 
     @server.feature(TEXT_DOCUMENT_DID_CHANGE)
     def _on_change(_ls: LanguageServer, params: DidChangeTextDocumentParams) -> None:
@@ -949,10 +1072,10 @@ def build_server() -> LanguageServer:
         from lsprotocol.types import Hover, MarkupContent, MarkupKind
 
         cached = state.cache.get(params.text_document.uri)
-        if cached is None:
+        if cached is None or not cached.roots:
             return None
         node = _node_at_position(
-            cached.root, params.position.line, params.position.character
+            cached.roots, params.position.line, params.position.character
         )
         if node is None:
             return None
@@ -964,9 +1087,9 @@ def build_server() -> LanguageServer:
     @server.feature("textDocument/documentSymbol")
     def _on_document_symbol(_ls: LanguageServer, params: Any) -> list[Any]:
         cached = state.cache.get(params.text_document.uri)
-        if cached is None:
+        if cached is None or not cached.roots:
             return []
-        return _document_symbols(cached.root)
+        return _document_symbols(cached.roots)
 
     @server.feature("rdl/elaboratedTree")
     def _on_elaborated_tree(_ls: LanguageServer, params: Any) -> dict[str, Any]:
@@ -983,10 +1106,10 @@ def build_server() -> LanguageServer:
             if uri is None and hasattr(params, "text_document"):
                 uri = params.text_document.uri
         if not uri:
-            return _serialize_root(None, stale=False)
+            return _serialize_root([], stale=False)
         cached = state.cache.get(uri)
         if cached is None:
-            return _serialize_root(None, stale=False)
+            return _serialize_root([], stale=False)
         try:
             original_path = _uri_to_path(uri)
         except ValueError:
@@ -997,7 +1120,7 @@ def build_server() -> LanguageServer:
             else None
         )
         return _serialize_root(
-            cached.root,
+            cached.roots,
             stale=uri in state.stale_uris,
             path_translate=translate,
         )

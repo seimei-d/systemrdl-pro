@@ -77,9 +77,19 @@ type SourceLoc = {
 let client: LanguageClient | undefined;
 let outputChannel: vscode.LogOutputChannel | undefined;
 let memoryMapPanel: vscode.WebviewPanel | undefined;
+let memoryMapPanelDisposed = true;
 let lastTreeUri: string | undefined;
 let statusBarItem: vscode.StatusBarItem | undefined;
 let cursorSyncTimer: ReturnType<typeof setTimeout> | undefined;
+
+// Eng-review safety net #3: LSP supervisor.
+// We auto-restart up to MAX_RESTARTS times within RESTART_WINDOW_MS. A burst of
+// crashes (broken Python install, bad pygls upgrade, etc.) hits the cap and we
+// surface a banner instead of looping forever. Successful uptime past the window
+// resets the counter so a single crash later doesn't poison the next session.
+const MAX_RESTARTS = 3;
+const RESTART_WINDOW_MS = 60_000;
+let recentCrashTimes: number[] = [];
 // Suppress one cycle of cursor → viewer sync after a viewer-initiated reveal.
 // Otherwise: click reg → editor jumps → onDidChangeTextEditorSelection fires →
 // posts cursor → viewer re-selects (same key) → renders → no harm but wasteful.
@@ -127,8 +137,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const line = event.textEditor.selection.active.line;
       if (cursorSyncTimer) clearTimeout(cursorSyncTimer);
       cursorSyncTimer = setTimeout(() => {
-        if (!memoryMapPanel) return;
-        memoryMapPanel.webview.postMessage({ type: 'cursor', line });
+        safePostToWebview({ type: 'cursor', line });
       }, CURSOR_SYNC_DEBOUNCE_MS);
     }),
   );
@@ -178,7 +187,20 @@ async function startServer(context: vscode.ExtensionContext): Promise<void> {
         return { action: count && count <= 3 ? ErrorAction.Continue : ErrorAction.Shutdown };
       },
       closed: () => {
-        outputChannel?.warn('LSP server stopped.');
+        const now = Date.now();
+        recentCrashTimes = recentCrashTimes.filter(t => now - t < RESTART_WINDOW_MS);
+        recentCrashTimes.push(now);
+        if (recentCrashTimes.length <= MAX_RESTARTS) {
+          outputChannel?.warn(
+            `LSP server stopped (${recentCrashTimes.length}/${MAX_RESTARTS}); restarting…`,
+          );
+          return { action: CloseAction.Restart };
+        }
+        outputChannel?.error(
+          `LSP server stopped ${recentCrashTimes.length} times in ${RESTART_WINDOW_MS / 1000}s; ` +
+          'giving up auto-restart. Use "SystemRDL: Restart Language Server" once the cause is fixed.',
+        );
+        recentCrashTimes = [];
         showRestartBanner();
         return { action: CloseAction.DoNotRestart };
       },
@@ -204,6 +226,9 @@ async function startServer(context: vscode.ExtensionContext): Promise<void> {
 }
 
 async function restartServer(context: vscode.ExtensionContext): Promise<void> {
+  // User-initiated restart resets the supervisor's crash budget — the user
+  // presumably fixed whatever was causing the crashes.
+  recentCrashTimes = [];
   if (client) {
     await client.stop();
     client = undefined;
@@ -344,11 +369,29 @@ async function showMemoryMap(context: vscode.ExtensionContext): Promise<void> {
         localResourceRoots: [],
       },
     );
+    memoryMapPanelDisposed = false;
     memoryMapPanel.iconPath = vscode.Uri.joinPath(context.extensionUri, 'media', 'icon.png');
     memoryMapPanel.onDidDispose(
       () => {
+        memoryMapPanelDisposed = true;
         memoryMapPanel = undefined;
         lastTreeUri = undefined;
+      },
+      null,
+      context.subscriptions,
+    );
+    // Eng-review safety net #2: when the user re-reveals a hidden panel after
+    // a parse cycle changed the tree (e.g. user typed while panel was tabbed
+    // away), refresh on the visibility flip so we don't show a stale tree —
+    // postMessage to a hidden panel is fine with retainContextWhenHidden, but
+    // an aborted/timed-out pass while hidden could have left the panel out of date.
+    memoryMapPanel.onDidChangeViewState(
+      e => {
+        if (e.webviewPanel.visible && !memoryMapPanelDisposed) {
+          refreshMemoryMap().catch(err =>
+            outputChannel?.warn(`refresh on viewState change failed: ${err}`),
+          );
+        }
       },
       null,
       context.subscriptions,
@@ -364,6 +407,21 @@ async function showMemoryMap(context: vscode.ExtensionContext): Promise<void> {
   }
 
   await refreshMemoryMap();
+}
+
+/**
+ * Eng-review silent-failure gap #2: never post into a disposed webview.
+ * `panel.visible === false` is fine — `retainContextWhenHidden` keeps state
+ * alive — but a disposed panel will throw on `webview.postMessage`. Centralise
+ * the guard so every callsite (refreshMemoryMap, cursor sync, error path) is safe.
+ */
+function safePostToWebview(message: unknown): void {
+  if (!memoryMapPanel || memoryMapPanelDisposed) return;
+  try {
+    memoryMapPanel.webview.postMessage(message);
+  } catch (err) {
+    outputChannel?.warn(`webview.postMessage failed: ${err}`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -422,25 +480,20 @@ async function revealLocation(loc: SourceLoc): Promise<void> {
 }
 
 async function refreshMemoryMap(): Promise<void> {
-  if (!memoryMapPanel || !lastTreeUri || !client) return;
+  if (!memoryMapPanel || memoryMapPanelDisposed || !lastTreeUri || !client) return;
 
   try {
     const tree = await client.sendRequest<ElaboratedTree>('rdl/elaboratedTree', {
       uri: lastTreeUri,
     });
-    // Eng review silent-failure gap #2: don't post into a disposed webview.
-    if (memoryMapPanel?.visible !== undefined) {
-      memoryMapPanel.webview.postMessage({ type: 'tree', tree });
-    }
+    safePostToWebview({ type: 'tree', tree });
     updateStatusBar(tree);
   } catch (err) {
     outputChannel?.error(`rdl/elaboratedTree failed: ${err}`);
-    if (memoryMapPanel?.webview) {
-      memoryMapPanel.webview.postMessage({
-        type: 'error',
-        message: `Could not fetch elaborated tree: ${err}`,
-      });
-    }
+    safePostToWebview({
+      type: 'error',
+      message: `Could not fetch elaborated tree: ${err}`,
+    });
   }
 }
 

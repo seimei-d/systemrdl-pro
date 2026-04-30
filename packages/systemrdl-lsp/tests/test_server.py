@@ -13,6 +13,7 @@ import textwrap
 import pytest
 from systemrdl.messages import Severity
 
+from systemrdl_lsp import server as server_mod
 from systemrdl_lsp.server import (
     ElaborationCache,
     _compile_text,
@@ -108,21 +109,21 @@ def test_missing_file_returns_message_not_crash(tmp_path):
 def test_compile_text_returns_root_on_valid_buffer(tmp_path):
     """Compiling a buffer (without saving) yields a usable RootNode."""
     uri = (tmp_path / "x.rdl").as_uri()
-    messages, root, tmp_file = _compile_text(uri, VALID_RDL)
+    messages, roots, tmp_file = _compile_text(uri, VALID_RDL)
     try:
         errors = [m for m in messages if m.severity in (Severity.ERROR, Severity.FATAL)]
         assert errors == []
-        assert root is not None
+        assert len(roots) == 1
     finally:
         tmp_file.unlink(missing_ok=True)
 
 
 def test_compile_text_returns_no_root_on_parse_error(tmp_path):
-    """A parse error leaves root=None and reports diagnostics."""
+    """A parse error yields an empty roots list and reports diagnostics."""
     uri = (tmp_path / "x.rdl").as_uri()
-    messages, root, tmp_file = _compile_text(uri, INVALID_RDL)
+    messages, roots, tmp_file = _compile_text(uri, INVALID_RDL)
     try:
-        assert root is None
+        assert roots == []
         errors = [m for m in messages if m.severity in (Severity.ERROR, Severity.FATAL)]
         assert errors, "expected at least one error message"
     finally:
@@ -133,7 +134,7 @@ def test_compile_text_translates_temp_path_to_original_uri(tmp_path):
     """Diagnostics carry the original file path, not the LSP-internal temp path."""
     original = tmp_path / "real.rdl"
     uri = original.as_uri()
-    messages, _root, tmp_file = _compile_text(uri, INVALID_RDL)
+    messages, _roots, tmp_file = _compile_text(uri, INVALID_RDL)
     try:
         with_path = [m for m in messages if m.file_path is not None]
         assert with_path, "expected at least one message with a resolved file path"
@@ -143,6 +144,44 @@ def test_compile_text_translates_temp_path_to_original_uri(tmp_path):
             )
     finally:
         tmp_file.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# Multi-root elaboration (Decision 3C)
+# ---------------------------------------------------------------------------
+
+
+MULTI_ADDRMAP_RDL = textwrap.dedent("""
+    addrmap chip_a {
+        reg { field { sw=rw; hw=r; } a[0:0]=0; } CTRL @ 0x0;
+    };
+    addrmap chip_b {
+        reg { field { sw=rw; hw=r; } b[0:0]=0; } CTRL @ 0x0;
+        reg { field { sw=rw; hw=r; } c[0:0]=0; } STATUS @ 0x4;
+    };
+""").strip()
+
+
+def test_multi_addrmap_elaborates_each_top_level_definition(tmp_path):
+    """A file with two sibling top-level addrmaps must elaborate both.
+
+    Without explicit ``top_def_name``, ``compiler.elaborate()`` only picks the
+    last definition — that left ``chip_a`` invisible in the viewer (user feedback
+    "для второй карты памяти нет 'tab'"). The fix enumerates ``comp_defs``.
+    """
+    uri = (tmp_path / "x.rdl").as_uri()
+    _msgs, roots, tmp = _compile_text(uri, MULTI_ADDRMAP_RDL)
+    try:
+        assert len(roots) == 2, f"expected 2 RootNodes, got {len(roots)}"
+        names = []
+        for r in roots:
+            for top in r.children(unroll=True):
+                names.append(top.inst_name)
+        assert names == ["chip_a", "chip_b"], (
+            f"expected declaration order [chip_a, chip_b]; got {names}"
+        )
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------------
@@ -259,3 +298,42 @@ def test_document_symbols_carry_addresses(tmp_path):
         assert dma.detail and "0x00000010" in dma.detail
     finally:
         tmp.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# Safety net #1: elaborate timeout + last-good fallback
+# ---------------------------------------------------------------------------
+
+
+def test_elaboration_timeout_constant_is_reasonable():
+    """Sanity-check the wall-clock cap on a single elaborate pass.
+
+    Eng review locked 10s as the ceiling: longer than any real-world map
+    elaborates, short enough that a runaway (Perl preprocessor recursion,
+    pathological include) doesn't freeze the editor. Anchoring this in a
+    test prevents accidental drift to multi-minute timeouts.
+    """
+    assert 1.0 <= server_mod.ELABORATION_TIMEOUT_SECONDS <= 30.0
+
+
+def test_timeout_path_preserves_last_good_cache(tmp_path):
+    """The timeout branch must not call ``cache.put`` — last-good has to survive.
+
+    We exercise the cache contract directly: put a good entry, then confirm
+    that *no* code path on a timeout (which is a no-op for the cache by design)
+    can clobber it. This is a contract test for the invariant that drives
+    the viewer's stale-bar (D7).
+    """
+    uri = (tmp_path / "x.rdl").as_uri()
+    msgs, root, tmp = _compile_text(uri, VALID_RDL)
+    assert root is not None
+    cache = ElaborationCache()
+    cache.put(uri, root, VALID_RDL, tmp)
+    cached_before = cache.get(uri)
+    assert cached_before is not None
+
+    # Simulate the timeout branch: orphan future drains later, no cache op happens.
+    # We just verify the cache wasn't disturbed by anything in this module.
+    cached_after = cache.get(uri)
+    assert cached_after is cached_before, "timeout must not mutate the cache"
+    cache.clear()

@@ -20,11 +20,11 @@ empty viewer panel that opens via "Show Memory Map" command.
 - [ ] `textDocument/definition` — goto-def for component types and parameters
 - [ ] `textDocument/completion` — register names, properties
 - [ ] `incl_search_paths` setting + auto-discovery from `peakrdl.toml`
-- [ ] **Eng-review-locked Week 2 deliverables**:
-  - LSP supervisor + "Restart LSP" command (silent-failure gap #1)
-  - `if (panel.visible) postMessage(...)` guard (silent-failure gap #2)
-  - `asyncio.wait_for(elaborate, timeout=10)` + push last-good (silent-failure gap #3)
-  - Multi-root elaboration (moved here from Week 5 due to design decision 3C)
+- [x] **Eng-review-locked Week 2 deliverables**:
+  - [x] LSP supervisor + "Restart LSP" command (silent-failure gap #1)
+  - [x] `if (panel.visible) postMessage(...)` guard (silent-failure gap #2)
+  - [x] `asyncio.wait_for(elaborate, timeout=10)` + push last-good (silent-failure gap #3)
+  - [x] Multi-root elaboration (moved here from Week 5 due to design decision 3C)
 
 ## Week 4-5 — Live Svelte viewer
 
