@@ -4,6 +4,36 @@ All notable changes to **SystemRDL Pro** are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [SemVer](https://semver.org/).
 
+## [0.16.0] — 2026-04-30
+
+Major UX upgrade across editor and viewer.
+
+### Added (editor)
+
+- **Snippets** — `addrmap`, `regfile`, `reg`, `regtyped`, `field`, `fieldw1c`,
+  `fieldcounter`, `include`, `perlloop` expansions with tab-stops.
+- **Folding ranges** — collapsible `{...}` blocks via dedicated LSP provider
+  (more reliable than indent-based folding on irregular formatting).
+- **Inlay hints** — resolved absolute address shown ghost-grey after each
+  register name (e.g. `} CTRL @ 0x0   (0x0000_0010)` for nested instances).
+- **CodeLens** above every `addrmap` declaration — `📊 N regs · 0x0..0xN`
+  summary + `📋 Open in Memory Map` clickable link.
+- **Workspace symbols** (`Ctrl+T`) — search registers across every `.rdl`
+  file the LSP has touched.
+- **Address conflict warnings** — overlapping reg ranges anywhere in the
+  elaborated tree now emit a warning diagnostic (defence-in-depth on top of
+  systemrdl-compiler's direct sibling check).
+- **Onboarding walkthrough** — first-run "Get Started" page with 4 cards.
+- **Status bar diagnostics counter** — current file's `$(error) N`
+  / `$(warning) M` count appended next to the reg/root summary; updates
+  on every diagnostic change.
+
+### Added (viewer)
+
+- **Bit-field grid** — visual `[width-1..0]` cell strip in the detail pane
+  with colour-coded RW / RO / W1C / etc. fields and field names overlaid
+  inside their bit ranges.
+
 ## [0.15.1] — 2026-04-30
 
 ### Added

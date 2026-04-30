@@ -1,4 +1,5 @@
 import type { Reg, SourceLoc, Transport } from './types';
+import { BitGrid } from './BitGrid';
 
 type Props = {
   reg: Reg | null;
@@ -33,6 +34,7 @@ export function Detail({ reg, path, transport }: Props) {
         <span className="k">Access</span><span className="v">{reg.accessSummary || '—'}</span>
       </div>
       {reg.desc && <div className="desc">{reg.desc}</div>}
+      <BitGrid reg={reg} />
       <div className="fields-title">Bit fields</div>
       {(reg.fields || []).map((f, i) => {
         const acc = (f.access || 'na').toLowerCase();

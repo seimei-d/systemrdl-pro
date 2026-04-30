@@ -2,7 +2,7 @@
   "name": "vscode-systemrdl-pro",
   "displayName": "SystemRDL Pro",
   "description": "Live diagnostics + interactive memory-map viewer for SystemRDL 2.0",
-  "version": "0.15.1",
+  "version": "0.16.0",
   "publisher": "seimei-d",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -32,6 +32,46 @@
         "language": "systemrdl-pro",
         "scopeName": "source.systemrdl",
         "path": "./syntaxes/systemrdl.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "systemrdl-pro",
+        "path": "./snippets/systemrdl.json"
+      }
+    ],
+    "walkthroughs": [
+      {
+        "id": "systemrdl-pro.getStarted",
+        "title": "Get Started with SystemRDL Pro",
+        "description": "Install the LSP backend, open a sample register map, and try the viewer.",
+        "steps": [
+          {
+            "id": "installLsp",
+            "title": "Install the LSP backend",
+            "description": "SystemRDL Pro calls Python on activation. Install the LSP module: `pip install systemrdl-lsp`. The extension shows an actionable banner if it's missing.",
+            "media": { "markdown": "media/walkthrough/getting-started.md" }
+          },
+          {
+            "id": "openMap",
+            "title": "Open the Memory Map",
+            "description": "Open any `.rdl` file and press **Ctrl+Shift+V** (Cmd+Shift+V on macOS), or run **SystemRDL: Show Memory Map** from the command palette.",
+            "media": { "markdown": "media/walkthrough/getting-started.md" },
+            "completionEvents": ["onCommand:systemrdl-pro.showMemoryMap"]
+          },
+          {
+            "id": "filter",
+            "title": "Filter & navigate",
+            "description": "**Cmd-F** in the viewer focuses the filter input — narrow by name, address (`0x10`), or field. Click any register to scroll the editor; cursor in the editor auto-selects the matching tree node.",
+            "media": { "markdown": "media/walkthrough/getting-started.md" }
+          },
+          {
+            "id": "rightClick",
+            "title": "Right-click for clipboard actions",
+            "description": "Right-click any tree row for **Copy Name / Copy Address / Copy Type / Reveal in Editor**. Useful when generating documentation or test stimuli.",
+            "media": { "markdown": "media/walkthrough/getting-started.md" }
+          }
+        ]
       }
     ],
     "commands": [

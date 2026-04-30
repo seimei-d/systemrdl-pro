@@ -79,6 +79,9 @@ let outputChannel: vscode.LogOutputChannel | undefined;
 let memoryMapPanel: vscode.WebviewPanel | undefined;
 let memoryMapPanelDisposed = true;
 let lastTreeUri: string | undefined;
+// Cached tree used by the diagnostic-change subscriber to re-render the
+// status bar without re-fetching from the LSP.
+let lastTreeForStatusBar: ElaboratedTree | undefined;
 let statusBarItem: vscode.StatusBarItem | undefined;
 let cursorSyncTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -139,6 +142,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       cursorSyncTimer = setTimeout(() => {
         safePostToWebview({ type: 'cursor', line });
       }, CURSOR_SYNC_DEBOUNCE_MS);
+    }),
+    // Refresh status bar's error/warning counter when diagnostics change for
+    // the file the viewer is showing. Without this the count goes stale
+    // until the next refreshMemoryMap fires.
+    vscode.languages.onDidChangeDiagnostics(event => {
+      if (!lastTreeUri || !lastTreeForStatusBar) return;
+      const target = vscode.Uri.parse(lastTreeUri).toString();
+      if (event.uris.some(u => u.toString() === target)) {
+        updateStatusBar(lastTreeForStatusBar);
+      }
     }),
   );
 
@@ -498,6 +511,7 @@ async function refreshMemoryMap(): Promise<void> {
       uri: lastTreeUri,
     });
     safePostToWebview({ type: 'tree', tree });
+    lastTreeForStatusBar = tree;
     updateStatusBar(tree);
   } catch (err) {
     outputChannel?.error(`rdl/elaboratedTree failed: ${err}`);
@@ -517,7 +531,24 @@ function updateStatusBar(tree: ElaboratedTree): void {
   const total = countRegs(tree.roots);
   const rootNames = tree.roots.map(r => r.name).join(', ');
   const stale = tree.stale ? ' $(warning) stale' : '';
-  statusBarItem.text = `$(circuit-board) ${total} reg${total === 1 ? '' : 's'} · ${rootNames}${stale}`;
+
+  // Count diagnostics for the URI the panel is currently showing. The
+  // language server emits errors+warnings on every parse; surfacing the
+  // tally next to the reg count saves a trip to the Problems panel.
+  let diag = '';
+  if (lastTreeUri) {
+    const uri = vscode.Uri.parse(lastTreeUri);
+    const all = vscode.languages.getDiagnostics(uri);
+    let errors = 0, warnings = 0;
+    for (const d of all) {
+      if (d.severity === vscode.DiagnosticSeverity.Error) errors++;
+      else if (d.severity === vscode.DiagnosticSeverity.Warning) warnings++;
+    }
+    if (errors) diag += ` $(error) ${errors}`;
+    if (warnings) diag += ` $(warning) ${warnings}`;
+  }
+
+  statusBarItem.text = `$(circuit-board) ${total} reg${total === 1 ? '' : 's'} · ${rootNames}${stale}${diag}`;
   statusBarItem.tooltip = stale
     ? 'Memory map showing last good elaboration · current parse failed. Click to open viewer.'
     : `Memory map · ${rootNames} · click to open`;

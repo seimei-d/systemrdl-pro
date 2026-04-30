@@ -34,6 +34,8 @@ from lsprotocol.types import (
     TEXT_DOCUMENT_DID_OPEN,
     TEXT_DOCUMENT_DID_SAVE,
     WORKSPACE_DID_CHANGE_CONFIGURATION,
+    CodeLens,
+    Command,
     CompletionItem,
     CompletionItemKind,
     CompletionList,
@@ -43,11 +45,17 @@ from lsprotocol.types import (
     DidChangeTextDocumentParams,
     DidOpenTextDocumentParams,
     DidSaveTextDocumentParams,
+    FoldingRange,
+    FoldingRangeKind,
     InitializedParams,
+    InlayHint,
+    InlayHintKind,
     Location,
     Position,
     PublishDiagnosticsParams,
     Range,
+    SymbolInformation,
+    SymbolKind,
 )
 from pygls.lsp.server import LanguageServer
 from systemrdl import RDLCompileError, RDLCompiler
@@ -59,7 +67,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 SERVER_NAME = "systemrdl-lsp"
-SERVER_VERSION = "0.10.0"
+SERVER_VERSION = "0.11.0"
 DEBOUNCE_SECONDS = 0.3
 ELABORATED_TREE_SCHEMA_VERSION = "0.1.0"
 # Eng-review safety net #3: cap a single elaborate pass at 10s wall-clock.
@@ -958,6 +966,293 @@ def _serialize_root(
 
 
 # ---------------------------------------------------------------------------
+# Folding ranges, inlay hints, CodeLens, workspace symbols
+# ---------------------------------------------------------------------------
+
+
+def _folding_ranges_from_text(text: str) -> list[FoldingRange]:
+    """Compute folding ranges from `{...}` block spans.
+
+    A purely textual scan: every `{` opens a range, the matching `}` closes
+    it. Strings/comments are stripped first so braces inside them don't
+    confuse the matcher. Single-line blocks (`{ field { ... } x[0:0]=0; }`)
+    are skipped — too small to fold meaningfully.
+    """
+    import re
+
+    # Strip line comments and block comments + string literals so braces inside
+    # don't open/close ranges. Replace with same-length whitespace to keep
+    # offsets and line numbers stable.
+    def _blank_match(m: re.Match[str]) -> str:
+        return re.sub(r"[^\n]", " ", m.group(0))
+
+    cleaned = re.sub(r'"(?:\\.|[^"\\])*"', _blank_match, text)
+    cleaned = re.sub(r"//[^\n]*", _blank_match, cleaned)
+    cleaned = re.sub(r"/\*[\s\S]*?\*/", _blank_match, cleaned)
+
+    ranges: list[FoldingRange] = []
+    stack: list[int] = []  # line numbers of unmatched `{`
+    line = 0
+    for ch in cleaned:
+        if ch == "\n":
+            line += 1
+        elif ch == "{":
+            stack.append(line)
+        elif ch == "}" and stack:
+            start = stack.pop()
+            if line > start:  # skip single-line blocks
+                ranges.append(
+                    FoldingRange(
+                        start_line=start, end_line=line, kind=FoldingRangeKind.Region
+                    )
+                )
+    return ranges
+
+
+def _inlay_hints_for_addressables(roots: list[RootNode], path: pathlib.Path) -> list[InlayHint]:
+    """Produce inlay hints showing the resolved absolute address after each
+    register / regfile / addrmap instance name.
+
+    The hint dangles after the trailing column of the inst's source ref so
+    it visually appears like `} CTRL @ 0x0   (0x0000_0010)`. Skipped when the
+    instance's source ref doesn't point at the user's file (e.g. an
+    `include`d type definition lives elsewhere).
+    """
+    from systemrdl.node import AddressableNode
+
+    hints: list[InlayHint] = []
+
+    def visit(node: Any, parent_addr: int) -> None:
+        if not isinstance(node, AddressableNode):
+            for c in getattr(node, "children", lambda **_: [])(unroll=True):
+                visit(c, parent_addr)
+            return
+
+        inst = getattr(node, "inst", None)
+        src_ref = getattr(inst, "inst_src_ref", None) or getattr(inst, "def_src_ref", None)
+        line_1b = getattr(src_ref, "line", None)
+        sel = getattr(src_ref, "line_selection", None) or (None, None)
+        ref_filename = getattr(src_ref, "filename", None)
+
+        # Only annotate instances whose source ref points at the file the
+        # editor has open. Otherwise hints would appear on `include`d files
+        # the user isn't currently looking at.
+        if (
+            line_1b is not None
+            and ref_filename
+            and pathlib.Path(ref_filename) == path
+            and isinstance(sel, tuple) and len(sel) == 2 and sel[1] is not None
+        ):
+            line_0b = max(0, line_1b - 1)
+            col_0b = max(0, sel[1])  # right after the name
+            try:
+                addr = node.absolute_address
+            except Exception:
+                addr = None
+            if addr is not None:
+                hints.append(
+                    InlayHint(
+                        position=Position(line=line_0b, character=col_0b),
+                        label=f"  ({_hex(addr)})",
+                        padding_left=True,
+                        kind=InlayHintKind.Type,
+                    )
+                )
+
+        for c in node.children(unroll=True):
+            visit(c, parent_addr)
+
+    for r in roots:
+        for top in r.children(unroll=True):
+            visit(top, 0)
+    return hints
+
+
+def _code_lenses_for_addrmaps(
+    roots: list[RootNode], path: pathlib.Path
+) -> list[CodeLens]:
+    """One `📊 N regs · 0xS..0xE` lens + one `📋 Open in Memory Map` lens
+    above every top-level addrmap definition in the file.
+    """
+    from systemrdl.node import AddrmapNode, RegNode
+
+    out: list[CodeLens] = []
+    for r in roots:
+        for top in r.children(unroll=True):
+            if not isinstance(top, AddrmapNode):
+                continue
+            inst = getattr(top, "inst", None)
+            src_ref = getattr(inst, "inst_src_ref", None) or getattr(inst, "def_src_ref", None)
+            line_1b = getattr(src_ref, "line", None)
+            ref_filename = getattr(src_ref, "filename", None)
+            if line_1b is None or not ref_filename or pathlib.Path(ref_filename) != path:
+                continue
+            line_0b = max(0, line_1b - 1)
+            rng = Range(
+                start=Position(line=line_0b, character=0),
+                end=Position(line=line_0b, character=0),
+            )
+
+            reg_count = 0
+            min_addr: int | None = None
+            max_addr: int | None = None
+
+            def walk(node: Any) -> None:
+                nonlocal reg_count, min_addr, max_addr
+                if isinstance(node, RegNode):
+                    reg_count += 1
+                    a = node.absolute_address
+                    min_addr = a if min_addr is None else min(min_addr, a)
+                    end = a + max(1, getattr(node, "size", 1))
+                    max_addr = end if max_addr is None else max(max_addr, end)
+                if hasattr(node, "children"):
+                    for c in node.children(unroll=True):
+                        walk(c)
+
+            walk(top)
+            if reg_count:
+                summary = f"📊 {reg_count} reg{'s' if reg_count != 1 else ''}"
+                if min_addr is not None and max_addr is not None:
+                    summary += f" · {_hex(min_addr)}..{_hex(max_addr)}"
+                out.append(CodeLens(range=rng, command=Command(title=summary, command="")))
+            out.append(
+                CodeLens(
+                    range=rng,
+                    command=Command(
+                        title="📋 Open in Memory Map",
+                        command="systemrdl-pro.showMemoryMap",
+                    ),
+                )
+            )
+    return out
+
+
+def _workspace_symbols_for_uri(
+    uri: str, roots: list[RootNode], query: str
+) -> list[SymbolInformation]:
+    """Walk the cached elaboration of one URI looking for symbols matching ``query``.
+
+    ``query`` is matched as case-insensitive substring against instance name.
+    """
+    from systemrdl.node import AddrmapNode, FieldNode, RegfileNode, RegNode
+
+    q = query.lower()
+    out: list[SymbolInformation] = []
+
+    def kind_of(node: Any) -> SymbolKind:
+        if isinstance(node, AddrmapNode):
+            return SymbolKind.Module
+        if isinstance(node, RegfileNode):
+            return SymbolKind.Namespace
+        if isinstance(node, RegNode):
+            return SymbolKind.Struct
+        if isinstance(node, FieldNode):
+            return SymbolKind.Field
+        return SymbolKind.Variable
+
+    def visit(node: Any, parent_path: list[str]) -> None:
+        name = getattr(node, "inst_name", None)
+        if not name:
+            for c in getattr(node, "children", lambda **_: [])(unroll=True):
+                visit(c, parent_path)
+            return
+        path = [*parent_path, name]
+        if q in name.lower():
+            inst = getattr(node, "inst", None)
+            src_ref = getattr(inst, "inst_src_ref", None) or getattr(inst, "def_src_ref", None)
+            if src_ref is not None:
+                line_1b = getattr(src_ref, "line", None) or 1
+                sel = getattr(src_ref, "line_selection", None) or (1, 1)
+                try:
+                    cs, ce = sel
+                except (TypeError, ValueError):
+                    cs = ce = 1
+                rng = _build_range(line_1b, cs, ce)
+                out.append(
+                    SymbolInformation(
+                        name=name,
+                        kind=kind_of(node),
+                        location=Location(uri=uri, range=rng),
+                        container_name=".".join(parent_path) if parent_path else None,
+                    )
+                )
+        if hasattr(node, "children"):
+            for c in node.children(unroll=True):
+                visit(c, path)
+        if hasattr(node, "fields"):
+            try:
+                for f in node.fields():
+                    visit(f, path)
+            except Exception:
+                pass
+
+    for r in roots:
+        for top in r.children(unroll=True):
+            visit(top, [])
+    return out
+
+
+def _address_conflict_diagnostics(
+    roots: list[RootNode], path: pathlib.Path
+) -> list[CompilerMessage]:
+    """Detect overlapping register address ranges within the same parent and
+    surface them as warning diagnostics. systemrdl-compiler usually catches
+    this, but only for direct sibling overlaps; we extend the check across
+    the full elaborated tree for defence-in-depth.
+    """
+    from systemrdl.node import RegNode
+
+    out: list[CompilerMessage] = []
+    flat: list[tuple[int, int, RegNode]] = []
+
+    def visit(node: Any) -> None:
+        if isinstance(node, RegNode):
+            try:
+                a = node.absolute_address
+                size = max(1, int(getattr(node, "size", 1)))
+                flat.append((a, a + size, node))
+            except Exception:
+                pass
+        if hasattr(node, "children"):
+            for c in node.children(unroll=True):
+                visit(c)
+
+    for r in roots:
+        for top in r.children(unroll=True):
+            visit(top)
+
+    flat.sort(key=lambda t: t[0])
+    for i in range(1, len(flat)):
+        prev_start, prev_end, prev_node = flat[i - 1]
+        cur_start, cur_end, cur_node = flat[i]
+        if cur_start < prev_end:
+            inst = getattr(cur_node, "inst", None)
+            src_ref = getattr(inst, "inst_src_ref", None) or getattr(inst, "def_src_ref", None)
+            ref_filename = getattr(src_ref, "filename", None)
+            line_1b = getattr(src_ref, "line", None)
+            sel = getattr(src_ref, "line_selection", None) or (1, 1)
+            try:
+                cs, ce = sel
+            except (TypeError, ValueError):
+                cs = ce = 1
+            if line_1b and ref_filename and pathlib.Path(ref_filename) == path:
+                out.append(
+                    CompilerMessage(
+                        severity=Severity.WARNING,
+                        text=(
+                            f"address overlap: {cur_node.inst_name} at {_hex(cur_start)} "
+                            f"overlaps {prev_node.inst_name} ({_hex(prev_start)}..{_hex(prev_end)})"
+                        ),
+                        file_path=path,
+                        line_1b=line_1b,
+                        col_start_1b=cs,
+                        col_end_1b=ce,
+                    )
+                )
+    return out
+
+
+# ---------------------------------------------------------------------------
 # textDocument/completion (W2-7)
 # ---------------------------------------------------------------------------
 
@@ -1375,6 +1670,14 @@ def build_server() -> LanguageServer:
             # for hover/documentSymbol). Old entry's temp file is unlinked there.
             state.cache.put(uri, roots, buffer_text, tmp_path)
             state.stale_uris.discard(uri)
+            # Address-conflict diagnostics walk the elaborated tree for overlapping
+            # reg ranges (defence-in-depth — systemrdl-compiler catches direct
+            # sibling overlaps but not all cross-level cases).
+            try:
+                conflicts = _address_conflict_diagnostics(roots, tmp_path)
+                messages = list(messages) + conflicts
+            except Exception:
+                logger.debug("address-conflict scan failed", exc_info=True)
         else:
             # Parse failed (or library-only file) — keep the previous cache entry
             # intact (last-good D7). The just-written temp file isn't backing
@@ -1578,6 +1881,47 @@ def build_server() -> LanguageServer:
         if cached is None or not cached.roots:
             return []
         return _document_symbols(cached.roots)
+
+    @server.feature("textDocument/foldingRange")
+    def _on_folding(_ls: LanguageServer, params: Any) -> list[FoldingRange]:
+        cached = state.cache.get(params.text_document.uri)
+        text = cached.text if cached is not None else _read_buffer(params.text_document.uri) or ""
+        return _folding_ranges_from_text(text)
+
+    @server.feature("textDocument/inlayHint")
+    def _on_inlay_hint(_ls: LanguageServer, params: Any) -> list[InlayHint]:
+        cached = state.cache.get(params.text_document.uri)
+        if cached is None or not cached.roots:
+            return []
+        try:
+            target_path = _uri_to_path(params.text_document.uri)
+        except ValueError:
+            return []
+        # The cached roots' src_refs point at the LSP-internal temp file.
+        # Translate by walking with the cache's temp_path mapping.
+        if cached.temp_path is not None:
+            return _inlay_hints_for_addressables(cached.roots, cached.temp_path)
+        return _inlay_hints_for_addressables(cached.roots, target_path)
+
+    @server.feature("textDocument/codeLens")
+    def _on_code_lens(_ls: LanguageServer, params: Any) -> list[CodeLens]:
+        cached = state.cache.get(params.text_document.uri)
+        if cached is None or not cached.roots:
+            return []
+        path = cached.temp_path or _uri_to_path(params.text_document.uri)
+        return _code_lenses_for_addrmaps(cached.roots, path)
+
+    @server.feature("workspace/symbol")
+    def _on_workspace_symbol(_ls: LanguageServer, params: Any) -> list[SymbolInformation]:
+        query = getattr(params, "query", "") or ""
+        out: list[SymbolInformation] = []
+        # Iterate every cached URI; we don't index the workspace, just return
+        # whatever the user has touched recently. v1 — cheap and good enough
+        # since users typically open the .rdl files they want to search.
+        for uri, entry in state.cache._entries.items():
+            if entry.roots:
+                out.extend(_workspace_symbols_for_uri(uri, entry.roots, query))
+        return out
 
     @server.feature("textDocument/completion")
     def _on_completion(_ls: LanguageServer, params: Any) -> CompletionList:
