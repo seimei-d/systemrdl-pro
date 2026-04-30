@@ -52,14 +52,13 @@ type Props = {
   onToggleCollapse: (key: string) => void;
   onFocus: (key: string) => void;
   onContextMenu: (ev: React.MouseEvent, row: FlatRow) => void;
-  onKey: (e: React.KeyboardEvent) => void;
   filter: string;
   filterMatchCount: number;
   hasRoots: boolean;
 };
 
 export function Tree({
-  rows, selectedKey, focusedKey, onSelectReg, onToggleCollapse, onFocus, onContextMenu, onKey,
+  rows, selectedKey, focusedKey, onSelectReg, onToggleCollapse, onFocus, onContextMenu,
   filter, filterMatchCount, hasRoots,
 }: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -71,21 +70,10 @@ export function Tree({
     if (el) el.scrollIntoView({ block: 'nearest' });
   }, [focusedKey, rows]);
 
-  // Auto-focus the tree host on mount so arrow keys work without an extra
-  // click. VSCode webviews start with focus on the document body; if we don't
-  // grab it here the user has to click the tree first to get keyboard nav.
-  useEffect(() => {
-    if (hasRoots && hostRef.current) hostRef.current.focus();
-    // Run only on the first mount or when the empty-state flips to populated;
-    // re-focusing every render would steal focus from anywhere else (filter
-    // input, ctx menu).
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hasRoots]);
-
-  // Mousedown anywhere inside the tree host re-focuses the host. Without this,
-  // clicking a child row doesn't move focus to the tabindex=0 parent and the
-  // keydown handler stays silent.
-  const refocus = () => { hostRef.current?.focus(); };
+  // tabindex=0 + role=tree are kept for screen-reader semantics and so users
+  // who Tab into the panel still land here. Arrow-key handling lives at the
+  // document level in <Viewer/> so focus quirks in the webview iframe don't
+  // disable it.
 
   if (!hasRoots) {
     return (
@@ -111,8 +99,6 @@ export function Tree({
         tabIndex={0}
         role="tree"
         aria-label="Memory map tree"
-        onKeyDown={onKey}
-        onMouseDown={refocus}
       >
         <div className="rdl-tree">
           {rows.map(row => (

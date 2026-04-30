@@ -90,7 +90,17 @@ export function Viewer({ transport }: Props) {
     if (row.node.source && transport.reveal) transport.reveal(row.node.source);
   }, [transport]);
 
-  const onKey = useCallback((e: React.KeyboardEvent) => {
+  // Keyboard handler attached at document level (see effect below). VSCode
+  // webviews don't reliably propagate focus to a tabindex=0 div on click,
+  // so anchoring to focus broke arrow-key nav. Document-level binding works
+  // regardless of where focus is — we just ignore keys when typing in an
+  // input/select/textarea or when the context menu is open.
+  const onKey = useCallback((e: KeyboardEvent) => {
+    if (ctxMenu) return;
+    const ae = document.activeElement as HTMLElement | null;
+    const tag = ae?.tagName;
+    if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+
     if (!flatRows.length) return;
     const idx = flatRows.findIndex(r => r.key === focusedKey);
     const cur = idx >= 0 ? flatRows[idx] : null;
@@ -130,7 +140,12 @@ export function Viewer({ transport }: Props) {
         e.preventDefault();
         break;
     }
-  }, [flatRows, focusedKey, toggleCollapse, selectReg]);
+  }, [flatRows, focusedKey, toggleCollapse, selectReg, ctxMenu]);
+
+  useEffect(() => {
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [onKey]);
 
   // Cmd/Ctrl-F to focus filter (the input is already in the page; we just focus it).
   useEffect(() => {
@@ -261,7 +276,6 @@ export function Viewer({ transport }: Props) {
             onToggleCollapse={toggleCollapse}
             onFocus={setFocusedKey}
             onContextMenu={onContextMenu}
-            onKey={onKey}
             filter={filter}
             filterMatchCount={filterMatchCount}
             hasRoots={roots.length > 0}
