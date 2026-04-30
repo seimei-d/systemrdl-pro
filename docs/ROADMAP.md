@@ -39,6 +39,10 @@ All design decisions D4-D15 from the design review are non-negotiable inputs.
 - [ ] Dark + light theme tokens (D14)
 - [ ] Auto-stack at < 700px viewport (D13)
 - [ ] WAI-ARIA Tree + keyboard navigation
+- [x] **`rdl-viewer` CLI walking skeleton**: Bun HTTP server + fs.watch +
+      `python -m systemrdl_lsp.dump` backend + inline SPA + SSE push.
+      Renderer is duplicated for now (extension webview + CLI SPA);
+      collapse into `rdl-viewer-core` once Svelte arrives.
 - [ ] Replace PeakRDL-html webview iframe with served `rdl-viewer-cli` SPA on `localhost:5173`
 
 ## Week 6 — Bidirectional source map
