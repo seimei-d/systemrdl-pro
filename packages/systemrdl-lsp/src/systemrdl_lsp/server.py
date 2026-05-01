@@ -31,6 +31,7 @@ from lsprotocol.types import (
     TEXT_DOCUMENT_DID_CHANGE,
     TEXT_DOCUMENT_DID_OPEN,
     TEXT_DOCUMENT_DID_SAVE,
+    TEXT_DOCUMENT_SEMANTIC_TOKENS_FULL,
     WORKSPACE_DID_CHANGE_CONFIGURATION,
     CodeLens,
     DidChangeConfigurationParams,
@@ -41,6 +42,8 @@ from lsprotocol.types import (
     InitializedParams,
     InlayHint,
     Location,
+    SemanticTokens,
+    SemanticTokensLegend,
     SymbolInformation,
 )
 from pygls.lsp.server import LanguageServer
@@ -128,7 +131,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-SERVER_VERSION = "0.14.3"
+SERVER_VERSION = "0.14.4"
 
 
 def _iter_rdl_files(root: pathlib.Path, exclude_dirs: set[str]):
@@ -846,12 +849,6 @@ def build_server() -> LanguageServer:
             else None
         )
         return _definition_location(comp, translate)
-
-    from lsprotocol.types import (
-        TEXT_DOCUMENT_SEMANTIC_TOKENS_FULL,
-        SemanticTokens,
-        SemanticTokensLegend,
-    )
 
     @server.feature(
         TEXT_DOCUMENT_SEMANTIC_TOKENS_FULL,
