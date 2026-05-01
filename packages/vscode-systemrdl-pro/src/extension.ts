@@ -113,6 +113,31 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
   );
 
+  // Register a serializer so memory-map panels survive a window reload.
+  // VSCode persists the webview panel's state (the URI we wrote via
+  // `vscode.setState({ uri })` in the inline init script) and calls
+  // `deserializeWebviewPanel` after reload to recreate the same panel.
+  context.subscriptions.push(
+    vscode.window.registerWebviewPanelSerializer('systemrdl-pro.memoryMap', {
+      async deserializeWebviewPanel(panel, state) {
+        const uri = (state && typeof state === 'object' && typeof (state as { uri?: unknown }).uri === 'string')
+          ? (state as { uri: string }).uri
+          : null;
+        if (!uri) {
+          panel.dispose();
+          return;
+        }
+        const viewerDist = vscode.Uri.joinPath(context.extensionUri, 'media', 'viewer');
+        panel.webview.options = {
+          enableScripts: true,
+          localResourceRoots: [viewerDist],
+        };
+        attachMemoryMapPanel(context, panel, uri);
+        await refreshMemoryMap(uri).catch(() => undefined);
+      },
+    }),
+  );
+
   await startServer(context);
 }
 
@@ -366,6 +391,21 @@ async function showMemoryMap(context: vscode.ExtensionContext): Promise<void> {
       localResourceRoots: [viewerDist],
     },
   );
+  attachMemoryMapPanel(context, panel, uri);
+  await refreshMemoryMap(uri);
+}
+
+/**
+ * Attach all the per-panel wiring (handlers, HTML, tracking) to a freshly
+ * created or freshly deserialized `WebviewPanel`. Single source of truth so
+ * the live `showMemoryMap` path and the `WebviewPanelSerializer.deserializeWebviewPanel`
+ * path produce identical setup.
+ */
+function attachMemoryMapPanel(
+  context: vscode.ExtensionContext,
+  panel: vscode.WebviewPanel,
+  uri: string,
+): void {
   panel.iconPath = vscode.Uri.joinPath(context.extensionUri, 'media', 'icon.png');
 
   const entry: PanelEntry = { panel, uri };
@@ -392,9 +432,7 @@ async function showMemoryMap(context: vscode.ExtensionContext): Promise<void> {
     undefined,
     context.subscriptions,
   );
-  panel.webview.html = renderViewerHtml(panel.webview, context.extensionUri);
-
-  await refreshMemoryMap(uri);
+  panel.webview.html = renderViewerHtml(panel.webview, context.extensionUri, uri);
 }
 
 /** Post to a specific panel; no-ops gracefully if the panel was disposed. */
@@ -651,7 +689,11 @@ function readPaletteOverrides(): string {
   return `:root{${lines.join(' ')}}`;
 }
 
-function renderViewerHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
+function renderViewerHtml(
+  webview: vscode.Webview,
+  extensionUri: vscode.Uri,
+  panelUri: string,
+): string {
   const viewerJs = webview.asWebviewUri(
     vscode.Uri.joinPath(extensionUri, 'media', 'viewer', 'viewer.js'),
   );
@@ -677,6 +719,9 @@ function renderViewerHtml(webview: vscode.Webview, extensionUri: vscode.Uri): st
   <script nonce="${nonce}">
   (function() {
     const vscode = acquireVsCodeApi();
+    // Persist the panel's source URI so VSCode's webview-panel serializer
+    // can restore the viewer after a window reload (Ctrl+Shift+P → Reload).
+    vscode.setState({ uri: ${JSON.stringify(panelUri)} });
     const updaters = new Set();
     const cursorListeners = new Set();
     let pendingTree = null;
