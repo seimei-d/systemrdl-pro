@@ -16,6 +16,8 @@ except ImportError:
 
 # $defs ---------------------------------------------------------------
 
+NodeId = str
+
 HexU64 = str
 
 class SourceLoc(TypedDict):
@@ -51,6 +53,8 @@ class Reg(TypedDict):
     name: str
     type: NotRequired[str]
     displayName: NotRequired[str]
+    nodeId: NotRequired["NodeId"]
+    loadState: NotRequired[Literal['loaded', 'placeholder']]
     address: "HexU64"
     width: Literal[8, 16, 32, 64]
     accessWidth: NotRequired[Literal[8, 16, 32, 64]]
@@ -65,6 +69,7 @@ class Regfile(TypedDict):
     name: str
     type: NotRequired[str]
     displayName: NotRequired[str]
+    nodeId: NotRequired["NodeId"]
     address: "HexU64"
     size: "HexU64"
     desc: NotRequired[str]
@@ -76,6 +81,7 @@ class Addrmap(TypedDict):
     name: str
     type: NotRequired[str]
     displayName: NotRequired[str]
+    nodeId: NotRequired["NodeId"]
     address: "HexU64"
     size: "HexU64"
     desc: NotRequired[str]
@@ -86,9 +92,10 @@ class Addrmap(TypedDict):
 # Top-level envelope ----------------------------------------------------
 
 class ElaboratedTree(TypedDict):
-    schemaVersion: Literal['0.1.0']
+    schemaVersion: Literal['0.2.0']
     version: NotRequired[int]
     unchanged: NotRequired[bool]
+    lazy: NotRequired[bool]
     elaboratedAt: NotRequired[str]
     stale: NotRequired[bool]
     roots: list["Addrmap"]

@@ -2,6 +2,8 @@
 // Regenerate via `bun run codegen` (Decision 9A).
 
 
+export type NodeId = string;
+
 export type HexU64 = string;
 
 export type SourceLoc = {
@@ -40,6 +42,8 @@ export type Reg = {
   name: string;
   type?: string;
   displayName?: string;
+  nodeId?: NodeId;
+  loadState?: 'loaded' | 'placeholder';
   address: HexU64;
   width: 8 | 16 | 32 | 64;
   accessWidth?: 8 | 16 | 32 | 64;
@@ -55,6 +59,7 @@ export type Regfile = {
   name: string;
   type?: string;
   displayName?: string;
+  nodeId?: NodeId;
   address: HexU64;
   size: HexU64;
   desc?: string;
@@ -67,6 +72,7 @@ export type Addrmap = {
   name: string;
   type?: string;
   displayName?: string;
+  nodeId?: NodeId;
   address: HexU64;
   size: HexU64;
   desc?: string;
@@ -76,9 +82,10 @@ export type Addrmap = {
 };
 
 export type ElaboratedTree = {
-  schemaVersion: '0.1.0';
+  schemaVersion: '0.2.0';
   version?: number;
   unchanged?: boolean;
+  lazy?: boolean;
   elaboratedAt?: string;
   stale?: boolean;
   roots: Addrmap[];
