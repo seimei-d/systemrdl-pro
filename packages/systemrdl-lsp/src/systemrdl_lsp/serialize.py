@@ -119,6 +119,17 @@ def _serialize_field(
             out["desc"] = str(desc)
     except LookupError:
         pass
+    # `counter` / `intr` SystemRDL flags — surface as booleans so the
+    # viewer can render badges. systemrdl-compiler returns False for unset
+    # flags (not LookupError), so a defensive bool() suffices.
+    if _safe_get_property(node, "counter"):
+        out["isCounter"] = True
+    if _safe_get_property(node, "intr"):
+        out["isIntr"] = True
+    # `encode = my_enum;` → flatten the enum's entries into a JSON array.
+    enc = _safe_get_property(node, "encode")
+    if enc is not None:
+        out["encode"] = _serialize_encode_entries(enc, node.msb - node.lsb + 1)
     inst = getattr(node, "inst", None)
     src = _src_ref_to_dict(
         getattr(inst, "inst_src_ref", None) or getattr(inst, "def_src_ref", None),
@@ -127,6 +138,32 @@ def _serialize_field(
     if src:
         out["source"] = src
     return out
+
+
+def _serialize_encode_entries(enc: Any, width_bits: int) -> list[dict[str, Any]]:
+    """Walk a systemrdl-compiler ``enum`` component → list of entries.
+
+    Each entry has ``name`` + ``value`` (hex). ``desc`` if present. Width
+    drives the hex padding so the value column lines up with the field width
+    in the viewer.
+    """
+    entries: list[dict[str, Any]] = []
+    members = getattr(enc, "members", None) or {}
+    for member_name, member in members.items():
+        try:
+            value = int(getattr(member, "value", 0))
+        except (TypeError, ValueError):
+            continue
+        item: dict[str, Any] = {
+            "name": member_name,
+            "value": _hex(value, max(8, width_bits)),
+        }
+        for prop_name in ("desc", "name"):
+            prop_val = getattr(member, prop_name, None)
+            if prop_val:
+                item.setdefault(prop_name, str(prop_val))
+        entries.append(item)
+    return entries
 
 
 def _serialize_reg(

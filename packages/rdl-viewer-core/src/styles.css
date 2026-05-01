@@ -211,6 +211,59 @@ html, body { margin: 0; padding: 0; background: var(--rdl-bg); color: var(--rdl-
   color: var(--rdl-dim); }
 .rdl-bitgrid-cell.reserved .fieldname { font-weight: 400; opacity: 0.7; }
 
+/* Counter / interrupt badges. Tiny, dimmed, but visible enough to flag the
+   field as having a side-effect beyond plain RW storage. */
+.rdl-badge {
+  display: inline-block; margin-left: 6px; padding: 0 4px;
+  font-size: 10px; line-height: 14px; vertical-align: middle;
+  border-radius: 7px; background: var(--rdl-chrome);
+  color: var(--rdl-dim); border: 1px solid var(--rdl-border);
+  font-weight: 400;
+}
+.rdl-badge.counter { color: var(--rdl-acc-rw); }
+.rdl-badge.intr    { color: var(--rdl-warning); }
+.rdl-bitgrid-cell .rdl-badge {
+  margin: 0; padding: 0 3px; font-size: 9px; line-height: 12px;
+  background: rgba(255,255,255,0.12); border-color: transparent;
+}
+
+/* Encode-enum value table — shown inside the field row when the field has
+   an `encode = my_enum;` property. Compact, monospace, full-width. */
+.rdl-encode-table {
+  grid-column: 1 / -1;
+  margin: 6px 0 2px;
+  border-collapse: collapse;
+  font-family: var(--rdl-font-mono); font-size: 11px;
+}
+.rdl-encode-table th, .rdl-encode-table td {
+  text-align: left; padding: 2px 8px; border: 1px solid var(--rdl-border);
+}
+.rdl-encode-table th { background: var(--rdl-chrome); color: var(--rdl-dim);
+  font-weight: 500; font-size: 10px; text-transform: uppercase;
+  letter-spacing: 0.04em; }
+.rdl-encode-table td.v { color: var(--rdl-accent); }
+.rdl-encode-table td.d { color: var(--rdl-dim); }
+
+/* Register binary decoder — input + live field breakdown. */
+.rdl-decoder { margin: 8px 0; padding: 6px 0;
+  border-bottom: 1px dashed var(--rdl-border); }
+.rdl-decoder-label { display: flex; align-items: center; gap: 8px;
+  font-size: 11px; color: var(--rdl-dim); }
+.rdl-decoder-label input {
+  flex: 1; max-width: 240px;
+  background: var(--rdl-bg); color: var(--rdl-fg);
+  border: 1px solid var(--rdl-border); border-radius: 2px;
+  padding: 3px 8px; font-size: 12px; font-family: var(--rdl-font-mono);
+  outline: none;
+}
+.rdl-decoder-label input:focus { border-color: var(--rdl-accent); }
+.rdl-decoder-out { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 12px;
+  font-family: var(--rdl-font-mono); font-size: 11px; }
+.rdl-decoder-field b { font-weight: 600; color: var(--rdl-fg); }
+.rdl-decoder-field code { color: var(--rdl-accent); }
+.rdl-decoder-field em { color: var(--rdl-acc-rw); font-style: normal;
+  margin-left: 4px; }
+
 .rdl-detail .fields-title { font-size: 11px; color: var(--rdl-dim);
   text-transform: uppercase; letter-spacing: 0.06em;
   border-bottom: 1px solid var(--rdl-border); padding-bottom: 6px;

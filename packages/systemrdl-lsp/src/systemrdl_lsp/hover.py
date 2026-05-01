@@ -5,11 +5,14 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from .completion import (
+    SYSTEMRDL_ADDRESSING_VALUES,
     SYSTEMRDL_ONREAD_VALUES,
     SYSTEMRDL_ONWRITE_VALUES,
+    SYSTEMRDL_PRECEDENCE_VALUES,
     SYSTEMRDL_PROPERTIES,
     SYSTEMRDL_RW_VALUES,
     SYSTEMRDL_TOP_KEYWORDS,
+    _user_properties_from_cached,
 )
 from .definition import _comp_defs_from_cached
 
@@ -40,16 +43,13 @@ def _node_at_position(
 
     # Pre-pass: count elaborated nodes per (filename, line). count > 1 means
     # the line is reused-type body; we must not pick a single instance for it.
-    # ``children(unroll=True)`` on RegNode already yields fields, so guard
-    # against double-counting the same node via an id() set.
+    # Walk only via ``children(unroll=True)`` — that already yields FieldNodes
+    # for RegNode, so iterating fields() separately would double-count. (id()
+    # guards don't help because systemrdl-compiler returns fresh Python wrapper
+    # objects on every children()/fields() call.)
     line_uses: Counter[tuple[str, int]] = Counter()
-    seen_nodes: set[int] = set()
 
     def collect(node: Any) -> None:
-        nid = id(node)
-        if nid in seen_nodes:
-            return
-        seen_nodes.add(nid)
         inst = getattr(node, "inst", None)
         src_ref = getattr(inst, "inst_src_ref", None) or getattr(inst, "def_src_ref", None)
         if src_ref is not None:
@@ -61,12 +61,6 @@ def _node_at_position(
             try:
                 for child in node.children(unroll=True):
                     collect(child)
-            except Exception:
-                pass
-        if hasattr(node, "fields"):
-            try:
-                for f in node.fields():
-                    collect(f)
             except Exception:
                 pass
 
@@ -117,9 +111,10 @@ def _hover_for_word(word: str, roots: list[RootNode]) -> str | None:
     surfaces the user's definition over the language docs.
 
     1. User-defined component types from ``comp_defs``
-    2. SystemRDL top-level keywords
-    3. Property keywords
-    4. Access-mode values (sw/hw values, onwrite, onread)
+    2. User-defined properties (`property foo { … };`)
+    3. SystemRDL top-level keywords
+    4. Property keywords
+    5. Access-mode values (sw/hw values, onwrite, onread)
     """
     if not word:
         return None
@@ -144,14 +139,32 @@ def _hover_for_word(word: str, roots: list[RootNode]) -> str | None:
             out.append(f"User-defined `{kind}` type.")
         return "\n".join(out)
 
-    # 2-4. Static catalogues. Each gets its own role label so the user knows
+    # 2. User-defined property (`property foo { ... };`).
+    user_props = _user_properties_from_cached(roots)
+    user_prop = user_props.get(word)
+    if user_prop is not None:
+        bindable = getattr(user_prop, "bindable_to", None) or set()
+        kinds = ", ".join(sorted(c.__name__.lower() for c in bindable)) or "any"
+        valid = getattr(user_prop, "valid_type", None)
+        valid_name = getattr(valid, "__name__", str(valid)) if valid else "any"
+        default = getattr(user_prop, "default", None)
+        out_lines = [f"**property** `{word}` _(user-defined)_", ""]
+        out_lines.append(f"- **type**: `{valid_name}`")
+        out_lines.append(f"- **bindable to**: {kinds}")
+        if default is not None:
+            out_lines.append(f"- **default**: `{default!r}`")
+        return "\n".join(out_lines)
+
+    # 3-5. Static catalogues. Each gets its own role label so the user knows
     # *why* something matched.
     for catalogue, role in (
-        (SYSTEMRDL_TOP_KEYWORDS,    "keyword"),
-        (SYSTEMRDL_PROPERTIES,      "property"),
-        (SYSTEMRDL_RW_VALUES,       "access mode"),
-        (SYSTEMRDL_ONWRITE_VALUES,  "onwrite value"),
-        (SYSTEMRDL_ONREAD_VALUES,   "onread value"),
+        (SYSTEMRDL_TOP_KEYWORDS,        "keyword"),
+        (SYSTEMRDL_PROPERTIES,          "property"),
+        (SYSTEMRDL_RW_VALUES,           "access mode"),
+        (SYSTEMRDL_ONWRITE_VALUES,      "onwrite value"),
+        (SYSTEMRDL_ONREAD_VALUES,       "onread value"),
+        (SYSTEMRDL_ADDRESSING_VALUES,   "addressing mode"),
+        (SYSTEMRDL_PRECEDENCE_VALUES,   "precedence value"),
     ):
         if word in catalogue:
             return f"**`{word}`** _({role})_\n\n{catalogue[word]}"

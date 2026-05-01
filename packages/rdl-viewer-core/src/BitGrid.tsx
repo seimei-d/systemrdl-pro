@@ -102,14 +102,27 @@ export function BitGrid({ reg }: Props) {
                   );
                 }
                 const acc = (c.field.access || 'na').toLowerCase();
+                const tooltip = [
+                  `[${range}] ${c.field.name} (${acc.toUpperCase()})`,
+                  c.field.isCounter ? 'counter' : null,
+                  c.field.isIntr ? 'interrupt' : null,
+                ].filter(Boolean).join(' · ');
                 return (
                   <div
                     key={ci}
                     className={`rdl-bitgrid-cell acc-${acc}`}
                     style={{ gridColumn: `span ${cellSpan}` }}
-                    title={`[${range}] ${c.field.name} (${acc.toUpperCase()})`}
+                    title={tooltip}
                   >
-                    <span className="fieldname">{c.field.name}</span>
+                    <span className="fieldname">
+                      {c.field.name}
+                      {c.field.isCounter && (
+                        <span className="rdl-badge counter" title="counter">◷</span>
+                      )}
+                      {c.field.isIntr && (
+                        <span className="rdl-badge intr" title="interrupt">⚡</span>
+                      )}
+                    </span>
                   </div>
                 );
               })}

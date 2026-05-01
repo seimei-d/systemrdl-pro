@@ -42,8 +42,14 @@ from lsprotocol.types import (
     InitializedParams,
     InlayHint,
     Location,
+    ParameterInformation,
+    Position,
+    Range,
     SemanticTokens,
     SemanticTokensLegend,
+    SignatureHelp,
+    SignatureHelpOptions,
+    SignatureInformation,
     SymbolInformation,
 )
 from pygls.lsp.server import LanguageServer
@@ -74,12 +80,14 @@ from .completion import (
     _completion_context,
     _completion_items_for_context,
     _completion_items_for_types,
+    _completion_items_for_user_properties,
     _completion_items_static,
     _make_items,
 )
 from .definition import (
     _comp_defs_from_cached,
     _definition_location,
+    _find_instance_by_name,
     _references_to_type,
     _rename_locations,
     _word_at_position,
@@ -151,6 +159,88 @@ def _iter_rdl_files(root: pathlib.Path, exclude_dirs: set[str]):
                 yield entry
     except (PermissionError, OSError):
         return
+
+
+def _build_selection_ranges(
+    text: str, lines: list[str], line_0b: int, char_0b: int
+) -> list[Any]:
+    """Walk outward from the cursor position through enclosing `{...}` blocks.
+
+    Returns a list of LSP ``Range`` objects, **innermost first**. Caller links
+    them parent-pointer-style for ``textDocument/selectionRange``. Pure textual
+    scan — strings/comments are stripped to whitespace so braces inside them
+    don't confuse the matcher (same trick as folding ranges).
+    """
+    import re as _re
+
+    if line_0b < 0 or line_0b >= len(lines):
+        return []
+    line = lines[line_0b]
+    if char_0b < 0 or char_0b > len(line):
+        return []
+
+    # Innermost: the word under cursor.
+    word = _word_at_position(text, line_0b, char_0b)
+    word_range: Range | None = None
+    if word:
+        m = _re.search(rf"\b{_re.escape(word)}\b", line)
+        if m and m.start() <= char_0b <= m.end():
+            word_range = Range(
+                start=Position(line=line_0b, character=m.start()),
+                end=Position(line=line_0b, character=m.end()),
+            )
+
+    # Strip strings/comments to neutral whitespace so brace counting doesn't
+    # see literals or block-comment braces.
+    cleaned = _re.sub(r'"(?:\\.|[^"\\])*"', lambda m: " " * len(m.group(0)), text)
+    cleaned = _re.sub(r"//[^\n]*", lambda m: " " * len(m.group(0)), cleaned)
+    cleaned = _re.sub(
+        r"/\*[\s\S]*?\*/",
+        lambda m: _re.sub(r"[^\n]", " ", m.group(0)),
+        cleaned,
+    )
+
+    # Convert (line, char) → absolute offset.
+    def offset_of(li: int, co: int) -> int:
+        return sum(len(ln) + 1 for ln in lines[:li]) + co
+
+    def pos_of(off: int) -> Position:
+        # Inverse of offset_of.
+        seen = 0
+        for li, ln in enumerate(lines):
+            if seen + len(ln) >= off:
+                return Position(line=li, character=off - seen)
+            seen += len(ln) + 1
+        return Position(line=len(lines), character=0)
+
+    cursor_off = offset_of(line_0b, char_0b)
+    ranges: list[Range] = []
+    if word_range is not None:
+        ranges.append(word_range)
+
+    # Walk outward through balanced `{...}` pairs that contain the cursor.
+    # Strategy: scan all `{` `}` pairs in the file, keep those whose span
+    # includes the cursor offset, sort by span size ascending → innermost first.
+    stack: list[int] = []
+    pairs: list[tuple[int, int]] = []
+    for i, ch in enumerate(cleaned):
+        if ch == "{":
+            stack.append(i)
+        elif ch == "}" and stack:
+            start = stack.pop()
+            pairs.append((start, i + 1))
+    enclosing = [(s, e) for s, e in pairs if s <= cursor_off <= e]
+    enclosing.sort(key=lambda t: t[1] - t[0])
+    for s, e in enclosing:
+        ranges.append(Range(start=pos_of(s), end=pos_of(e)))
+
+    # Outermost: whole file.
+    last_line = max(0, len(lines) - 1)
+    ranges.append(Range(
+        start=Position(line=0, character=0),
+        end=Position(line=last_line, character=len(lines[last_line]) if lines else 0),
+    ))
+    return ranges
 
 
 def _is_valid_identifier(name: str) -> bool:
@@ -687,6 +777,7 @@ def build_server() -> LanguageServer:
         items = _completion_items_static()
         if cached is not None and cached.roots:
             items.extend(_completion_items_for_types(cached.roots))
+            items.extend(_completion_items_for_user_properties(cached.roots))
         return CompletionList(is_incomplete=False, items=items)
 
     def _file_line_reader(path: pathlib.Path, line_idx: int) -> str | None:
@@ -795,6 +886,127 @@ def build_server() -> LanguageServer:
             )
         return WorkspaceEdit(changes=per_uri)
 
+    @server.feature("textDocument/documentHighlight")
+    def _on_document_highlight(_ls: LanguageServer, params: Any) -> list[Any]:
+        """Highlight every textual occurrence of the identifier under the cursor.
+
+        Implementation: regex-find every `\\b<word>\\b` match in the buffer.
+        Cheap and matches user expectation (highlight = same lexical token).
+        """
+        from lsprotocol.types import DocumentHighlight, DocumentHighlightKind
+
+        uri = params.text_document.uri
+        cached = state.cache.get(uri)
+        text = cached.text if cached is not None else _read_buffer(uri) or ""
+        word = _word_at_position(text, params.position.line, params.position.character)
+        if not word:
+            return []
+        import re as _re
+        pattern = _re.compile(rf"\b{_re.escape(word)}\b")
+        out: list[DocumentHighlight] = []
+        for line_idx, line in enumerate(text.splitlines()):
+            for m in pattern.finditer(line):
+                out.append(
+                    DocumentHighlight(
+                        range=Range(
+                            start=Position(line=line_idx, character=m.start()),
+                            end=Position(line=line_idx, character=m.end()),
+                        ),
+                        kind=DocumentHighlightKind.Text,
+                    )
+                )
+        return out
+
+    @server.feature("textDocument/selectionRange")
+    def _on_selection_range(_ls: LanguageServer, params: Any) -> list[Any]:
+        """Smart selection: expand cursor → word → enclosing `{...}` block(s) → file.
+
+        Pure textual implementation walks outward through brace pairs, no
+        elaboration dependency. Lets the user expand a selection from a
+        field name through its containing reg, regfile, addrmap, etc. with
+        Shift+Alt+Right.
+        """
+        from lsprotocol.types import SelectionRange as LSPSelectionRange
+
+        uri = params.text_document.uri
+        cached = state.cache.get(uri)
+        text = cached.text if cached is not None else _read_buffer(uri) or ""
+        if not text:
+            return []
+        lines = text.splitlines()
+        out: list[Any] = []
+        for pos in params.positions:
+            ranges = _build_selection_ranges(text, lines, pos.line, pos.character)
+            if not ranges:
+                out.append(LSPSelectionRange(
+                    range=Range(start=pos, end=pos),
+                    parent=None,
+                ))
+                continue
+            # Build LSP linked list: innermost first, parent pointers up.
+            parent: Any = None
+            for rng in ranges:
+                parent = LSPSelectionRange(range=rng, parent=parent)
+            out.append(parent)
+        return out
+
+    @server.feature(
+        "textDocument/signatureHelp",
+        SignatureHelpOptions(trigger_characters=["#", "("]),
+    )
+    def _on_signature_help(_ls: LanguageServer, params: Any) -> Any | None:
+        """Signature help inside `#(...)` parametrized type instantiation.
+
+        Lightweight: when the cursor is inside a ``#(...)`` after a known
+        parametrized type, show its parameter names as the signature label.
+        Returns None for non-matching contexts, no error.
+        """
+        try:
+            uri = params.text_document.uri
+            cached = state.cache.get(uri)
+            text = cached.text if cached is not None else _read_buffer(uri) or ""
+            if not text:
+                return None
+            split_lines = text.splitlines()
+            line_text = (
+                split_lines[params.position.line]
+                if params.position.line < len(split_lines)
+                else ""
+            )
+            prefix = line_text[: params.position.character]
+            # Match `<TYPE> #(` immediately before the cursor (allowing stuff inside the parens).
+            import re as _re
+            m = _re.search(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*#\s*\([^)]*$", prefix)
+            if not m:
+                return None
+            type_name = m.group(1)
+            if cached is None or not cached.roots:
+                return None
+            defs = _comp_defs_from_cached(cached.roots)
+            comp = defs.get(type_name)
+            if comp is None:
+                return None
+            params_list = list(getattr(comp, "parameters", []) or [])
+            if not params_list:
+                return None
+            sig_label = f"{type_name} #({', '.join(p.name for p in params_list)})"
+            return SignatureHelp(
+                signatures=[
+                    SignatureInformation(
+                        label=sig_label,
+                        parameters=[
+                            ParameterInformation(label=p.name)
+                            for p in params_list
+                        ],
+                    )
+                ],
+                active_signature=0,
+                active_parameter=0,
+            )
+        except Exception:
+            logger.debug("signatureHelp handler failed", exc_info=True)
+            return None
+
     @server.feature("textDocument/references")
     def _on_references(_ls: LanguageServer, params: Any) -> list[Location]:
         """Find all instantiation sites of the type under the cursor.
@@ -835,10 +1047,6 @@ def build_server() -> LanguageServer:
         word = _word_at_position(cached.text, params.position.line, params.position.character)
         if not word:
             return None
-        defs = _comp_defs_from_cached(cached.roots)
-        comp = defs.get(word)
-        if comp is None:
-            return None
         try:
             original_path = _uri_to_path(uri)
         except ValueError:
@@ -848,7 +1056,14 @@ def build_server() -> LanguageServer:
             if cached.temp_path is not None and original_path is not None
             else None
         )
-        return _definition_location(comp, translate)
+        defs = _comp_defs_from_cached(cached.roots)
+        comp = defs.get(word)
+        if comp is not None:
+            return _definition_location(comp, translate)
+        # Fallback: instance-name lookup. Catches signals (e.g. `resetsignal =
+        # my_rst;` jumps to `signal { ... } my_rst;`) and named registers /
+        # fields that aren't top-level type defs.
+        return _find_instance_by_name(cached.roots, word, translate)
 
     @server.feature(
         TEXT_DOCUMENT_SEMANTIC_TOKENS_FULL,

@@ -172,15 +172,12 @@ def _address_conflict_diagnostics(
     from .serialize import _hex
 
     # Pre-pass: count elaborated nodes per (filename, line) — same heuristic
-    # used by hover/inlay-hints to detect reused-type bodies.
+    # used by hover/inlay-hints to detect reused-type bodies. Walk only via
+    # ``children(unroll=True)`` (no separate fields() pass) so RegNode fields
+    # aren't double-counted.
     line_uses: Counter[tuple[str, int]] = Counter()
-    seen_nodes: set[int] = set()
 
     def collect(node: Any) -> None:
-        nid = id(node)
-        if nid in seen_nodes:
-            return
-        seen_nodes.add(nid)
         if isinstance(node, AddressableNode):
             inst = getattr(node, "inst", None)
             sr = getattr(inst, "inst_src_ref", None) or getattr(inst, "def_src_ref", None)

@@ -9,7 +9,7 @@ register definitions.
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from lsprotocol.types import CompletionItem, CompletionItemKind
 
@@ -33,6 +33,8 @@ SYSTEMRDL_TOP_KEYWORDS: dict[str, str] = {
         "Marks this `addrmap` as a bus bridge. RTL backends use it as a synthesis "
         "hint to wire two address spaces together (clause 9.2)."
     ),
+    "abstract": "Modifier — definition without an instance (cannot be elaborated alone).",
+    "alias": "Alias register — mirrors another reg by address; writes propagate (clause 10.5).",
     "default": "Default-property assignment — applies to every later sibling unless overridden.",
     "property": "User-defined property declaration.",
     "constraint": "User-defined constraint declaration (rarely used).",
@@ -105,6 +107,23 @@ SYSTEMRDL_PROPERTIES: dict[str, str] = {
     "haltmask": "Mask for halt-enable.",
     "stickybit": "Field bit sticks until cleared by software.",
     "sticky": "Whole field is sticky.",
+    # Conditional / structural
+    "ispresent": (
+        "Conditional elaboration: `ispresent = false;` omits this component from "
+        "the elaborated tree (clause 9.5). Use with `parameter` to gate optional features."
+    ),
+    "precedence": (
+        "On simultaneous sw/hw write conflict: which side wins. "
+        "Values: `sw`, `hw`. (Clause 8.5.5.)"
+    ),
+    "donttest": "Tooling hint — exclude this component from automated register-test sweeps.",
+    "dontcompare": "Tooling hint — value not stable across runs; exclude from comparison checks.",
+    "rsvdset": (
+        "If true, all reserved bits in this register are guaranteed to "
+        "read as 1 (default 0)."
+    ),
+    "rsvdsetX": "If true, reserved bits read as `X` (don't-care).",
+    "arbiter": "Arbitration scheme on simultaneous external/internal write conflict.",
 }
 
 # sw / hw access — the right-hand side of `sw =` / `hw =`.
@@ -134,8 +153,23 @@ SYSTEMRDL_ONREAD_VALUES: dict[str, str] = {
     "ruser": "User-defined read action.",
 }
 
+# `addressing = …` enum values (clause 13.4).
+SYSTEMRDL_ADDRESSING_VALUES: dict[str, str] = {
+    "compact":   "Children pack with no padding (default).",
+    "regalign":  "Each child aligned to its own size.",
+    "fullalign": "Each child aligned to the largest child's size.",
+}
 
-_COMPLETION_CONTEXT_RE = re.compile(r"\b(sw|hw|onwrite|onread)\s*=\s*\w*$")
+# `precedence = …` enum values.
+SYSTEMRDL_PRECEDENCE_VALUES: dict[str, str] = {
+    "sw": "Software write wins on simultaneous conflict.",
+    "hw": "Hardware write wins (default).",
+}
+
+
+_COMPLETION_CONTEXT_RE = re.compile(
+    r"\b(sw|hw|onwrite|onread|addressing|precedence)\s*=\s*\w*$"
+)
 
 
 def _completion_context(text: str, line_0b: int, char_0b: int) -> str:
@@ -174,6 +208,8 @@ def _completion_items_static() -> list[CompletionItem]:
     items.extend(_make_items(SYSTEMRDL_RW_VALUES, CompletionItemKind.EnumMember))
     items.extend(_make_items(SYSTEMRDL_ONWRITE_VALUES, CompletionItemKind.EnumMember))
     items.extend(_make_items(SYSTEMRDL_ONREAD_VALUES, CompletionItemKind.EnumMember))
+    items.extend(_make_items(SYSTEMRDL_ADDRESSING_VALUES, CompletionItemKind.EnumMember))
+    items.extend(_make_items(SYSTEMRDL_PRECEDENCE_VALUES, CompletionItemKind.EnumMember))
     return items
 
 
@@ -185,7 +221,58 @@ def _completion_items_for_context(context: str) -> list[CompletionItem]:
         return _make_items(SYSTEMRDL_ONWRITE_VALUES, CompletionItemKind.EnumMember)
     if context == "onread_value":
         return _make_items(SYSTEMRDL_ONREAD_VALUES, CompletionItemKind.EnumMember)
+    if context == "addressing_value":
+        return _make_items(SYSTEMRDL_ADDRESSING_VALUES, CompletionItemKind.EnumMember)
+    if context == "precedence_value":
+        return _make_items(SYSTEMRDL_PRECEDENCE_VALUES, CompletionItemKind.EnumMember)
     return []
+
+
+def _user_properties_from_cached(roots: list[RootNode]) -> dict[str, Any]:
+    """Pluck user-defined properties out of the first cached root.
+
+    Returns ``{name: PureUserProperty}`` — empty if the file declared none.
+    Used by completion (suggest names in property-assignment contexts) and
+    hover (explain a user-defined property when the cursor is on its name).
+    """
+    for r in roots:
+        env = getattr(r, "env", None)
+        if env is None:
+            continue
+        rules = getattr(env, "property_rules", None)
+        if rules is None:
+            continue
+        user = getattr(rules, "user_properties", None)
+        if user:
+            return dict(user)
+    return {}
+
+
+def _completion_items_for_user_properties(roots: list[RootNode]) -> list[CompletionItem]:
+    """User-defined properties surface in completion alongside the static catalogue.
+
+    Detail line shows the bindable component class set so the user knows
+    where the property is allowed (`field` only, vs. `addrmap+regfile`, etc.).
+    """
+    items: list[CompletionItem] = []
+    for name, prop in _user_properties_from_cached(roots).items():
+        bindable = getattr(prop, "bindable_to", None) or set()
+        kinds = ", ".join(sorted(c.__name__.lower() for c in bindable)) or "any"
+        valid = getattr(prop, "valid_type", None) or "any"
+        valid_name = getattr(valid, "__name__", str(valid))
+        detail = f"user property — {valid_name} on {kinds}"
+        items.append(
+            CompletionItem(
+                label=name,
+                kind=CompletionItemKind.Property,
+                detail=detail,
+                documentation=(
+                    f"User-defined property `{name}` ({valid_name}). "
+                    f"Bindable to: {kinds}."
+                ),
+            )
+        )
+    return items
 
 
 def _completion_items_for_types(roots: list[RootNode]) -> list[CompletionItem]:

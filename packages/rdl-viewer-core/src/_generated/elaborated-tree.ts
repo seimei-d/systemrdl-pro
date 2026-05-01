@@ -14,6 +14,12 @@ export type SourceLoc = {
 
 export type AccessMode = 'rw' | 'ro' | 'wo' | 'w1c' | 'w0c' | 'w1s' | 'w0s' | 'rclr' | 'rset' | 'wclr' | 'wset' | 'na';
 
+export type EncodeEntry = {
+  name: string;
+  value: HexU64;
+  desc?: string;
+};
+
 export type Field = {
   name: string;
   displayName?: string;
@@ -23,11 +29,9 @@ export type Field = {
   reset?: HexU64;
   desc?: string;
   source?: SourceLoc;
-  encode?: {
-  name: string;
-  value: HexU64;
-  desc?: string;
-}[];
+  isCounter?: boolean;
+  isIntr?: boolean;
+  encode?: EncodeEntry[];
 };
 
 export type Reg = {

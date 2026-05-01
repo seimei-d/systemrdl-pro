@@ -27,6 +27,11 @@ class SourceLoc(TypedDict):
 
 AccessMode = Literal['rw', 'ro', 'wo', 'w1c', 'w0c', 'w1s', 'w0s', 'rclr', 'rset', 'wclr', 'wset', 'na']
 
+class EncodeEntry(TypedDict):
+    name: str
+    value: "HexU64"
+    desc: NotRequired[str]
+
 class Field(TypedDict):
     name: str
     displayName: NotRequired[str]
@@ -36,7 +41,9 @@ class Field(TypedDict):
     reset: NotRequired["HexU64"]
     desc: NotRequired[str]
     source: NotRequired["SourceLoc"]
-    encode: NotRequired[list[dict]]
+    isCounter: NotRequired[bool]
+    isIntr: NotRequired[bool]
+    encode: NotRequired[list["EncodeEntry"]]
 
 class Reg(TypedDict):
     kind: Literal['reg']

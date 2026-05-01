@@ -67,6 +67,61 @@ def _comp_defs_from_cached(roots: list[RootNode]) -> dict[str, Any]:
     return {}
 
 
+def _find_instance_by_name(
+    roots: list[RootNode],
+    name: str,
+    path_translate: dict[pathlib.Path, pathlib.Path] | None,
+) -> Location | None:
+    """Locate an instance declaration by its ``inst_name`` (signal, reg, field…).
+
+    Used as a fallback for goto-def when the word isn't a top-level type.
+    Useful for jumping from ``resetsignal = my_rst;`` to ``signal {…} my_rst;``,
+    or from a property reference ``incr = my_signal;`` to its declaration.
+
+    Returns the FIRST match's source location — for reused-type bodies multiple
+    elaborated nodes share the same source span, so the answer is unambiguous.
+    """
+    if not name:
+        return None
+    from systemrdl.node import Node
+
+    def search(node: Any) -> Location | None:
+        if isinstance(node, Node):
+            inst_name = getattr(node, "inst_name", None)
+            if inst_name == name:
+                inst = getattr(node, "inst", None)
+                src_ref = (
+                    getattr(inst, "inst_src_ref", None)
+                    or getattr(inst, "def_src_ref", None)
+                )
+                loc = _src_ref_to_location(src_ref, path_translate)
+                if loc is not None:
+                    return loc
+        if hasattr(node, "children"):
+            try:
+                for c in node.children(unroll=True):
+                    found = search(c)
+                    if found is not None:
+                        return found
+            except Exception:
+                pass
+        if hasattr(node, "fields"):
+            try:
+                for f in node.fields():
+                    found = search(f)
+                    if found is not None:
+                        return found
+            except Exception:
+                pass
+        return None
+
+    for r in roots:
+        loc = search(r)
+        if loc is not None:
+            return loc
+    return None
+
+
 def _references_to_type(
     type_name: str,
     roots: list[RootNode],

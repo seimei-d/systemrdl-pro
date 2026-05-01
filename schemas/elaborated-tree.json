@@ -124,20 +124,29 @@
         "reset": { "$ref": "#/$defs/HexU64" },
         "desc": { "type": "string" },
         "source": { "$ref": "#/$defs/SourceLoc" },
+        "isCounter": {
+          "type": "boolean",
+          "description": "True when the field's `counter` SystemRDL property is set."
+        },
+        "isIntr": {
+          "type": "boolean",
+          "description": "True when the field's `intr` SystemRDL property is set."
+        },
         "encode": {
           "type": "array",
           "description": "Optional enumerated values from `enum` SystemRDL type.",
-          "items": {
-            "type": "object",
-            "required": ["name", "value"],
-            "additionalProperties": false,
-            "properties": {
-              "name": { "type": "string" },
-              "value": { "$ref": "#/$defs/HexU64" },
-              "desc": { "type": "string" }
-            }
-          }
+          "items": { "$ref": "#/$defs/EncodeEntry" }
         }
+      }
+    },
+    "EncodeEntry": {
+      "type": "object",
+      "required": ["name", "value"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string" },
+        "value": { "$ref": "#/$defs/HexU64" },
+        "desc": { "type": "string" }
       }
     },
     "AccessMode": {

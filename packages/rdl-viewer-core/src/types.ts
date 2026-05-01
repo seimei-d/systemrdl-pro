@@ -11,6 +11,7 @@ export type {
   AccessMode,
   Addrmap,
   ElaboratedTree,
+  EncodeEntry,
   Field,
   HexU64,
   Reg,
