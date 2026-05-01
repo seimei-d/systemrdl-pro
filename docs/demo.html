@@ -1,0 +1,379 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<title>SystemRDL Pro — demo</title>
+<style>
+  /* Tokens — match the viewer-core defaults so the mockup looks like the
+     real thing without bundling viewer.js. */
+  :root {
+    --bg: #1e1e1e; --panel: #252526; --chrome: #2d2d30; --border: #3c3c3c;
+    --fg: #d4d4d4; --dim: #858585; --selected: #213c5a; --accent: #4a9eff;
+    --warning: #d7a85a;
+    --acc-rw: #6fb98f; --acc-ro: #8aa6b8; --acc-w1c: #d7a85a;
+    --acc-wo: #7a87b8; --acc-rsv: #5a3a3a;
+    --mono: 'JetBrains Mono', 'SF Mono', Consolas, monospace;
+    --sans: 'Inter', system-ui, sans-serif;
+  }
+  body.light {
+    --bg: #ffffff; --panel: #f5f5f5; --chrome: #ececec; --border: #d4d4d4;
+    --fg: #1a1a1a; --dim: #6b6b6b; --selected: #d6e7fa; --accent: #0066cc;
+    --warning: #b87a18;
+    --acc-rw: #3a8a5f; --acc-ro: #5a7a90; --acc-w1c: #b87a18;
+    --acc-wo: #4a5a90; --acc-rsv: #8a3a3a;
+  }
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: #181818; color: var(--fg);
+               font-family: var(--sans); font-size: 14px; height: 100vh; overflow: hidden; }
+  body.light { background: #f0f0f0; }
+
+  .stage {
+    width: 100vw; height: 100vh;
+    display: grid; grid-template-columns: 1fr 1fr;
+    background: var(--bg); color: var(--fg);
+    transition: background 0.3s, color 0.3s;
+  }
+  .editor, .viewer {
+    border: 1px solid var(--border);
+    overflow: hidden; position: relative;
+    transition: background 0.3s, border-color 0.3s;
+  }
+  .editor { background: var(--bg); padding: 16px 24px; font-family: var(--mono); font-size: 13px; line-height: 1.6; }
+  .viewer { display: grid; grid-template-rows: auto auto auto 1fr auto; background: var(--bg); }
+
+  /* Editor lines */
+  .ln { display: grid; grid-template-columns: 30px 1fr; gap: 16px; }
+  .ln .num { color: var(--dim); text-align: right; }
+  .ln .code { color: var(--fg); }
+  .kw { color: #c586c0; }
+  .ty { color: #4ec9b0; }
+  .name { color: #9cdcfe; }
+  .num-lit { color: #b5cea8; }
+  .str { color: #ce9178; }
+  .com { color: #6a9955; font-style: italic; }
+  body.light .kw { color: #af00db; }
+  body.light .ty { color: #267f99; }
+  body.light .name { color: #001080; }
+  body.light .num-lit { color: #098658; }
+  body.light .str { color: #a31515; }
+  body.light .com { color: #008000; }
+
+  /* Inlay hint */
+  .hint { color: var(--dim); font-style: italic; opacity: 0.65; }
+
+  /* Editor flash on click */
+  .ln.flash .code { background: rgba(74,158,255,0.2); animation: fade 0.6s; }
+  @keyframes fade { 0%{opacity:1;} 100%{background:transparent;} }
+
+  /* Hover popover */
+  .hover-pop {
+    position: absolute; background: var(--panel); border: 1px solid var(--border);
+    padding: 8px 12px; border-radius: 4px; font-size: 12px; line-height: 1.5;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.4); z-index: 10;
+    opacity: 0; pointer-events: none; transition: opacity 0.2s;
+    min-width: 220px;
+  }
+  .hover-pop.show { opacity: 1; }
+  .hover-pop b { color: var(--accent); }
+  .hover-pop .muted { color: var(--dim); }
+
+  /* VIEWER */
+  .vw-tabs { display: flex; background: var(--chrome); border-bottom: 1px solid var(--border); min-height: 36px; }
+  .vw-tab {
+    padding: 9px 16px; font-size: 13px; color: var(--dim); cursor: pointer;
+    border-right: 1px solid var(--border); white-space: nowrap;
+  }
+  .vw-tab.active { color: var(--fg); background: var(--bg); border-bottom: 2px solid var(--accent); margin-bottom: -1px; }
+
+  .vw-filter { padding: 6px 12px; background: var(--panel); border-bottom: 1px solid var(--border); font-size: 12px; color: var(--dim); }
+  .vw-filter input { background: var(--bg); color: var(--fg); border: 1px solid var(--border); padding: 4px 8px; font-size: 12px; border-radius: 2px; width: 100%; }
+
+  .vw-tree { padding: 4px 0; overflow: auto; font-family: var(--mono); font-size: 13px; }
+  .vw-row {
+    display: grid; grid-template-columns: 18px minmax(0, auto) 1fr auto;
+    column-gap: 10px; align-items: center;
+    padding: 2px 12px 2px 8px; min-height: 22px;
+    border-left: 2px solid transparent;
+  }
+  .vw-row.indent-1 { padding-left: 22px; }
+  .vw-row.indent-2 { padding-left: 36px; }
+  .vw-row.selected { background: var(--selected); border-left-color: var(--accent); }
+  .vw-row .chev { color: var(--dim); opacity: 0.6; font-size: 9px; }
+  .vw-row .addr { color: var(--dim); font-size: 11.5px; white-space: nowrap; }
+  .vw-row .nm { font-weight: 500; }
+  .vw-row.container .nm { color: var(--accent); }
+  .vw-row .kind {
+    color: var(--dim); font-family: var(--sans); font-size: 9.5px;
+    text-transform: uppercase; letter-spacing: 0.06em;
+    background: var(--chrome); padding: 0 6px; border-radius: 8px;
+    border: 1px solid var(--border); line-height: 14px;
+  }
+  .vw-row.reg .kind { background: transparent; border: 0; padding: 0; color: var(--dim); }
+
+  /* Detail */
+  .vw-detail { background: var(--panel); border-top: 1px solid var(--border);
+                padding: 14px 16px; font-family: var(--sans); }
+  .vw-detail h2 { margin: 0 0 4px; font-size: 16px; color: var(--fg); }
+  .vw-detail .sub { color: var(--dim); font-size: 12px; margin-bottom: 12px; }
+  .vw-meta { display: grid; grid-template-columns: auto 1fr auto 1fr; gap: 4px 12px;
+              font-family: var(--mono); font-size: 11px; margin-bottom: 14px; }
+  .vw-meta .k { color: var(--dim); }
+  .vw-meta .v { color: var(--fg); }
+
+  /* Bit grid */
+  .bg { display: flex; flex-direction: column; gap: 6px; margin: 10px 0 14px; }
+  .bg-row { display: flex; flex-direction: column; }
+  .bg-bits { display: grid; column-gap: 1px; font-family: var(--mono); font-size: 9px; color: var(--dim); margin-bottom: 2px; text-align: center; }
+  .bg-bit { min-width: 0; overflow: hidden; }
+  .bg-cells { display: grid; column-gap: 1px; }
+  .bg-cell { min-height: 36px; padding: 4px; display: flex; align-items: center; justify-content: center;
+              background: var(--chrome); border-radius: 2px; font-family: var(--mono); font-size: 11px; font-weight: 600;
+              text-align: center; line-height: 1.2; }
+  .bg-cell.acc-rw { background: rgba(111,185,143,0.4); }
+  .bg-cell.acc-ro { background: rgba(138,166,184,0.4); }
+  .bg-cell.acc-w1c { background: rgba(215,168,90,0.4); }
+  .bg-cell.reserved { background: rgba(120,120,120,0.18); color: var(--dim); }
+
+  /* Field rows */
+  .fields-title { font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: 0.06em; margin: 14px 0 6px; }
+  .field { display: grid; grid-template-columns: 60px auto 60px 70px 1fr;
+           gap: 10px; padding: 4px 0; border-bottom: 1px dotted #2a2a2a;
+           font-family: var(--mono); font-size: 12px; align-items: baseline; }
+  body.light .field { border-bottom-color: #e0e0e0; }
+  .pill { display: inline-block; padding: 0 6px; border-radius: 2px; font-size: 10px; line-height: 16px; color: #1a1a1a; font-weight: 500; }
+  .pill.rw { background: var(--acc-rw); }
+  .pill.ro { background: var(--acc-ro); }
+  .pill.w1c { background: var(--acc-w1c); }
+  .tag {
+    display: inline-block; padding: 0 6px; font-size: 9.5px; line-height: 15px;
+    letter-spacing: 0.04em; text-transform: lowercase; border-radius: 8px;
+    font-family: var(--sans); font-weight: 500;
+  }
+  .tag.counter { color: var(--acc-rw); background: rgba(111,185,143,0.16); }
+  .tag.intr { color: var(--warning); background: rgba(215,168,90,0.18); }
+
+  /* Status bar simulating the bottom strip */
+  .vw-status { background: var(--chrome); padding: 4px 12px; font-size: 11px; color: var(--dim); border-top: 1px solid var(--border); }
+
+  /* Cursor + click ring */
+  .cursor {
+    position: fixed; z-index: 99; width: 14px; height: 14px;
+    background: rgba(255,255,255,0.85); border: 1px solid #000;
+    border-radius: 50%; pointer-events: none;
+    transition: top 0.6s cubic-bezier(.4,0,.2,1), left 0.6s cubic-bezier(.4,0,.2,1);
+  }
+  .cursor.click {
+    animation: ring 0.4s;
+  }
+  @keyframes ring {
+    0%   { box-shadow: 0 0 0 0 rgba(74,158,255,0.7); }
+    100% { box-shadow: 0 0 0 14px rgba(74,158,255,0); }
+  }
+
+  /* Caption overlay */
+  .caption {
+    position: fixed; bottom: 8%; left: 50%; transform: translateX(-50%);
+    background: rgba(0,0,0,0.78); color: white; padding: 10px 22px;
+    border-radius: 24px; font-size: 14px; font-weight: 500;
+    opacity: 0; transition: opacity 0.3s; z-index: 100;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+  }
+  .caption.show { opacity: 1; }
+</style>
+</head><body>
+
+<div class="stage">
+
+  <!-- EDITOR -->
+  <div class="editor" id="editor">
+    <div class="ln" id="L1"><span class="num">56</span><span class="code"><span class="kw">reg</span> <span class="ty">my_counter_t</span> {</span></div>
+    <div class="ln"><span class="num">57</span><span class="code">    <span class="str">name</span> = <span class="str">"Packet counter"</span>;</span></div>
+    <div class="ln"><span class="num">58</span><span class="code">    <span class="kw">field</span> {</span></div>
+    <div class="ln"><span class="num">59</span><span class="code">        sw = rw; hw = r;</span></div>
+    <div class="ln"><span class="num">60</span><span class="code">        counter; incr = pkt_rx_pulse;</span></div>
+    <div class="ln" id="LCount"><span class="num">61</span><span class="code">    } <span class="name">count</span>[31:0] = 0;</span></div>
+    <div class="ln"><span class="num">62</span><span class="code">};</span></div>
+    <div class="ln"><span class="num"></span><span class="code"></span></div>
+    <div class="ln" id="LTop"><span class="num">120</span><span class="code"><span class="kw">addrmap</span> <span class="ty">top</span> { <span class="hint">  → 0x0000_0000</span></span></div>
+    <div class="ln"><span class="num">121</span><span class="code">    <span class="ty">my_counter_t</span> <span class="name">rx_count</span> @ 0xFC; <span class="hint">  → 0x0000_00FC</span></span></div>
+    <div class="ln" id="LLCR"><span class="num">122</span><span class="code">    <span class="ty">uart_lcr_t</span> <span class="name">LCR</span> @ 0x300; <span class="hint">  → 0x0000_0300</span></span></div>
+    <div class="ln"><span class="num">123</span><span class="code">    <span class="ty">link_status_block_t</span> <span class="name">link_a</span> @ 0x100; <span class="hint">  → 0x0000_0100</span></span></div>
+    <div class="ln"><span class="num">124</span><span class="code">    <span class="ty">link_status_block_t</span> <span class="name">link_b</span> @ 0x200; <span class="hint">  → 0x0000_0200</span></span></div>
+    <div class="ln"><span class="num">125</span><span class="code">};</span></div>
+
+    <div class="hover-pop" id="hover" style="left: 60px; top: 100px;">
+      <b>field</b> <code>count [31:0]</code><br>
+      <span class="muted">access:</span> rw<br>
+      <span class="muted">reset:</span> 0x00000000<br>
+      <span class="muted">tags:</span> <span class="tag counter" style="font-size: 9px;">counter</span>
+    </div>
+  </div>
+
+  <!-- VIEWER -->
+  <div class="viewer">
+    <div class="vw-tabs" id="tabs">
+      <div class="vw-tab active" data-tab="top">top</div>
+      <div class="vw-tab" data-tab="bridge">demo_bridge</div>
+      <div class="vw-tab" data-tab="dpa">dpa_demo</div>
+    </div>
+    <div class="vw-filter">
+      <input type="text" placeholder="Filter (matches name, address, or field name)…" disabled>
+    </div>
+    <div class="vw-tree" id="tree">
+      <div class="vw-row container" data-key="top">
+        <span class="chev">▾</span><span class="addr">0x0000_0000</span><span class="nm">top</span><span class="kind">addrmap</span>
+      </div>
+      <div class="vw-row reg indent-1" data-key="rx_count">
+        <span class="chev"></span><span class="addr">0x0000_00FC</span><span class="nm">rx_count</span><span class="kind">RW</span>
+      </div>
+      <div class="vw-row reg indent-1 selected" data-key="LCR" id="row-lcr">
+        <span class="chev"></span><span class="addr">0x0000_0300</span><span class="nm">LCR</span><span class="kind">RW</span>
+      </div>
+      <div class="vw-row container indent-1" data-key="link_a">
+        <span class="chev">▾</span><span class="addr">0x0000_0100</span><span class="nm">link_a</span><span class="kind">regfile</span>
+      </div>
+      <div class="vw-row reg indent-2" data-key="LINK_STAT_a">
+        <span class="chev"></span><span class="addr">0x0000_0100</span><span class="nm">LINK_STAT</span><span class="kind">RO</span>
+      </div>
+      <div class="vw-row reg indent-2" data-key="LINK_STAT_CLR_a">
+        <span class="chev"></span><span class="addr">0x0000_0104</span><span class="nm">LINK_STAT_CLR</span><span class="kind">RO</span>
+      </div>
+      <div class="vw-row container indent-1" data-key="link_b">
+        <span class="chev">▾</span><span class="addr">0x0000_0200</span><span class="nm">link_b</span><span class="kind">regfile</span>
+      </div>
+    </div>
+    <div class="vw-detail">
+      <h2>LCR</h2>
+      <div class="sub">top.LCR · uart_lcr_t · @ 0x0000_0300</div>
+      <div class="vw-meta">
+        <span class="k">Address</span><span class="v">0x0000_0300</span>
+        <span class="k">Width</span><span class="v">32</span>
+        <span class="k">Reset</span><span class="v">0x0000_1010</span>
+        <span class="k">Access</span><span class="v">RW</span>
+      </div>
+      <div class="bg">
+        <div class="bg-row">
+          <div class="bg-bits" style="grid-template-columns: repeat(16, 1fr);">
+            <div class="bg-bit">31</div><div class="bg-bit">30</div><div class="bg-bit">29</div><div class="bg-bit">28</div>
+            <div class="bg-bit">27</div><div class="bg-bit">26</div><div class="bg-bit">25</div><div class="bg-bit">24</div>
+            <div class="bg-bit">23</div><div class="bg-bit">22</div><div class="bg-bit">21</div><div class="bg-bit">20</div>
+            <div class="bg-bit">19</div><div class="bg-bit">18</div><div class="bg-bit">17</div><div class="bg-bit">16</div>
+          </div>
+          <div class="bg-cells" style="grid-template-columns: repeat(16, 1fr);">
+            <div class="bg-cell reserved" style="grid-column: span 15;">—</div>
+            <div class="bg-cell acc-rw">eight_bit</div>
+          </div>
+        </div>
+        <div class="bg-row">
+          <div class="bg-bits" style="grid-template-columns: repeat(16, 1fr);">
+            <div class="bg-bit">15</div><div class="bg-bit">14</div><div class="bg-bit">13</div><div class="bg-bit">12</div>
+            <div class="bg-bit">11</div><div class="bg-bit">10</div><div class="bg-bit">9</div><div class="bg-bit">8</div>
+            <div class="bg-bit">7</div><div class="bg-bit">6</div><div class="bg-bit">5</div><div class="bg-bit">4</div>
+            <div class="bg-bit">3</div><div class="bg-bit">2</div><div class="bg-bit">1</div><div class="bg-bit">0</div>
+          </div>
+          <div class="bg-cells" style="grid-template-columns: repeat(16, 1fr);">
+            <div class="bg-cell acc-rw" style="grid-column: span 8;">div</div>
+            <div class="bg-cell reserved" style="grid-column: span 6;">—</div>
+            <div class="bg-cell acc-rw" style="grid-column: span 2;">baud</div>
+          </div>
+        </div>
+      </div>
+      <div class="fields-title">Bit fields</div>
+      <div class="field"><b>[1:0]</b><b>baud</b><span class="pill rw">RW</span><span>0x0</span><span>Baud rate selector</span></div>
+      <div class="field"><b>[15:8]</b><b>div</b><span class="pill rw">RW</span><span>0x10</span><span>Manual divisor</span></div>
+      <div class="field"><b>[16:16]</b><b>eight_bit</b><span class="pill rw">RW</span><span>0x1</span><span>1 = 8N1, 0 = 7N1</span></div>
+    </div>
+    <div class="vw-status">
+      <span style="margin-right: 16px;">$(circuit-board) 9 regs · top</span>
+      <span style="color: var(--accent);">live</span>
+    </div>
+  </div>
+
+</div>
+
+<div class="cursor" id="cursor" style="top: 50%; left: 25%;"></div>
+<div class="caption" id="caption"></div>
+
+<script>
+const cursor = document.getElementById('cursor');
+const caption = document.getElementById('caption');
+const hover = document.getElementById('hover');
+
+function moveTo(x, y) {
+  cursor.style.left = x + 'px';
+  cursor.style.top = y + 'px';
+}
+function click() {
+  cursor.classList.add('click');
+  setTimeout(() => cursor.classList.remove('click'), 400);
+}
+function showCaption(text) {
+  caption.textContent = text;
+  caption.classList.add('show');
+}
+function hideCaption() {
+  caption.classList.remove('show');
+}
+
+const W = window.innerWidth, H = window.innerHeight;
+const editorRect = () => document.getElementById('editor').getBoundingClientRect();
+const treeRect = () => document.getElementById('tree').getBoundingClientRect();
+
+async function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+async function play() {
+  // Loop forever for the live preview
+  while (true) {
+    // 0–3 s: cursor on editor, show caption
+    moveTo(W * 0.25, H * 0.65);
+    showCaption('Live SystemRDL diagnostics + memory map for VSCode');
+    await sleep(2500);
+    hideCaption();
+
+    // 3–5 s: click LCR row in tree
+    await sleep(500);
+    const lcrRow = document.getElementById('row-lcr');
+    const r = lcrRow.getBoundingClientRect();
+    moveTo(r.left + 100, r.top + 11);
+    await sleep(700);
+    click();
+    showCaption('Click any register → editor jumps');
+    await sleep(2500);
+    hideCaption();
+
+    // 5–10 s: hover on count field in editor
+    moveTo(W * 0.18, H * 0.34);
+    await sleep(700);
+    hover.style.left = (W * 0.18 + 10) + 'px';
+    hover.style.top = (H * 0.34 + 10) + 'px';
+    hover.classList.add('show');
+    showCaption('Hover any field → resolved address, access, reset, tags');
+    await sleep(3500);
+    hover.classList.remove('show');
+    hideCaption();
+
+    // 10–13 s: theme switch
+    document.body.classList.toggle('light');
+    showCaption('Theme follows your VSCode color theme');
+    await sleep(3000);
+    hideCaption();
+
+    // 13–18 s: tab switch + decoder spotlight
+    moveTo(W * 0.62, 22);
+    await sleep(700);
+    click();
+    document.querySelectorAll('.vw-tab').forEach(t => t.classList.remove('active'));
+    document.querySelector('.vw-tab[data-tab="bridge"]').classList.add('active');
+    showCaption('Multi-tab: one tab per top-level addrmap');
+    await sleep(2500);
+    hideCaption();
+
+    // Reset for next loop
+    document.querySelectorAll('.vw-tab').forEach(t => t.classList.remove('active'));
+    document.querySelector('.vw-tab[data-tab="top"]').classList.add('active');
+    document.body.classList.remove('light');
+    await sleep(800);
+  }
+}
+play();
+</script>
+</body></html>
