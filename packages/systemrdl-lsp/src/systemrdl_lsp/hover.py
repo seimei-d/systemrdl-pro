@@ -24,6 +24,27 @@ def _format_hex(value: int, width_hex_chars: int = 8) -> str:
     return f"0x{value:0{width_hex_chars}X}"
 
 
+def _literal_value(value: Any) -> Any:
+    """Unwrap a systemrdl `StringLiteral` (or any other AST literal) to its
+    Python value. Plain strings/ints/etc pass through unchanged. Returns
+    None for None.
+
+    Component-level `comp.properties` (and user-property `default`) hold
+    AST-literal nodes, not raw Python values. Without this unwrap, hover
+    prints `<systemrdl.ast.literals.StringLiteral object at 0x…>`.
+    """
+    if value is None:
+        return None
+    if hasattr(value, "get_value"):
+        try:
+            return value.get_value()
+        except Exception:
+            pass
+    if hasattr(value, "val"):
+        return value.val
+    return value
+
+
 def _format_parameter(p: Any) -> str:
     """Render a Parameter object as `NAME` for the type signature line."""
     return getattr(p, "name", "?") or "?"
@@ -202,8 +223,11 @@ def _hover_for_word(word: str, roots: list[RootNode]) -> str | None:
                 _format_parameter(p) for p in params
             ) + ")"
         out = [f"**{kind}** `{word}{param_str}`"]
-        display_name = props.get("name")
-        desc = props.get("desc")
+        # Component property values are AST literals (`StringLiteral` etc),
+        # not raw Python strings. Unwrap before printing or hover shows
+        # `<systemrdl.ast.literals.StringLiteral object at 0x...>`.
+        display_name = _literal_value(props.get("name"))
+        desc = _literal_value(props.get("desc"))
         if display_name:
             out.append("")
             out.append(f"**{display_name}**")
@@ -233,7 +257,7 @@ def _hover_for_word(word: str, roots: list[RootNode]) -> str | None:
         kinds = ", ".join(sorted(c.__name__.lower() for c in bindable)) or "any"
         valid = getattr(user_prop, "valid_type", None)
         valid_name = getattr(valid, "__name__", str(valid)) if valid else "any"
-        default = getattr(user_prop, "default", None)
+        default = _literal_value(getattr(user_prop, "default", None))
         out_lines = [f"**property** `{word}` _(user-defined)_", ""]
         out_lines.append(f"- **type**: `{valid_name}`")
         out_lines.append(f"- **bindable to**: {kinds}")

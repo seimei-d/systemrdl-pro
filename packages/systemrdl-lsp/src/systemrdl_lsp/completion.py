@@ -282,8 +282,17 @@ def _completion_items_for_types(roots: list[RootNode]) -> list[CompletionItem]:
     for name, comp in defs.items():
         kind_label = type(comp).__name__.lower()
         props = getattr(comp, "properties", {}) or {}
-        display_name = props.get("name")
-        desc = props.get("desc")
+        # Unwrap AST literals — `comp.properties` values are systemrdl
+        # `StringLiteral`s, not raw strings, and printing them directly
+        # leaks Python repr.
+        raw_name = props.get("name")
+        raw_desc = props.get("desc")
+        display_name = (
+            raw_name.get_value() if hasattr(raw_name, "get_value") else raw_name
+        ) if raw_name is not None else None
+        desc = (
+            raw_desc.get_value() if hasattr(raw_desc, "get_value") else raw_desc
+        ) if raw_desc is not None else None
         doc_lines: list[str] = []
         if display_name:
             doc_lines.append(f"**{display_name}**")

@@ -861,7 +861,7 @@ def test_hover_works_on_field_inside_reused_reg_type(tmp_path):
     _msgs, roots, tmp = _compile_text(rdl_path.as_uri(), rdl)
     try:
         # Field declaration `} enable[0:0] = 0;` is on line 2 (0-based 1).
-        # Even though my_status_t is reused 3×, hover on the field should
+        # Even though my_status_t is reused three times, hover on the field should
         # work — fields are exempt from the reused-type-body filter.
         node = _node_at_position(roots, 1, 14)  # cursor on `enable`
         assert node is not None, "field hover should work despite reused container"
