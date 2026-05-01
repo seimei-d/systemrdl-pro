@@ -1,0 +1,31 @@
+// Minimal enum + encode binding demo.
+//
+// Open in the Memory Map viewer and click `STATE` in the tree → the Detail
+// panel shows the value/name/desc table for `power_state` inside the field
+// row. F12 on `power_state` jumps here. Hover on a value (e.g. `RUN`)
+// inside the enum body shows the enum entry.
+
+enum power_state {
+    OFF        = 0  { desc = "Power gated, no state retained."; };
+    SLEEP      = 1  { desc = "Clocks gated, state retained."; };
+    IDLE       = 2  { desc = "Clocks running, no traffic."; };
+    RUN        = 3  { desc = "Active, processing transactions."; };
+    DEGRADED   = 4  { desc = "Running with reduced features (e.g. thermal)."; };
+};
+
+addrmap pmu {
+    name = "Power Management Unit";
+
+    reg {
+        name = "Current power state";
+        field {
+            sw = r; hw = w;
+            encode = power_state;
+            desc = "Current operating mode of the IP block.";
+        } STATE[2:0] = 0;
+        field {
+            sw = rw; hw = r;
+            desc = "1 = state-change interrupt asserted.";
+        } STATE_IRQ[3:3] = 0;
+    } PSTATE @ 0x0;
+};

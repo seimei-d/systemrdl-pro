@@ -1,0 +1,266 @@
+// SystemRDL 2.0 feature showcase — exercises every construct the LSP/viewer
+// recognises. Open this file and try:
+//
+// • Hover any keyword/property/value (`bridge`, `alias`, `ispresent`, `encode`)
+// • F12 / Ctrl-click on a type name (`my_counter_t`, `my_enum`)
+// • F12 on a path expression (e.g. `top.uart.LCR.div`)
+// • Look at the Memory Map viewer for the multi-tab strip
+// • Click a register → editor jumps; click an addrmap → also jumps
+// • Counter/interrupt badges (◷ / ⚡) on field rows in Detail
+// • Encode-enum table inside the field row when `encode` is set
+// • Split-access banner on the `WIDE_REG` register
+// • Try the binary decoder in Detail (paste 0xDEAD_BEEF)
+// • Right-click any tree row for Copy Name / Address / Type / Reveal
+//
+// Property declarations come first so types defined later can reference them.
+
+// ─── User-defined property ──────────────────────────────────────────────────
+//
+// Vendor packs often extend SystemRDL with custom attributes. The LSP picks
+// these up via env.property_rules.user_properties; hover on `vendor_label`
+// anywhere in the file shows the type/bindable list.
+property vendor_label {
+    type = string;
+    component = field | reg;
+    default = "unspecified";
+};
+
+property safety_critical {
+    type = boolean;
+    component = reg;
+    default = false;
+};
+
+// ─── Enums for `encode = …` field bindings ─────────────────────────────────
+//
+// Hover an `encode` reference (e.g. `encode = baud_mode`) to jump to the
+// declaration. The Detail panel renders the value/name/desc table inside
+// the field row.
+enum baud_mode {
+    BAUD_9600   = 0  { desc = "Standard 9600 baud."; };
+    BAUD_19200  = 1  { desc = "19.2 kbaud."; };
+    BAUD_115200 = 2  { desc = "115.2 kbaud — typical default."; };
+    BAUD_USER   = 3  { desc = "Custom divisor; software writes DIV directly."; };
+};
+
+enum link_state {
+    LINK_DOWN     = 0;
+    LINK_TRAINING = 1;
+    LINK_UP       = 2;
+    LINK_ERROR    = 3;
+};
+
+// ─── Signals (for resetsignal / incr / decr cross-references) ──────────────
+//
+// signal {…} my_rst; declares a reset signal. F12 on `my_rst` later in the
+// file jumps to this line via the instance-name fallback.
+signal { activehigh; sync; } global_rst;
+signal { activehigh; async; } pkt_rx_pulse;
+
+// ─── Parametrized type ─────────────────────────────────────────────────────
+//
+// Hover on `parametrized_reg` shows the parameter list; hover on an instance
+// shows the resolved value (e.g. `parametrized_reg #(WIDTH=16)`).
+reg parametrized_reg #(longint unsigned WIDTH = 32) {
+    name = "Parametrized register";
+    regwidth = WIDTH;
+    field { sw=rw; hw=r; } payload[WIDTH-1:0] = 0;
+};
+
+// ─── Counter field type ────────────────────────────────────────────────────
+//
+// Field with `counter` property gets the ◷ badge in BitGrid + Detail. The
+// `incr` signal cross-references the global signal above.
+reg my_counter_t {
+    name = "Packet counter";
+    desc = "Increments on `pkt_rx_pulse`. Saturates rather than wrapping.";
+    field {
+        sw = rw; hw = r;
+        counter;
+        incr = pkt_rx_pulse;
+        incrsaturate;
+        desc = "Saturating up-counter.";
+    } count[31:0] = 0;
+};
+
+// ─── Interrupt field type ──────────────────────────────────────────────────
+//
+// Fields with `intr` get the ⚡ badge.
+reg irq_status_t {
+    name = "Interrupt status";
+    field {
+        sw = rw; hw = w;
+        intr;
+        desc = "Set on link state change. Software writes 1 to clear.";
+        onwrite = woclr;
+    } link_changed[0:0] = 0;
+    field {
+        sw = rw; hw = w;
+        intr;
+        sticky;
+        desc = "Latches a CRC error until software clears.";
+        onwrite = woclr;
+    } crc_err[1:1] = 0;
+};
+
+// ─── Register with `encode` enum binding ───────────────────────────────────
+reg uart_lcr_t {
+    name = "Line Control Register";
+    field {
+        sw = rw; hw = r;
+        encode = baud_mode;
+        desc = "Baud rate selector — see `baud_mode` enum.";
+    } baud[1:0] = 0;
+    field {
+        sw = rw; hw = r;
+        desc = "Manual divisor; only used when baud == BAUD_USER.";
+        vendor_label = "div_lookup";
+    } div[15:8] = 0x10;
+    field {
+        sw = rw; hw = r;
+        desc = "1 = 8N1, 0 = 7N1.";
+    } eight_bit[16:16] = 1;
+};
+
+// ─── Register using a user-defined property ────────────────────────────────
+reg secure_ctrl_t {
+    name = "Secure control";
+    safety_critical = true;
+    field {
+        sw = rw; hw = r;
+        vendor_label = "asil-d";
+        desc = "Master enable.";
+    } enable[0:0] = 0;
+    field {
+        sw = w; hw = r;
+        onwrite = woclr;
+        desc = "Write 1 to clear the latched fault.";
+    } clear_fault[1:1] = 0;
+};
+
+// ─── Split-access register ─────────────────────────────────────────────────
+//
+// `accesswidth` < `regwidth` triggers the split-access banner in Detail.
+reg wide_reg_t {
+    name = "Wide register (split access)";
+    regwidth = 32;
+    accesswidth = 8;  // software touches it as 4 separate bytes
+    field { sw=rw; hw=r; } byte0[7:0]   = 0;
+    field { sw=rw; hw=r; } byte1[15:8]  = 0;
+    field { sw=rw; hw=r; } byte2[23:16] = 0;
+    field { sw=rw; hw=r; } byte3[31:24] = 0;
+};
+
+// ─── Default-property assignment + alias register ─────────────────────────
+//
+// Inside the regfile, `default sw = r;` propagates to fields below it that
+// don't override `sw`. Hover on `LINK_STAT.link` shows "(← default at line N)".
+//
+// `alias` (clause 10.5) — LINK_STAT_CLR aliases LINK_STAT at a different
+// address: same storage, software writes propagate to the original.
+// Syntax: `alias <orig_inst> <type> <alias_inst> @ <addr>`.
+reg link_stat_t {
+    field {
+        sw = r; hw = w;
+        encode = link_state;
+        desc = "Current link state.";
+    } link[1:0] = 0;
+    field {
+        sw = r; hw = w;
+        sticky;
+        desc = "Latches errors; software-clear via STATUS_CLR.";
+    } err_latch[2:2] = 0;
+};
+
+regfile link_status_block_t {
+    default sw = r;
+    default hw = w;
+
+    link_stat_t LINK_STAT @ 0x0;
+    alias LINK_STAT link_stat_t LINK_STAT_CLR @ 0x4;
+};
+
+// ─── `bridge` addrmap (clause 9.2) ─────────────────────────────────────────
+//
+// Bridge addrmap — RTL backends use this as a synthesis hint. Must contain
+// only sub-addrmaps and at least 2.
+addrmap soc_bridge {
+    name = "SoC bus bridge";
+    desc = "Cross-bridges fabric A → fabric B at the SoC top.";
+    bridge;
+    addrmap {
+        name = "Fabric A side";
+        secure_ctrl_t CTRL @ 0;
+        irq_status_t  IRQ  @ 0x4;
+    } side_a @ 0x0000;
+
+    addrmap {
+        name = "Fabric B side";
+        my_counter_t  rx_count @ 0;
+        my_counter_t  tx_count @ 0x4;
+    } side_b @ 0x1000;
+};
+
+// ─── Conditional elaboration via `ispresent` ───────────────────────────────
+//
+// `ispresent = false;` removes the component from the elaborated tree
+// (clause 9.5). Try toggling and reloading the viewer — `optional_block`
+// disappears entirely.
+addrmap top {
+    name = "Top of demo SoC";
+    desc = "Counters, link blocks, UART, parametrized reg, split-access reg.";
+
+    // Single counter instance (named type re-used by the bridge below too).
+    my_counter_t rx_count @ 0xFC;
+
+    // Two instances of link_status_block_t — internal field lines on
+    // LINK_STAT/LINK_STAT_CLR are reused-type bodies, so the LSP correctly
+    // skips inlay-hint addresses on those internal lines.
+    link_status_block_t link_a @ 0x100;
+    link_status_block_t link_b @ 0x200;
+
+    uart_lcr_t LCR @ 0x300;
+    secure_ctrl_t CTRL @ 0x400;
+
+    // Parametrized type, two instances with different widths.
+    parametrized_reg #(.WIDTH(16)) PR16 @ 0x500;
+    parametrized_reg #(.WIDTH(8))  PR8  @ 0x504;
+
+    wide_reg_t WIDE_REG @ 0x600;
+
+    // ispresent — flip the literal to `false` and reload to watch the
+    // register disappear from the elaborated tree and the viewer.
+    reg {
+        ispresent = true;
+        field { sw=rw; hw=r; } enabled[0:0] = 1;
+    } optional_block @ 0x700;
+};
+
+// ─── `bridge` addrmap demo (clause 9.2) — separate top-level ───────────────
+//
+// Two top-level addrmaps in the same file → two tabs in the Memory Map
+// viewer. The bridge form requires only sub-addrmaps, at least two.
+addrmap demo_bridge {
+    name = "Demo bus bridge";
+    bridge;
+    addrmap fabric_a {
+        secure_ctrl_t CTRL    @ 0x0;
+        irq_status_t  IRQ     @ 0x4;
+    } side_a @ 0x0000;
+    addrmap fabric_b {
+        my_counter_t  rx_count @ 0x0;
+        my_counter_t  tx_count @ 0x4;
+    } side_b @ 0x1000;
+};
+
+// ─── Dynamic property assignment ───────────────────────────────────────────
+//
+// DPAs override a property on an existing instance from outside its body.
+// They live inside the parent addrmap's scope (SystemRDL spec restricts
+// root-scope DPAs to compile-time-resolved paths). Hover on `LCR.baud`
+// in the rewrite addrmap below shows "(← dynamic at line N)".
+addrmap dpa_demo {
+    name = "DPA demo";
+    uart_lcr_t LCR @ 0x0;
+    LCR.baud->vendor_label = "tooling-injected";
+};

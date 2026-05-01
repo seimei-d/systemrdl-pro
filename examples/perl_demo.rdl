@@ -1,0 +1,30 @@
+// SystemRDL Perl preprocessor demo (clause 16.3).
+//
+// systemrdl-compiler shells out to a real `perl` binary, so this file only
+// elaborates when `perl` is on PATH. The extension shows a one-time
+// "install Perl" notification when it sees `<%` markers without a `perl`
+// installation.
+//
+// Note the `<%=expr%>` form requires NO leading whitespace inside the
+// tags — `<%= $i %>` errors with "Invalid text found in Perl macro
+// expansion". Use `<%=$i%>` (or wrap in parens) instead.
+
+addrmap parametric_dma {
+    name = "Parametric DMA controller";
+    desc = "8 DMA channels generated via a Perl `for` loop.";
+
+<% for my $i (0..7) { %>
+    reg {
+        name = "DMA channel <%=$i%> control";
+        field { sw = rw; hw = r; } enable[0:0] = 0;
+        field { sw = rw; hw = r; } burst_size[7:1] = 0x10;
+        field { sw = r;  hw = w; } busy[8:8] = 0;
+    } CH<%=$i%>_CTRL @ <%=0x100+$i*0x10%>;
+
+    reg {
+        name = "DMA channel <%=$i%> status";
+        field { sw = r; hw = w; sticky; } done[0:0] = 0;
+        field { sw = r; hw = w; sticky; } error[1:1] = 0;
+    } CH<%=$i%>_STATUS @ <%=0x104+$i*0x10%>;
+<% } %>
+};

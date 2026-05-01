@@ -1,0 +1,29 @@
+// `alias` register demo (SystemRDL clause 10.5).
+//
+// An alias is a same-storage mirror at a different address. Software writes
+// to the alias propagate to the original. Useful for "write-1-to-clear"
+// mirrors of status registers without duplicating storage.
+//
+// Syntax: `alias <orig_inst> <type> <new_inst> @ <addr>;`
+
+reg irq_status_t {
+    name = "Interrupt status (latched)";
+    field {
+        sw = r; hw = w;
+        sticky;
+        desc = "Set on link change. Read-only here; cleared via the alias.";
+    } link_changed[0:0] = 0;
+    field {
+        sw = r; hw = w;
+        sticky;
+        desc = "Set on CRC error.";
+    } crc_err[1:1] = 0;
+};
+
+addrmap top {
+    name = "Alias demo";
+    desc = "STATUS at 0x0 is the canonical reg; STATUS_CLR at 0x4 is its alias.";
+
+    irq_status_t  STATUS     @ 0x0;
+    alias STATUS  irq_status_t  STATUS_CLR @ 0x4;
+};
