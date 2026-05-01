@@ -63,6 +63,7 @@ Powered by [`systemrdl-lsp`](https://pypi.org/project/systemrdl-lsp/) +
 | `systemrdl-pro.pythonPath` | _(empty — fallback chain)_ | Explicit Python interpreter path. |
 | `systemrdl-pro.includePaths` | `[]` | Directories searched by `` `include ``. Workspace-relative paths supported. |
 | `systemrdl-pro.includeVars` | `{}` | Map for `$VAR` / `${VAR}` substitution inside `` `include "..." `` paths. Falls back to `os.environ` for unknown names. |
+| `systemrdl-pro.perlSafeOpcodes` | `[]` | Override the Perl `Safe` opcode set. Empty = compiler default. Add `:base_io` to allow `print`-based codegen. See _Perl preprocessor_ below. |
 | `systemrdl-pro.trace.server` | `off` | LSP communication trace level: `off` / `messages` / `verbose`. |
 
 ## Commands
@@ -78,6 +79,41 @@ There's also a no-VSCode standalone viewer that serves the same UI in your
 browser — `bun rdl-viewer file.rdl` opens `http://localhost:5173/` with live
 fs.watch updates. See the [`rdl-viewer`](https://github.com/seimei-d/systemrdl-pro/tree/main/packages/rdl-viewer-cli)
 package.
+
+## Perl preprocessor
+
+`systemrdl-compiler` supports the SystemRDL 2.0 Perl preprocessor (clause 16.3)
+by shelling out to a real `perl` binary. When `perl` is on `PATH`, you can use
+`<% … %>` for control flow and `<%=expr%>` for inline expansion:
+
+```rdl
+<% for my $i (0..3) { %>
+reg ch_<%=$i%> @ <%= 0x100 + $i*4 %> { ... };
+<% } %>
+```
+
+**Gotcha — no leading whitespace inside `<%= %>`.** The compiler rejects
+`<%= $i %>` with _"Invalid text found in Perl macro expansion"_. Write
+`<%=$i%>` (or `<%= ($i) %>`) instead.
+
+If your buffer contains `<%` markers but `perl` is not on `PATH`, the
+extension shows a one-time warning so you don't hit a wall of cryptic
+diagnostics on every save. Install Perl from your package manager
+(`apt install perl`, `brew install perl`, etc.) — no LSP restart required.
+
+The compiler runs Perl inside a `Safe` compartment with a default opcode set
+that bans `print` and most I/O. If you need them for codegen
+(`<% print "..." %>`), extend the opcode list via
+`systemrdl-pro.perlSafeOpcodes`, e.g.:
+
+```jsonc
+"systemrdl-pro.perlSafeOpcodes": [
+  ":base_core", ":base_mem", ":base_loop", ":base_orig",
+  ":base_math", ":base_thread", ":filesys_read", ":sys_db",
+  ":load", ":base_io",
+  "sort", "tied", "pack", "unpack", "reset"
+]
+```
 
 ## Coexistence with `SystemRDL/vscode-systemrdl`
 

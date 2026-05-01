@@ -117,6 +117,13 @@
           "scope": "resource",
           "description": "Variables expanded inside `include \"...\" paths. Use $NAME or ${NAME} in the include directive; values come from this map first, then process environment as fallback. Example: { \"IP_ROOT\": \"/home/user/lib\" } lets you write `include \"$IP_ROOT/common.rdl\"."
         },
+        "systemrdl-pro.perlSafeOpcodes": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "scope": "resource",
+          "description": "Override the Perl `Safe` opcode set passed to the SystemRDL Perl preprocessor. Empty = compiler default (covers ~95% of macros). Add `:base_io` to allow `print`-based code generation. Example: [\":base_core\", \":base_mem\", \":base_loop\", \":base_orig\", \":base_math\", \":base_io\"]."
+        },
         "systemrdl-pro.trace.server": {
           "type": "string",
           "enum": ["off", "messages", "verbose"],

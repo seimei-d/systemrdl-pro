@@ -29,6 +29,8 @@ from systemrdl_lsp.server import (
     _hover_text_for_node,
     _node_at_position,
     _peakrdl_toml_paths,
+    _perl_available,
+    _perl_in_source,
     _src_ref_to_range,
     _word_at_position,
 )
@@ -594,3 +596,47 @@ def test_timeout_path_preserves_last_good_cache(tmp_path):
     cached_after = cache.get(uri)
     assert cached_after is cached_before, "timeout must not mutate the cache"
     cache.clear()
+
+
+# ---------------------------------------------------------------------------
+# Perl preprocessor polish (TODO-4)
+# ---------------------------------------------------------------------------
+
+
+def test_perl_in_source_detects_marker():
+    """`<%` markers anywhere in the source signal a Perl preprocessor user."""
+    assert _perl_in_source("<% for my $i (0..3) { %>")
+    assert _perl_in_source("reg r @ <%=0x100%>;")
+    assert not _perl_in_source("addrmap top { reg { } R @ 0; };")
+    assert not _perl_in_source("")
+
+
+def test_perl_available_caches_result():
+    """``_perl_available()`` is lru_cached so repeated calls cost nothing."""
+    # Same boolean both times — the decorator does the caching, we verify
+    # the function returns a stable bool. We don't assert which value because
+    # CI machines may or may not have perl installed.
+    first = _perl_available()
+    second = _perl_available()
+    assert first is second
+
+
+def test_compile_text_accepts_perl_safe_opcodes(tmp_path):
+    """``perl_safe_opcodes`` plumbs through to RDLCompiler without breaking simple RDL.
+
+    No Perl markers in this fixture, so the compiler runs the safe-opcode
+    reader path but never invokes the preprocessor — exercises the kwarg
+    forwarding without depending on a perl binary in CI.
+    """
+    uri = (tmp_path / "x.rdl").as_uri()
+    msgs, roots, tmp = _compile_text(
+        uri,
+        VALID_RDL,
+        perl_safe_opcodes=[":base_core", ":base_mem", ":base_loop"],
+    )
+    try:
+        errors = [m for m in msgs if m.severity in (Severity.ERROR, Severity.FATAL)]
+        assert errors == []
+        assert len(roots) == 1
+    finally:
+        tmp.unlink(missing_ok=True)

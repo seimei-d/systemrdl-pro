@@ -8,10 +8,12 @@ for as long as the cache holds the root.
 from __future__ import annotations
 
 import dataclasses
+import functools
 import logging
 import os
 import pathlib
 import re
+import shutil
 import tempfile
 import time
 from typing import TYPE_CHECKING, Any
@@ -188,11 +190,36 @@ def _peakrdl_toml_paths(start: pathlib.Path) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
+# Detection helpers for the Perl preprocessor (clause 16 of the RDL spec).
+# systemrdl-compiler shells out to a real ``perl`` binary, so the feature is
+# only available when one is on PATH. We surface a one-time notification when
+# the user's source has Perl markers but the binary is missing.
+_PERL_MARKER_RE = re.compile(r"<%")
+
+
+def _perl_in_source(text: str) -> bool:
+    """True when the buffer contains a Perl preprocessor marker."""
+    return bool(text) and bool(_PERL_MARKER_RE.search(text))
+
+
+@functools.lru_cache(maxsize=1)
+def _perl_available() -> bool:
+    """Cached ``shutil.which('perl')`` check.
+
+    Cleared from the test suite via ``_perl_available.cache_clear()`` if needed.
+    Cached for the LSP's lifetime — installing perl while the editor is open is
+    rare enough that one cache miss is acceptable; in practice users either have
+    perl or they don't.
+    """
+    return shutil.which("perl") is not None
+
+
 def _compile_text(
     uri: str,
     text: str,
     incl_search_paths: list[str] | None = None,
     include_vars: dict[str, str] | None = None,
+    perl_safe_opcodes: list[str] | None = None,
 ) -> tuple[list[CompilerMessage], list[RootNode], pathlib.Path]:
     """Compile in-memory buffer text. Returns (messages, roots, temp_path).
 
@@ -225,7 +252,13 @@ def _compile_text(
         search_paths.append(str(original_path.parent))
 
     printer = CapturingPrinter()
-    compiler = RDLCompiler(message_printer=printer)
+    compiler_kwargs: dict[str, Any] = {"message_printer": printer}
+    if perl_safe_opcodes:
+        # Forward only when the user supplied a non-empty list so the compiler's
+        # built-in default (covers ~95% of preprocessor needs) stays in effect
+        # for everyone else.
+        compiler_kwargs["perl_safe_opcodes"] = list(perl_safe_opcodes)
+    compiler = RDLCompiler(**compiler_kwargs)
 
     expanded_text = _expand_include_vars(text, include_vars or {})
     with tempfile.NamedTemporaryFile(

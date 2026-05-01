@@ -56,6 +56,8 @@ from .compile import (
     _elaborate,
     _expand_include_vars,
     _peakrdl_toml_paths,
+    _perl_available,
+    _perl_in_source,
     _SimpleRef,
 )
 from .completion import (
@@ -199,6 +201,14 @@ class ServerState:
     # URIs whose latest parse attempt failed but for which we still have a last-good
     # cache entry. The viewer renders a stale-bar when a URI is in this set (D7).
     stale_uris: set[str] = dataclasses.field(default_factory=set)
+    # Forwarded to RDLCompiler(perl_safe_opcodes=...). Empty list keeps the
+    # compiler's safe default. Power users adding `:base_io` for `print`-based
+    # codegen go through this setting.
+    perl_safe_opcodes: list[str] = dataclasses.field(default_factory=list)
+    # One-shot guard for the "Perl is not on PATH" notification. The diagnostic
+    # itself comes from systemrdl-compiler on every compile, so we only nag with
+    # the modal banner once per session.
+    perl_warning_shown: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -241,6 +251,35 @@ def build_server() -> LanguageServer:
                 state.stale_uris.add(uri)
         _publish_diagnostics(server, uri, messages)
 
+    def _check_perl_pre_flight(buffer_text: str) -> None:
+        """One-shot warning when source uses ``<%`` markers but ``perl`` is missing.
+
+        systemrdl-compiler still emits its own fatal diagnostic on every compile,
+        but a modal banner up front is much less confusing than a wall of "Perl
+        macro expansion failed" errors with no remediation hint.
+        """
+        if state.perl_warning_shown:
+            return
+        if not _perl_in_source(buffer_text):
+            return
+        if _perl_available():
+            return
+        state.perl_warning_shown = True
+        try:
+            from lsprotocol.types import MessageType, ShowMessageParams
+            server.window_show_message(
+                ShowMessageParams(
+                    type=MessageType.Warning,
+                    message=(
+                        "SystemRDL Perl preprocessor markers (`<% %>`) detected but "
+                        "`perl` is not on PATH. Install Perl to enable preprocessor "
+                        "expansion (clause 16.3 of the SystemRDL 2.0 spec)."
+                    ),
+                )
+            )
+        except Exception:
+            logger.debug("could not surface perl-missing notification", exc_info=True)
+
     async def _full_pass_async(uri: str, buffer_text: str | None) -> None:
         if buffer_text is None:
             try:
@@ -248,13 +287,21 @@ def build_server() -> LanguageServer:
             except (OSError, ValueError):
                 return
 
+        _check_perl_pre_flight(buffer_text)
+
         loop = asyncio.get_running_loop()
         # Run the synchronous compiler off the event loop so a pathological elaborate
         # can't block hover/cancel/etc. wait_for() can't actually kill the worker thread
         # on timeout, so we attach a cleanup callback that unlinks the orphan temp file
         # whenever the late result eventually arrives.
         fut: asyncio.Future = loop.run_in_executor(
-            None, _compile_text, uri, buffer_text, state.include_paths, state.include_vars
+            None,
+            _compile_text,
+            uri,
+            buffer_text,
+            state.include_paths,
+            state.include_vars,
+            state.perl_safe_opcodes,
         )
         try:
             messages, roots, tmp_path = await asyncio.wait_for(
@@ -327,8 +374,12 @@ def build_server() -> LanguageServer:
                     raw_vars = configs[0].get("includeVars") or {}
                     if isinstance(raw_vars, dict):
                         state.include_vars = {str(k): str(v) for k, v in raw_vars.items()}
+                    raw_opcodes = configs[0].get("perlSafeOpcodes") or []
+                    if isinstance(raw_opcodes, list):
+                        state.perl_safe_opcodes = [str(op) for op in raw_opcodes if op]
                     logger.info("includePaths from initial config: %s", state.include_paths)
                     logger.info("includeVars from initial config: %s", list(state.include_vars))
+                    logger.info("perlSafeOpcodes override: %s", state.perl_safe_opcodes)
             except Exception:
                 logger.debug("could not fetch initial workspace configuration", exc_info=True)
 
@@ -381,6 +432,9 @@ def build_server() -> LanguageServer:
                     raw_vars = configs[0].get("includeVars") or {}
                     if isinstance(raw_vars, dict):
                         state.include_vars = {str(k): str(v) for k, v in raw_vars.items()}
+                    raw_opcodes = configs[0].get("perlSafeOpcodes") or []
+                    if isinstance(raw_opcodes, list):
+                        state.perl_safe_opcodes = [str(op) for op in raw_opcodes if op]
             except Exception:
                 logger.debug("config refresh failed", exc_info=True)
 
