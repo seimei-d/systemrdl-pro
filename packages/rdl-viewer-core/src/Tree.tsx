@@ -48,6 +48,7 @@ type Props = {
   rows: FlatRow[];
   selectedKey: string | null;
   onSelectReg: (row: FlatRow & { kind: 'reg' }) => void;
+  onRevealContainer: (row: FlatRow & { kind: 'container' }) => void;
   onToggleCollapse: (key: string) => void;
   onContextMenu: (ev: React.MouseEvent, row: FlatRow) => void;
   filter: string;
@@ -56,7 +57,7 @@ type Props = {
 };
 
 export function Tree({
-  rows, selectedKey, onSelectReg, onToggleCollapse, onContextMenu,
+  rows, selectedKey, onSelectReg, onRevealContainer, onToggleCollapse, onContextMenu,
   filter, filterMatchCount, hasRoots,
 }: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -115,6 +116,7 @@ export function Tree({
               row={row}
               selected={selectedKey === row.key}
               onSelectReg={onSelectReg}
+              onRevealContainer={onRevealContainer}
               onToggleCollapse={onToggleCollapse}
               onContextMenu={onContextMenu}
             />
@@ -146,11 +148,14 @@ type RowProps = {
   row: FlatRow;
   selected: boolean;
   onSelectReg: (row: FlatRow & { kind: 'reg' }) => void;
+  onRevealContainer: (row: FlatRow & { kind: 'container' }) => void;
   onToggleCollapse: (key: string) => void;
   onContextMenu: (ev: React.MouseEvent, row: FlatRow) => void;
 };
 
-function TreeRow({ row, selected, onSelectReg, onToggleCollapse, onContextMenu }: RowProps) {
+function TreeRow({
+  row, selected, onSelectReg, onRevealContainer, onToggleCollapse, onContextMenu,
+}: RowProps) {
   const indent = row.depth > 0 ? `rdl-indent-${Math.min(row.depth, 3)}` : '';
   const cls = ['rdl-row', indent];
   if (row.kind === 'container') cls.push('container');
@@ -160,6 +165,10 @@ function TreeRow({ row, selected, onSelectReg, onToggleCollapse, onContextMenu }
   if (row.kind === 'container') {
     const node = row.node;
     const kindLabel = node.kind + (node.type ? ` (${node.type})` : '');
+    // Click on the row body (not the caret button) reveals the container's
+    // source in the host editor — same UX as register rows. Caret button
+    // keeps its own click handler with stopPropagation so it only collapses,
+    // never reveals.
     return (
       <div
         className={className}
@@ -167,7 +176,10 @@ function TreeRow({ row, selected, onSelectReg, onToggleCollapse, onContextMenu }
         aria-level={row.depth + 1}
         aria-expanded={row.expanded}
         data-key={row.key}
+        onClick={() => onRevealContainer(row)}
         onContextMenu={(e) => onContextMenu(e, row)}
+        title="Click to reveal in editor · use the chevron to collapse"
+        style={{ cursor: 'pointer' }}
       >
         <button
           type="button"

@@ -98,6 +98,13 @@ export function Viewer({ transport }: Props) {
     if (row.node.source && transport.reveal) transport.reveal(row.node.source);
   }, [transport]);
 
+  const revealContainer = useCallback((row: FlatRow & { kind: 'container' }) => {
+    // Containers (addrmap, regfile) — clicking the row body reveals the
+    // declaration in the editor. We don't change the register selection
+    // so the Detail panel keeps showing whatever reg was last picked.
+    if (row.node.source && transport.reveal) transport.reveal(row.node.source);
+  }, [transport]);
+
   // Cmd/Ctrl-F to focus filter (the input is already in the page; we just focus it).
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -234,6 +241,7 @@ export function Viewer({ transport }: Props) {
             rows={flatRows}
             selectedKey={selectedKey}
             onSelectReg={selectReg}
+            onRevealContainer={revealContainer}
             onToggleCollapse={toggleCollapse}
             onContextMenu={onContextMenu}
             filter={filter}
