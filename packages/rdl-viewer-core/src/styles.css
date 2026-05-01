@@ -176,7 +176,9 @@ html, body { margin: 0; padding: 0; background: var(--rdl-bg); color: var(--rdl-
 /* Bit grid: header row of bit indices, followed by a row of variable-width
    field cells that span via grid-column. Field name fits/ellipsises inside
    its actual span instead of clipping to one bit's worth of width. */
-.rdl-bitgrid { margin: 0 0 16px; max-width: 720px; }
+.rdl-bitgrid { margin: 0 0 16px; max-width: 720px;
+  display: flex; flex-direction: column; gap: 10px; }
+.rdl-bitgrid-row { display: flex; flex-direction: column; }
 .rdl-bitgrid-bits { display: grid; column-gap: 1px;
   font-family: var(--rdl-font-mono); font-size: 9px; color: var(--rdl-dim);
   margin-bottom: 2px; }

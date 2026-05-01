@@ -128,7 +128,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-SERVER_VERSION = "0.14.1"
+SERVER_VERSION = "0.14.2"
 
 
 def _iter_rdl_files(root: pathlib.Path, exclude_dirs: set[str]):
@@ -851,6 +851,7 @@ def build_server() -> LanguageServer:
         TEXT_DOCUMENT_SEMANTIC_TOKENS_FULL,
         SemanticTokens,
         SemanticTokensLegend,
+        SemanticTokensParams,
     )
 
     @server.feature(
@@ -860,24 +861,48 @@ def build_server() -> LanguageServer:
             token_modifiers=TOKEN_MODIFIERS,
         ),
     )
-    def _on_semantic_tokens(_ls: LanguageServer, params: Any) -> SemanticTokens:
+    def _on_semantic_tokens(_ls: LanguageServer, params: SemanticTokensParams) -> SemanticTokens:
         """Compute semantic tokens for the buffer.
 
-        Pure textual scan — works on broken files, doesn't depend on a
-        successful elaboration. The returned ``data`` is a flat int array per
-        the LSP wire format (delta-encoded by line + char).
+        Defensive on every level:
 
-        Defensive: any exception returns an empty token list so VSCode doesn't
-        retry on every keystroke (which manifests as full-editor lag — a
-        broken handler that throws gets re-invoked on every change).
+        - Typed ``params`` so pygls's cattrs converter deserialises the dict
+          into a real object (some pygls versions deliver semanticTokens
+          params as a raw dict if the handler accepts ``Any``).
+        - Both attribute and dict access on ``text_document.uri`` so a
+          deserialiser regression doesn't take the handler down.
+        - Wrapping try/except returns empty tokens on any failure. Without
+          this, VSCode retries the failing request on every keystroke and
+          the editor visibly lags as the larger the buffer the longer each
+          retry takes.
         """
         try:
-            uri = params.text_document.uri
+            uri: str | None = None
+            td = getattr(params, "text_document", None)
+            if td is not None:
+                uri = getattr(td, "uri", None)
+            if uri is None and isinstance(params, dict):
+                td_dict = params.get("textDocument") or params.get("text_document") or {}
+                uri = td_dict.get("uri") if isinstance(td_dict, dict) else None
+            if not uri:
+                logger.warning("semanticTokens/full: no uri in params (%r)", params)
+                return SemanticTokens(data=[])
             text = _read_buffer(uri)
             if text is None:
                 cached = state.cache.get(uri)
                 text = cached.text if cached is not None else ""
-            return SemanticTokens(data=_semantic_tokens_for_text(text))
+            data = _semantic_tokens_for_text(text)
+            # Sanity-check the encoding — pygls/cattrs may reject malformed
+            # arrays. Each token is exactly 5 ints; nothing else is valid.
+            if len(data) % 5 != 0:
+                logger.error(
+                    "semanticTokens/full: encoder produced %d ints (not a multiple of 5)",
+                    len(data),
+                )
+                return SemanticTokens(data=[])
+            # Force-cast to list[int] so cattrs sees a plain Python list,
+            # not a generator or numpy-ish container.
+            return SemanticTokens(data=[int(x) for x in data])
         except Exception:
             logger.exception("semanticTokens/full handler failed; returning empty")
             return SemanticTokens(data=[])
