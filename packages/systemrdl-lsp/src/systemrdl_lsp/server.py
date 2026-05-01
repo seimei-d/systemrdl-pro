@@ -56,6 +56,7 @@ from pygls.lsp.server import LanguageServer
 from systemrdl.messages import Severity
 
 from ._uri import _path_to_uri, _uri_to_path
+from .cache import DiskCache, make_key
 from .code_actions import _code_actions_for_range
 from .compile import (
     CachedElaboration,
@@ -132,8 +133,10 @@ from .serialize import (
     _serialize_field,
     _serialize_reg,
     _serialize_root,
+    _serialize_spine,
     _src_ref_to_dict,
     _unchanged_envelope,
+    expand_node,
 )
 
 if TYPE_CHECKING:
@@ -375,6 +378,15 @@ class ServerState:
     # surfaces this so big chip designs (multi-subsystem aggregates in the 10-25k+ register
     # range) can lift the 10s cap when their elaboration legitimately takes longer.
     elaboration_timeout_s: float = ELABORATION_TIMEOUT_SECONDS
+    # T1.4: lazy-tree capability gate. Set in INITIALIZED handler from
+    # client.capabilities.experimental.systemrdlLazyTree. When True the LSP
+    # serves spine envelopes (Reg.loadState='placeholder') and answers
+    # rdl/expandNode requests; when False it serves full trees as before.
+    lazy_supported: bool = False
+    # T1.4: on-disk cache for spine envelopes. Survives window reload; second
+    # window in a multi-root workspace shares the cache via content key.
+    # Constructed lazily by the build_server() helper so tests can swap it.
+    disk_cache: DiskCache = dataclasses.field(default_factory=DiskCache)
 
 
 # ---------------------------------------------------------------------------
@@ -610,6 +622,19 @@ def build_server() -> LanguageServer:
 
     @server.feature(INITIALIZED)
     def _on_initialized(_ls: LanguageServer, _params: InitializedParams) -> None:
+        # T1.4: detect lazy-tree client capability before answering any
+        # rdl/elaboratedTree request. The capability lives under
+        # `experimental.systemrdlLazyTree` per the design doc; clients that
+        # don't set it get the v0.1-shaped full tree (backward compat).
+        try:
+            caps = server.client_capabilities
+            exp = getattr(caps, "experimental", None)
+            if isinstance(exp, dict):
+                state.lazy_supported = bool(exp.get("systemrdlLazyTree", False))
+        except Exception:
+            logger.debug("could not read client capabilities", exc_info=True)
+        logger.info("lazy tree supported by client: %s", state.lazy_supported)
+
         async def fetch() -> None:
             try:
                 from lsprotocol.types import (
@@ -1317,20 +1342,59 @@ def build_server() -> LanguageServer:
             "paths": [{"path": p, "source": src} for p, src in resolved],
         }
 
+    def _disk_cache_key(uri: str) -> str | None:
+        """Compute the on-disk cache key for ``uri``.
+
+        Returns ``None`` if the URI doesn't correspond to a real file (in
+        which case we just skip the disk cache entirely — the in-memory
+        cache still works). Folds the systemrdl-compiler version so a
+        compiler upgrade auto-invalidates every cached envelope.
+        """
+        try:
+            path = _uri_to_path(uri)
+        except ValueError:
+            return None
+        try:
+            mtime_ns = path.stat().st_mtime_ns
+        except OSError:
+            return None
+        try:
+            import systemrdl as _systemrdl
+            compiler_version = getattr(_systemrdl, "__version__", "unknown")
+        except Exception:
+            compiler_version = "unknown"
+        return make_key(path, mtime_ns, state.include_paths, compiler_version)
+
     @server.feature("rdl/elaboratedTree")
-    def _on_elaborated_tree(_ls: LanguageServer, params: Any) -> dict[str, Any]:
+    async def _on_elaborated_tree(_ls: LanguageServer, params: Any) -> dict[str, Any]:
         """Custom JSON-RPC: viewer fetches the latest elaborated tree for a URI.
 
-        TODO-1 contract:
+        T1.4: now ``async`` and runs the (potentially multi-second) serialize
+        in ``asyncio.to_thread`` so the LSP event loop is never blocked.
+        Big designs no longer freeze hover / completion / diagnostics while
+        the spine is being built.
+
+        T1.4: when the client advertised ``experimental.systemrdlLazyTree``
+        capability the server returns a spine envelope (``Reg.loadState =
+        'placeholder'``, fields fetched on demand via ``rdl/expandNode``).
+        Old clients keep getting the full tree.
+
+        T1.4: spine envelopes are also persisted to ``DiskCache`` so a
+        VSCode window reload skips parse + elaborate + serialize for an
+        unchanged file. Cache key folds in mtime + include paths +
+        compiler version. Disk cache is only consulted for the lazy path
+        because spine envelopes are small (~10 MB even for 25k regs)
+        while full envelopes can hit 200 MB and aren't worth caching.
+
+        TODO-1 contract preserved:
 
         - Request may include ``sinceVersion: int``. If it matches the LSP's
           cached version, the response is a tiny ``{unchanged: true, version}``
           envelope and the client keeps its previously-rendered tree intact.
-        - First request (no ``sinceVersion`` or stale value) returns the full
-          serialized tree, cached on the LSP side keyed by ``(uri, version)`` so
-          repeat fetches at the same version don't re-serialize.
+        - First request (no ``sinceVersion`` or stale value) returns the
+          serialized tree, cached on the LSP side keyed by ``(uri, version)``.
 
-        Schema: ``schemas/elaborated-tree.json`` v0.1.0. Returns the cached
+        Schema: ``schemas/elaborated-tree.json`` v0.2.0. Returns the cached
         last-good tree when the current parse has failed (design D7).
         """
         uri = None
@@ -1359,11 +1423,24 @@ def build_server() -> LanguageServer:
         if since_version is not None and since_version == cached.version:
             return _unchanged_envelope(cached.version)
 
-        # Reuse the previously-serialized JSON when version hasn't advanced —
-        # multiple fetches at the same version (e.g. tab focus changes,
-        # re-mount) cost a dict reference rather than a full tree walk.
+        # In-memory fast path: same-version re-fetch returns the memoized dict.
         if cached.serialized is not None:
             return cached.serialized
+
+        # Disk cache fast path (lazy mode only — see docstring above).
+        if state.lazy_supported:
+            disk_key = _disk_cache_key(uri)
+            if disk_key is not None:
+                disk_envelope = await asyncio.to_thread(state.disk_cache.get, disk_key)
+                # Trust the on-disk envelope only if its `version` field equals
+                # what we just elaborated to. Mtime in the key should make this
+                # impossible to mismatch in practice, but be defensive.
+                if (
+                    isinstance(disk_envelope, dict)
+                    and disk_envelope.get("version") == cached.version
+                ):
+                    cached.serialized = disk_envelope
+                    return disk_envelope
 
         try:
             original_path = _uri_to_path(uri)
@@ -1374,13 +1451,110 @@ def build_server() -> LanguageServer:
             if cached.temp_path is not None and original_path is not None
             else None
         )
-        envelope = _serialize_root(
+        # Pick spine vs full based on the client's advertised capability and
+        # run in a thread so the event loop stays responsive during the
+        # ~1s (spine) or ~6s (full) wall-clock at 25k regs.
+        serialize_fn = _serialize_spine if state.lazy_supported else _serialize_root
+        envelope = await asyncio.to_thread(
+            serialize_fn,
             cached.roots,
-            stale=uri in state.stale_uris,
-            path_translate=translate,
-            version=cached.version,
+            uri in state.stale_uris,
+            translate,
+            cached.version,
         )
         cached.serialized = envelope
+
+        # Persist spine to disk (best-effort, fire-and-forget) for window-reload
+        # speed. Full trees are too big to be worth caching to disk.
+        if state.lazy_supported:
+            disk_key = _disk_cache_key(uri)
+            if disk_key is not None:
+                # Don't await — disk write is independent of the response.
+                asyncio.create_task(
+                    asyncio.to_thread(state.disk_cache.put, disk_key, envelope)
+                )
         return envelope
+
+    @server.feature("rdl/expandNode")
+    async def _on_expand_node(_ls: LanguageServer, params: Any) -> dict[str, Any]:
+        """Custom JSON-RPC: lazy-mode client requests details for a placeholder Reg.
+
+        T1.5. Request: ``{uri, version, nodeId}``. Response: a single ``Reg``
+        dict with ``fields[]`` populated and ``loadState`` absent. The
+        ``nodeId`` is the opaque base-36 string the client got from the
+        spine; it's only valid within the (uri, version) pair the spine
+        was emitted for.
+
+        Errors raised as JSON-RPC error responses:
+        - -32001 ``NodeNotFound`` — nodeId doesn't name any reg (or names
+          a container, which can't be expanded — containers are always
+          fully present in the spine).
+        - -32002 ``VersionMismatch`` — version doesn't match the LSP's
+          current cached version. Client should re-fetch the spine.
+        """
+        from pygls.exceptions import JsonRpcException
+
+        uri = None
+        version: int | None = None
+        node_id: str | None = None
+        if isinstance(params, dict):
+            uri = params.get("uri") or params.get("textDocument", {}).get("uri")
+            v = params.get("version")
+            if isinstance(v, int):
+                version = v
+            n = params.get("nodeId")
+            if isinstance(n, str):
+                node_id = n
+        else:
+            uri = getattr(params, "uri", None)
+            v = getattr(params, "version", None)
+            if isinstance(v, int):
+                version = v
+            n = getattr(params, "nodeId", None)
+            if isinstance(n, str):
+                node_id = n
+
+        if not uri or version is None or not node_id:
+            raise JsonRpcException(
+                code=-32602, message="invalid expandNode params"
+            )
+        cached = state.cache.get(uri)
+        if cached is None:
+            raise JsonRpcException(
+                code=-32002, message="VersionMismatch (no cache entry for uri)"
+            )
+        if cached.version != version:
+            raise JsonRpcException(
+                code=-32002,
+                message=(
+                    f"VersionMismatch (have version {cached.version}, "
+                    f"client asked for {version})"
+                ),
+            )
+
+        # Memoize per node so repeat fetches of the same reg cost a dict ref.
+        if cached.expanded is None:
+            cached.expanded = {}
+        if node_id in cached.expanded:
+            return cached.expanded[node_id]
+
+        try:
+            original_path = _uri_to_path(uri)
+        except ValueError:
+            original_path = None
+        translate = (
+            {cached.temp_path: original_path}
+            if cached.temp_path is not None and original_path is not None
+            else None
+        )
+        result = await asyncio.to_thread(
+            expand_node, cached.roots, node_id, translate
+        )
+        if result is None:
+            raise JsonRpcException(
+                code=-32001, message=f"NodeNotFound (nodeId={node_id})"
+            )
+        cached.expanded[node_id] = result
+        return result
 
     return server
