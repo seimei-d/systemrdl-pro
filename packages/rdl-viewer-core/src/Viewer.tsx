@@ -191,12 +191,17 @@ export function Viewer({ transport }: Props) {
             className={'rdl-tab' + (i === activeRoot ? ' active' : '')}
             role="tab"
             aria-selected={i === activeRoot}
-            title={(r.type ? r.type + ' · ' : '') + r.address}
+            title={`${r.type ? r.type + ' · ' : ''}${r.address} · click to reveal in editor`}
             onClick={() => {
-              if (i === activeRoot) return;
-              setActiveRoot(i);
-              const first = findFirstReg(roots[i], [roots[i].name]);
-              setSelectedKey(first?.key ?? null);
+              // Switch active tab if different.
+              if (i !== activeRoot) {
+                setActiveRoot(i);
+                const first = findFirstReg(roots[i], [roots[i].name]);
+                setSelectedKey(first?.key ?? null);
+              }
+              // Always reveal the addrmap declaration in the host editor —
+              // tabs are the primary surface for jumping to a top-level addrmap.
+              if (r.source && transport.reveal) transport.reveal(r.source);
             }}
           >{r.name}</button>
         ))}

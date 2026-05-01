@@ -80,10 +80,16 @@ function FieldRow({ field, reveal }: { field: Field; reveal: (s: SourceLoc | und
       <b>
         {field.name}
         {field.isCounter && (
-          <span className="rdl-badge counter" title="counter">◷</span>
+          <span
+            className="rdl-badge counter"
+            title="Counter — field auto-increments on its `incr` signal (SystemRDL 9.10)."
+          >◷ counter</span>
         )}
         {field.isIntr && (
-          <span className="rdl-badge intr" title="interrupt">⚡</span>
+          <span
+            className="rdl-badge intr"
+            title="Interrupt source — field is set by hardware on a triggering condition; software clears it (SystemRDL 9.7)."
+          >⚡ intr</span>
         )}
       </b>
       <span className={'rdl-pill ' + acc}>{acc.toUpperCase()}</span>
@@ -97,26 +103,37 @@ function FieldRow({ field, reveal }: { field: Field; reveal: (s: SourceLoc | und
 }
 
 function EncodeTable({ entries }: { entries: EncodeEntry[] }) {
+  // Native <details> gives us collapse/expand for free, accessible by
+  // keyboard (Space/Enter on the summary), no extra state to manage.
   return (
-    <table className="rdl-encode-table" onClick={e => e.stopPropagation()}>
-      <thead>
-        <tr><th>Value</th><th>Name</th><th>Description</th></tr>
-      </thead>
-      <tbody>
-        {entries.map((e, i) => (
-          <tr key={i}>
-            <td className="v">{e.value}</td>
-            <td className="n">
-              {e.name}
-              {e.displayName && e.displayName !== e.name && (
-                <span className="display-name"> · {e.displayName}</span>
-              )}
-            </td>
-            <td className="d">{e.desc || ''}</td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
+    <details
+      className="rdl-encode-details"
+      onClick={e => e.stopPropagation()}
+    >
+      <summary>
+        <span className="rdl-encode-summary-label">enum</span>
+        <span className="rdl-encode-summary-count">{entries.length} values</span>
+      </summary>
+      <table className="rdl-encode-table">
+        <thead>
+          <tr><th>Value</th><th>Name</th><th>Description</th></tr>
+        </thead>
+        <tbody>
+          {entries.map((e, i) => (
+            <tr key={i}>
+              <td className="v">{e.value}</td>
+              <td className="n">
+                {e.name}
+                {e.displayName && e.displayName !== e.name && (
+                  <span className="display-name"> · {e.displayName}</span>
+                )}
+              </td>
+              <td className="d">{e.desc || ''}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </details>
   );
 }
 

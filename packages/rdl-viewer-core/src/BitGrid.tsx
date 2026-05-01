@@ -117,10 +117,16 @@ export function BitGrid({ reg }: Props) {
                     <span className="fieldname">
                       {c.field.name}
                       {c.field.isCounter && (
-                        <span className="rdl-badge counter" title="counter">◷</span>
+                        <span
+                          className="rdl-badge counter"
+                          title="Counter — increments on its `incr` signal"
+                        >◷</span>
                       )}
                       {c.field.isIntr && (
-                        <span className="rdl-badge intr" title="interrupt">⚡</span>
+                        <span
+                          className="rdl-badge intr"
+                          title="Interrupt — set by hardware, cleared by software"
+                        >⚡</span>
                       )}
                     </span>
                   </div>

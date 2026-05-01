@@ -78,11 +78,13 @@ html, body { margin: 0; padding: 0; background: var(--rdl-bg); color: var(--rdl-
 .rdl-stale-bar { background: rgba(215,168,90,0.12); border-bottom: 1px solid var(--rdl-warning);
   color: var(--rdl-warning); padding: 7px 14px; font-size: 13px;
   display: flex; align-items: center; gap: 8px; }
-.rdl-tabs { display: flex; border-bottom: 1px solid var(--rdl-border); background: var(--rdl-chrome);
-  overflow-x: auto; }
+.rdl-tabs { display: flex; flex-shrink: 0;
+  border-bottom: 1px solid var(--rdl-border); background: var(--rdl-chrome);
+  overflow-x: auto; overflow-y: hidden; min-height: 36px; }
 .rdl-tab { padding: 9px 16px; font-size: 13px; color: var(--rdl-dim); cursor: pointer;
   border-right: 1px solid var(--rdl-border); white-space: nowrap; user-select: none;
-  background: transparent; border-top: none; border-left: none; border-bottom: none; font: inherit; }
+  background: transparent; border-top: none; border-left: none; border-bottom: none; font: inherit;
+  flex-shrink: 0; }
 .rdl-tab:hover { color: var(--rdl-fg); }
 .rdl-tab.active { color: var(--rdl-fg); background: var(--rdl-bg);
   border-bottom: 2px solid var(--rdl-accent); margin-bottom: -1px; }
@@ -270,8 +272,23 @@ html, body { margin: 0; padding: 0; background: var(--rdl-bg); color: var(--rdl-
   background: rgba(255,255,255,0.12); border-color: transparent;
 }
 
-/* Encode-enum value table — shown inside the field row when the field has
-   an `encode = my_enum;` property. Compact, monospace, full-width. */
+/* Encode-enum block — collapsible <details> wrapper around the value table.
+   Default-collapsed so a 16-entry enum doesn't dominate the field row. */
+.rdl-encode-details { grid-column: 1 / -1; margin: 6px 0 2px; }
+.rdl-encode-details > summary {
+  cursor: pointer; user-select: none;
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 2px 8px; border-radius: 3px;
+  background: var(--rdl-chrome); color: var(--rdl-dim);
+  font-size: 11px; font-family: var(--rdl-font-chrome);
+  list-style: revert;  /* keep the disclosure triangle */
+}
+.rdl-encode-details > summary:hover { color: var(--rdl-fg); }
+.rdl-encode-summary-label {
+  font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;
+}
+.rdl-encode-summary-count { opacity: 0.7; }
+/* Encode-enum value table — compact, monospace, full-width. */
 .rdl-encode-table {
   grid-column: 1 / -1;
   margin: 6px 0 2px;
