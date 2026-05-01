@@ -102,7 +102,16 @@ export function Viewer({ transport }: Props) {
     // Containers (addrmap, regfile) — clicking the row body reveals the
     // declaration in the editor. We don't change the register selection
     // so the Detail panel keeps showing whatever reg was last picked.
-    if (row.node.source && transport.reveal) transport.reveal(row.node.source);
+    if (!transport.reveal) return;
+    const source = row.node.source;
+    if (!source) {
+      // No source means the elaborated node has no usable src_ref. Surface
+      // it via the toast so the user understands why nothing happened
+      // rather than silently dropping the click.
+      setToast(`No source location for ${row.node.kind} ${row.node.name}`);
+      return;
+    }
+    transport.reveal(source);
   }, [transport]);
 
   // Cmd/Ctrl-F to focus filter (the input is already in the page; we just focus it).
