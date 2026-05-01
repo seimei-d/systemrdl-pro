@@ -17,6 +17,8 @@ jobs:
         uses: oven-sh/setup-bun@v2
       - name: Install deps
         run: bun install --frozen-lockfile
+      - name: Build viewer-core
+        run: bun run --cwd packages/rdl-viewer-core build
       - name: Build extension
         run: bun run --cwd packages/vscode-systemrdl-pro build
       - name: Package .vsix
