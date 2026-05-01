@@ -153,49 +153,95 @@ def _publish_diagnostics(
 def _address_conflict_diagnostics(
     roots: list[RootNode], path: pathlib.Path
 ) -> list[CompilerMessage]:
-    """Detect overlapping register address ranges within the same parent and
-    surface them as warning diagnostics. systemrdl-compiler usually catches
-    this, but only for direct sibling overlaps; we extend the check across
-    the full elaborated tree for defence-in-depth.
+    """Detect overlapping register address ranges WITHIN ONE addrmap and
+    surface them as warning diagnostics.
+
+    Each top-level addrmap is its own address space — a register at 0x0 in
+    ``dma_engine`` doesn't conflict with one at 0x0 in ``uart``. We therefore
+    scope the overlap check per top-level addrmap, never pooling across.
+
+    Reused-type bodies (lines where multiple elaborated instances share the
+    same source ref) are skipped entirely: a regfile type instantiated 6×
+    would otherwise spam each internal reg line with a "self-overlap" that
+    is just an artifact of the elaboration replay, not a real conflict.
     """
-    from systemrdl.node import RegNode
+    from collections import Counter
+
+    from systemrdl.node import AddressableNode, RegNode
 
     from .serialize import _hex
 
-    out: list[CompilerMessage] = []
-    flat: list[tuple[int, int, RegNode]] = []
+    # Pre-pass: count elaborated nodes per (filename, line) — same heuristic
+    # used by hover/inlay-hints to detect reused-type bodies.
+    line_uses: Counter[tuple[str, int]] = Counter()
+    seen_nodes: set[int] = set()
 
-    def visit(node: Any) -> None:
+    def collect(node: Any) -> None:
+        nid = id(node)
+        if nid in seen_nodes:
+            return
+        seen_nodes.add(nid)
+        if isinstance(node, AddressableNode):
+            inst = getattr(node, "inst", None)
+            sr = getattr(inst, "inst_src_ref", None) or getattr(inst, "def_src_ref", None)
+            if sr is not None:
+                line_1b = getattr(sr, "line", None)
+                fn = getattr(sr, "filename", None)
+                if line_1b is not None and fn:
+                    line_uses[(str(fn), line_1b)] += 1
+        if hasattr(node, "children"):
+            try:
+                for c in node.children(unroll=True):
+                    collect(c)
+            except Exception:
+                pass
+
+    for r in roots:
+        collect(r)
+
+    out: list[CompilerMessage] = []
+
+    def collect_regs_in(node: Any, into: list[tuple[int, int, RegNode]]) -> None:
+        """Walk one top-level addrmap subtree, collecting (start, end, reg) tuples."""
         if isinstance(node, RegNode):
             try:
                 a = node.absolute_address
                 size = max(1, int(getattr(node, "size", 1)))
-                flat.append((a, a + size, node))
+                into.append((a, a + size, node))
             except Exception:
                 pass
         if hasattr(node, "children"):
             for c in node.children(unroll=True):
-                visit(c)
+                collect_regs_in(c, into)
 
+    # Per top-level addrmap: own flat list, own overlap check.
     for r in roots:
         for top in r.children(unroll=True):
-            visit(top)
-
-    flat.sort(key=lambda t: t[0])
-    for i in range(1, len(flat)):
-        prev_start, prev_end, prev_node = flat[i - 1]
-        cur_start, cur_end, cur_node = flat[i]
-        if cur_start < prev_end:
-            inst = getattr(cur_node, "inst", None)
-            src_ref = getattr(inst, "inst_src_ref", None) or getattr(inst, "def_src_ref", None)
-            ref_filename = getattr(src_ref, "filename", None)
-            line_1b = getattr(src_ref, "line", None)
-            sel = getattr(src_ref, "line_selection", None) or (1, 1)
-            try:
-                cs, ce = sel
-            except (TypeError, ValueError):
-                cs = ce = 1
-            if line_1b and ref_filename and pathlib.Path(ref_filename) == path:
+            flat: list[tuple[int, int, RegNode]] = []
+            collect_regs_in(top, flat)
+            flat.sort(key=lambda t: t[0])
+            for i in range(1, len(flat)):
+                prev_start, prev_end, prev_node = flat[i - 1]
+                cur_start, cur_end, cur_node = flat[i]
+                if cur_start >= prev_end:
+                    continue
+                inst = getattr(cur_node, "inst", None)
+                src_ref = getattr(inst, "inst_src_ref", None) or getattr(
+                    inst, "def_src_ref", None
+                )
+                ref_filename = getattr(src_ref, "filename", None)
+                line_1b = getattr(src_ref, "line", None)
+                if not (line_1b and ref_filename and pathlib.Path(ref_filename) == path):
+                    continue
+                # Skip reused-type body lines — the warning would land on a
+                # line that isn't actually responsible for the address.
+                if line_uses.get((str(ref_filename), line_1b), 0) > 1:
+                    continue
+                sel = getattr(src_ref, "line_selection", None) or (1, 1)
+                try:
+                    cs, ce = sel
+                except (TypeError, ValueError):
+                    cs = ce = 1
                 out.append(
                     CompilerMessage(
                         severity=Severity.WARNING,

@@ -741,6 +741,57 @@ def test_cache_version_increments_on_each_put(tmp_path):
     cache.clear()
 
 
+def test_address_conflicts_scope_per_top_level_addrmap(tmp_path):
+    """A reg at 0x0 inside ``addrmap a`` does NOT conflict with a reg at 0x0
+    inside a separate ``addrmap b`` — each top-level addrmap is its own
+    address space. The previous implementation pooled regs across all
+    elaborated roots and produced false overlap warnings.
+    """
+    from systemrdl_lsp.diagnostics import _address_conflict_diagnostics
+
+    rdl = textwrap.dedent("""
+        addrmap chip_a {
+            reg { field { sw=rw; hw=r; } a[0:0]=0; } CTRL @ 0x0;
+        };
+        addrmap chip_b {
+            reg { field { sw=rw; hw=r; } b[0:0]=0; } CTRL @ 0x0;
+        };
+    """).strip()
+    rdl_path = tmp_path / "x.rdl"
+    rdl_path.write_text(rdl, encoding="utf-8")
+    _msgs, roots, tmp = _compile_text(rdl_path.as_uri(), rdl)
+    try:
+        out = _address_conflict_diagnostics(roots, tmp)
+        assert out == [], f"expected no overlaps; got {[o.text for o in out]}"
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def test_address_conflicts_skip_reused_type_body(tmp_path):
+    """A reused regfile type doesn't trigger fake "self-overlaps" on its body lines."""
+    from systemrdl_lsp.diagnostics import _address_conflict_diagnostics
+
+    rdl = textwrap.dedent("""
+        regfile dma_channel_t {
+            reg { field { sw=rw; hw=r; } a[0:0]=0; } CTRL @ 0x0;
+            reg { field { sw=rw; hw=r; } b[0:0]=0; } STATUS @ 0x4;
+        };
+        addrmap top {
+            dma_channel_t ch0 @ 0x100;
+            dma_channel_t ch1 @ 0x200;
+            dma_channel_t ch2 @ 0x300;
+        };
+    """).strip()
+    rdl_path = tmp_path / "x.rdl"
+    rdl_path.write_text(rdl, encoding="utf-8")
+    _msgs, roots, tmp = _compile_text(rdl_path.as_uri(), rdl)
+    try:
+        out = _address_conflict_diagnostics(roots, tmp)
+        assert out == [], f"reused-type body should not self-overlap; got {[o.text for o in out]}"
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 def test_inlay_hints_skip_reused_type_body(tmp_path):
     """Reused regfile types must NOT get inlay hints on their internal lines.
 
