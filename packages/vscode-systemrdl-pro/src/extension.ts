@@ -811,6 +811,13 @@ function renderViewerHtml(
     const updaters = new Set();
     const cursorListeners = new Set();
     let pendingTree = null;
+    // T1.7 wiring: per-nodeId resolvers for the lazy expandNode round-trip.
+    // Webview posts {type:'expandNode', version, nodeId}; host LSP-forwards
+    // and posts back {type:'expandNodeResult', nodeId, reg} or {type:'expandNodeError'}.
+    // We promise-resolve the matching pending request so transport.expandNode
+    // returns the populated Reg the viewer can splice into its tree state.
+    const expandResolvers = new Map();
+    const expandRejectors = new Map();
 
     window.addEventListener('message', (e) => {
       const m = e.data;
@@ -819,6 +826,16 @@ function renderViewerHtml(
         updaters.forEach(cb => cb(m.tree));
       } else if (m && m.type === 'cursor') {
         cursorListeners.forEach(cb => cb(m.line));
+      } else if (m && m.type === 'expandNodeResult') {
+        const r = expandResolvers.get(m.nodeId);
+        expandResolvers.delete(m.nodeId);
+        expandRejectors.delete(m.nodeId);
+        if (r) r(m.reg);
+      } else if (m && m.type === 'expandNodeError') {
+        const j = expandRejectors.get(m.nodeId);
+        expandResolvers.delete(m.nodeId);
+        expandRejectors.delete(m.nodeId);
+        if (j) j(new Error(m.message || 'expandNode failed'));
       }
     });
 
@@ -837,6 +854,13 @@ function renderViewerHtml(
       onCursorMove(cb) { cursorListeners.add(cb); return () => cursorListeners.delete(cb); },
       reveal(source) { vscode.postMessage({ type: 'reveal', source }); },
       copy(text, label) { vscode.postMessage({ type: 'copy', text, label }); },
+      expandNode(version, nodeId) {
+        return new Promise((resolve, reject) => {
+          expandResolvers.set(nodeId, resolve);
+          expandRejectors.set(nodeId, reject);
+          vscode.postMessage({ type: 'expandNode', version, nodeId });
+        });
+      },
     };
 
     RdlViewer.mount(document.getElementById('app-root'), transport);

@@ -4,6 +4,33 @@ All notable changes to **SystemRDL Pro** are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [SemVer](https://semver.org/).
 
+## [0.23.0] — 2026-05-01
+
+### Added
+
+- **Lazy memory-map viewer (LSP perf overhaul T1).** For aggregated
+  multi-subsystem designs in the 10-25k+ register range, the viewer
+  now receives a "spine" envelope (addrmaps + regfiles + reg shells
+  with empty fields) and fetches per-register field detail on demand
+  via a new `rdl/expandNode` RPC. Spine is 17-18x smaller and 4-5x
+  faster to build than the legacy full tree. The LSP elaboratedTree
+  handler is now async and runs serialization in a thread pool, so
+  diagnostics / hover / completion no longer freeze while the viewer
+  is loading.
+- **On-disk spine cache** at `~/.cache/systemrdl-pro/<key>/spine.json`.
+  Keyed by absolute path + mtime + include paths + compiler version.
+  Window reload of an unchanged file skips parse + elaborate +
+  serialize entirely.
+- **Lazy capability negotiation.** Old extensions / non-VSCode LSP
+  clients keep getting full trees; only clients that advertise
+  `experimental.systemrdlLazyTree` see the new spine + expand flow.
+
+### Internal
+
+- Schema bumped to v0.2.0 (`Reg.loadState`, `Reg.nodeId`, envelope
+  `lazy` flag — all optional / additive).
+- See `feat/lsp-perf` branch for the 7-commit history.
+
 ## [0.22.18] — 2026-05-01
 
 ### Fixed

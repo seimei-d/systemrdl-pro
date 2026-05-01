@@ -183,29 +183,37 @@ export function Viewer({ transport }: Props) {
   // real fields. Per-nodeId in-flight tracking avoids stampedes when the
   // user rapidly clicks through siblings.
   const [pendingExpansions] = useState<Set<string>>(() => new Set());
-  const [, forceTick] = useState(0);
   useEffect(() => {
     if (!found || !tree || !transport.expandNode) return;
     const reg = found.reg;
     if (reg.loadState !== 'placeholder' || !reg.nodeId) return;
-    if (pendingExpansions.has(reg.nodeId)) return;
-    pendingExpansions.add(reg.nodeId);
+    const nodeId = reg.nodeId;
+    if (pendingExpansions.has(nodeId)) return;
+    pendingExpansions.add(nodeId);
     const version = tree.version ?? 0;
-    transport.expandNode(version, reg.nodeId)
+    transport.expandNode(version, nodeId)
       .then(populated => {
-        // Splice the populated reg into the live tree state. We mutate the
-        // existing tree object's nested node and then re-set tree to a fresh
-        // top-level wrapper so React notices the change.
-        if (!reg.nodeId) return;
-        spliceExpandedReg(tree, reg.nodeId, populated);
-        forceTick(t => t + 1);
+        // Functional setTree so we always splice into the *current* tree,
+        // not the closure-captured one. If `onTreeUpdate` replaced the tree
+        // while expand was in flight, we splice into the new tree (the
+        // matching placeholder is presumably still there because the new
+        // elaboration would have produced the same shape with the same
+        // nodeId — same DFS order). Falls through gracefully if not.
+        setTree(currentTree => {
+          if (!currentTree) return currentTree;
+          // Build a new top-level wrapper so React notices the change.
+          // Mutate nested nodes in place — they're not part of React state
+          // identity, only the outer envelope is.
+          spliceExpandedReg(currentTree, nodeId, populated);
+          return { ...currentTree };
+        });
       })
       .catch(() => {
         // Swallow errors — placeholder stays visible. Detail.tsx renders a
         // small "failed to load" hint so the user understands.
       })
       .finally(() => {
-        if (reg.nodeId) pendingExpansions.delete(reg.nodeId);
+        pendingExpansions.delete(nodeId);
       });
   }, [found, tree, transport, pendingExpansions]);
 
