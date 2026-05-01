@@ -89,14 +89,41 @@ def _inlay_hints_for_addressables(
     """Inlay hints showing the resolved absolute address at the **end of the line**
     containing each register / regfile / addrmap declaration.
 
-    End-of-line placement avoids overlap with names — the ghost text always sits
-    far to the right.
+    Skips reused-type bodies: when the user defines ``regfile dma_channel_t {…}``
+    and instantiates it twice as ``ch0 @ 0x100`` and ``ch1 @ 0x200``, the
+    elaborated tree replays the type's internal source refs once per instance.
+    Painting an absolute address on those internal lines would be a lie —
+    the address differs per instance. We detect reuse by counting how many
+    elaborated nodes share the same (filename, line) and skipping any line
+    visited more than once.
     """
+    from collections import Counter
+
     from systemrdl.node import AddressableNode
 
     hints: list[InlayHint] = []
     lines = buffer_text.splitlines() if buffer_text else []
     seen_lines: set[int] = set()
+    line_uses: Counter[tuple[str, int]] = Counter()
+
+    def collect_uses(node: Any) -> None:
+        if isinstance(node, AddressableNode):
+            inst = getattr(node, "inst", None)
+            src_ref = getattr(inst, "inst_src_ref", None) or getattr(inst, "def_src_ref", None)
+            line_1b = getattr(src_ref, "line", None)
+            ref_filename = getattr(src_ref, "filename", None)
+            if line_1b is not None and ref_filename:
+                line_uses[(str(ref_filename), line_1b)] += 1
+        if hasattr(node, "children"):
+            try:
+                for c in node.children(unroll=True):
+                    collect_uses(c)
+            except Exception:
+                pass
+
+    for r in roots:
+        for top in r.children(unroll=True):
+            collect_uses(top)
 
     def visit(node: Any) -> None:
         if not isinstance(node, AddressableNode):
@@ -113,6 +140,10 @@ def _inlay_hints_for_addressables(
             line_1b is not None
             and ref_filename
             and pathlib.Path(ref_filename) == path
+            # Skip lines reused by multiple elaborated instances — those are
+            # the body of a multi-use regfile/reg type, where no single
+            # absolute address is meaningful.
+            and line_uses.get((str(ref_filename), line_1b), 0) <= 1
         ):
             line_0b = max(0, line_1b - 1)
             if line_0b not in seen_lines and line_0b < len(lines):

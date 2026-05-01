@@ -741,6 +741,57 @@ def test_cache_version_increments_on_each_put(tmp_path):
     cache.clear()
 
 
+def test_inlay_hints_skip_reused_type_body(tmp_path):
+    """Reused regfile types must NOT get inlay hints on their internal lines.
+
+    Defining ``regfile dma_channel_t { reg ... CTRL @ 0; }`` and instantiating
+    it twice means the elaborated tree replays the type's internal source
+    refs once per instance. Painting an absolute address on those internal
+    lines would lie about which instance owns the address. The inlay-hint
+    walker should detect the reuse (count > 1 elaborated nodes per source
+    line) and skip painting.
+    """
+    from systemrdl_lsp.outline import _inlay_hints_for_addressables
+
+    rdl = textwrap.dedent("""
+        regfile dma_channel_t {
+            reg { field { sw=rw; hw=r; } enable[0:0] = 0; } CTRL @ 0x0;
+        };
+        addrmap top {
+            dma_channel_t ch0 @ 0x100;
+            dma_channel_t ch1 @ 0x200;
+        };
+    """).strip()
+    rdl_path = tmp_path / "x.rdl"
+    rdl_path.write_text(rdl, encoding="utf-8")
+    _msgs, roots, tmp = _compile_text(rdl_path.as_uri(), rdl)
+    try:
+        # Pass the temp path the compiler actually saw — that's what
+        # inlay-hint emission uses for filename comparison.
+        hints = _inlay_hints_for_addressables(roots, tmp, rdl)
+        # Find the line of the reg inside the regfile type. That line is
+        # reused twice (once per ch0/ch1 elaborated copy). It should NOT
+        # have an inlay hint.
+        type_body_line = next(
+            i for i, line in enumerate(rdl.splitlines())
+            if "CTRL @ 0x0" in line
+        )
+        type_body_hints = [h for h in hints if h.position.line == type_body_line]
+        assert type_body_hints == [], (
+            f"reused type body line {type_body_line} should have no inlay "
+            f"hint; got {type_body_hints}"
+        )
+        # The two instance lines (ch0 @ 0x100, ch1 @ 0x200) SHOULD have hints.
+        ch0_line = next(
+            i for i, line in enumerate(rdl.splitlines())
+            if "ch0 @ 0x100" in line
+        )
+        ch0_hints = [h for h in hints if h.position.line == ch0_line]
+        assert ch0_hints, "ch0 instance line should have an inlay hint"
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 def test_iter_rdl_files_walks_workspace_skipping_noise(tmp_path):
     """Pre-index walker yields .rdl files, skips .git/node_modules/etc."""
     from systemrdl_lsp.server import _iter_rdl_files

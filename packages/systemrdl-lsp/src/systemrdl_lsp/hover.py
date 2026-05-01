@@ -26,14 +26,56 @@ def _node_at_position(
 ) -> Any | None:
     """Return the deepest elaborated node whose source span contains the cursor.
 
-    Accepts either a single ``RootNode`` (legacy/test convenience) or the list
-    stored in :class:`CachedElaboration` (multi-root, Decision 3C).
+    Skips lines belonging to the body of a reused type (e.g. a ``regfile``
+    instantiated multiple times) — those lines map to multiple elaborated
+    nodes with different absolute addresses, so picking any one of them
+    would give a misleading hover. Caller falls through to the word-based
+    catalogue lookup, which handles the type identifier itself correctly.
     """
+    from collections import Counter
+
     from systemrdl.node import AddressableNode
+
+    target_line_1b = line_0b + 1
+
+    # Pre-pass: count elaborated nodes per (filename, line). count > 1 means
+    # the line is reused-type body; we must not pick a single instance for it.
+    # ``children(unroll=True)`` on RegNode already yields fields, so guard
+    # against double-counting the same node via an id() set.
+    line_uses: Counter[tuple[str, int]] = Counter()
+    seen_nodes: set[int] = set()
+
+    def collect(node: Any) -> None:
+        nid = id(node)
+        if nid in seen_nodes:
+            return
+        seen_nodes.add(nid)
+        inst = getattr(node, "inst", None)
+        src_ref = getattr(inst, "inst_src_ref", None) or getattr(inst, "def_src_ref", None)
+        if src_ref is not None:
+            line_1b = getattr(src_ref, "line", None)
+            filename = getattr(src_ref, "filename", None)
+            if line_1b is not None and filename:
+                line_uses[(str(filename), line_1b)] += 1
+        if isinstance(node, AddressableNode) or hasattr(node, "children"):
+            try:
+                for child in node.children(unroll=True):
+                    collect(child)
+            except Exception:
+                pass
+        if hasattr(node, "fields"):
+            try:
+                for f in node.fields():
+                    collect(f)
+            except Exception:
+                pass
+
+    root_list = roots if isinstance(roots, list) else [roots]
+    for r in root_list:
+        collect(r)
 
     best: Any = None
     best_span: int = 10**9
-    target_line_1b = line_0b + 1
 
     def visit(node: Any) -> None:
         nonlocal best, best_span
@@ -41,7 +83,12 @@ def _node_at_position(
         src_ref = getattr(inst, "inst_src_ref", None) or getattr(inst, "def_src_ref", None)
         if src_ref is not None:
             ref_line = getattr(src_ref, "line", None)
-            if ref_line == target_line_1b:
+            ref_filename = getattr(src_ref, "filename", None)
+            if (
+                ref_line == target_line_1b
+                and ref_filename
+                and line_uses.get((str(ref_filename), ref_line), 0) <= 1
+            ):
                 # Approximate "smallest containing node" by counting depth.
                 span = 1
                 if span < best_span:
@@ -57,11 +104,8 @@ def _node_at_position(
             except Exception:
                 pass
 
-    if isinstance(roots, list):
-        for r in roots:
-            visit(r)
-    else:
-        visit(roots)
+    for r in root_list:
+        visit(r)
     return best
 
 
