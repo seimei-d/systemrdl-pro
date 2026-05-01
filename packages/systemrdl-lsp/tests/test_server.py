@@ -621,6 +621,38 @@ def test_perl_available_caches_result():
     assert first is second
 
 
+def test_cache_version_increments_on_each_put(tmp_path):
+    """TODO-1: per-URI version is the version-gated push contract.
+
+    Every successful ``put`` must yield a strictly-monotonic version so the
+    client's ``sinceVersion`` comparison is meaningful. A clear() resets the
+    counter (cache is gone, no client should still hold a ref to it).
+    """
+    cache = ElaborationCache()
+    uri = (tmp_path / "x.rdl").as_uri()
+    _msgs1, root1, tmp1 = _compile_text(uri, VALID_RDL)
+    cache.put(uri, root1, VALID_RDL, tmp1)
+    v1 = cache.get(uri).version
+    assert v1 >= 1
+    _msgs2, root2, tmp2 = _compile_text(uri, VALID_RDL)
+    cache.put(uri, root2, VALID_RDL, tmp2)
+    v2 = cache.get(uri).version
+    assert v2 == v1 + 1, f"version must increment monotonically; {v1} → {v2}"
+    cache.clear()
+
+
+def test_unchanged_envelope_is_constant_size():
+    """TODO-1 fast path: ``unchanged`` reply is small regardless of tree size."""
+    from systemrdl_lsp.server import _unchanged_envelope
+    env = _unchanged_envelope(version=42)
+    assert env["unchanged"] is True
+    assert env["version"] == 42
+    assert env["roots"] == []
+    # Crucially no "elaboratedAt" timestamp — unchanged means nothing happened
+    # since the previous reply, the timestamp would lie.
+    assert "elaboratedAt" not in env
+
+
 def test_compile_text_accepts_perl_safe_opcodes(tmp_path):
     """``perl_safe_opcodes`` plumbs through to RDLCompiler without breaking simple RDL.
 

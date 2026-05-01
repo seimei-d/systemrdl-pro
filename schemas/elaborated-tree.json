@@ -12,6 +12,15 @@
       "const": "0.1.0",
       "description": "Locked at 0.1.0 for the Week 1 walking skeleton. Bump when the shape changes."
     },
+    "version": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Per-URI monotonic counter incremented on every successful elaboration. Clients pass `sinceVersion` in subsequent requests; matching versions return `{unchanged: true}` so the LSP skips serialization (TODO-1)."
+    },
+    "unchanged": {
+      "type": "boolean",
+      "description": "When true, the response carries no roots — the client's `sinceVersion` matches the cached tree. Always paired with `version`."
+    },
     "elaboratedAt": {
       "type": "string",
       "format": "date-time",

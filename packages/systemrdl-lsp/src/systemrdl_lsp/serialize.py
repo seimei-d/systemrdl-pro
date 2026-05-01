@@ -234,10 +234,27 @@ def _serialize_addressable(
     return None
 
 
+def _unchanged_envelope(version: int) -> dict[str, Any]:
+    """Tiny ``{unchanged: true, version}`` reply for `since_version` cache hits.
+
+    The schema permits omitting ``roots`` when ``unchanged`` is true so the
+    payload is constant-size regardless of tree size — that's the whole point
+    of TODO-1's version-gated path.
+    """
+    return {
+        "schemaVersion": ELABORATED_TREE_SCHEMA_VERSION,
+        "version": version,
+        "unchanged": True,
+        "stale": False,
+        "roots": [],
+    }
+
+
 def _serialize_root(
     roots_input: list[RootNode] | RootNode | None,
     stale: bool,
     path_translate: dict[pathlib.Path, pathlib.Path] | None = None,
+    version: int = 0,
 ) -> dict[str, Any]:
     """Build the JSON envelope matching ``schemas/elaborated-tree.json`` v0.1.0.
 
@@ -269,6 +286,8 @@ def _serialize_root(
 
     return {
         "schemaVersion": ELABORATED_TREE_SCHEMA_VERSION,
+        "version": version,
+        "unchanged": False,
         "elaboratedAt": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "stale": stale,
         "roots": serialized_roots,

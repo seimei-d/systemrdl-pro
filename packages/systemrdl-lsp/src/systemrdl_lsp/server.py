@@ -109,6 +109,7 @@ from .serialize import (
     _serialize_reg,
     _serialize_root,
     _src_ref_to_dict,
+    _unchanged_envelope,
 )
 
 if TYPE_CHECKING:
@@ -178,6 +179,7 @@ __all__ = [
     "_severity_to_lsp",
     "_src_ref_to_dict",
     "_src_ref_to_range",
+    "_unchanged_envelope",
     "_uri_to_path",
     "_word_at_position",
     "_workspace_symbols_for_uri",
@@ -234,11 +236,14 @@ def build_server() -> LanguageServer:
         roots: list[RootNode],
         tmp_path: pathlib.Path,
     ) -> None:
+        version_after: int | None = None
         if roots:
             # Cache takes ownership of the temp file (it backs lazy src_ref reads
             # for hover/documentSymbol). Old entry's temp file is unlinked there.
             state.cache.put(uri, roots, buffer_text, tmp_path)
             state.stale_uris.discard(uri)
+            cached = state.cache.get(uri)
+            version_after = cached.version if cached is not None else None
             try:
                 conflicts = _address_conflict_diagnostics(roots, tmp_path)
                 messages = list(messages) + conflicts
@@ -250,6 +255,20 @@ def build_server() -> LanguageServer:
             if state.cache.get(uri) is not None:
                 state.stale_uris.add(uri)
         _publish_diagnostics(server, uri, messages)
+
+        # TODO-1 push: notify the client that a fresh elaborated tree is ready.
+        # Payload is metadata-only ({uri, version}); the client decides whether
+        # to fetch the full tree (rdl/elaboratedTree with sinceVersion). This
+        # eliminates the user-perceptible refresh delay on save (extension
+        # used to wait for didSaveTextDocument before pulling a fresh tree).
+        if version_after is not None:
+            try:
+                server.send_notification(
+                    "rdl/elaboratedTreeChanged",
+                    {"uri": uri, "version": version_after},
+                )
+            except Exception:
+                logger.debug("could not send elaboratedTreeChanged notification", exc_info=True)
 
     def _check_perl_pre_flight(buffer_text: str) -> None:
         """One-shot warning when source uses ``<%`` markers but ``perl`` is missing.
@@ -548,21 +567,50 @@ def build_server() -> LanguageServer:
     def _on_elaborated_tree(_ls: LanguageServer, params: Any) -> dict[str, Any]:
         """Custom JSON-RPC: viewer fetches the latest elaborated tree for a URI.
 
+        TODO-1 contract:
+
+        - Request may include ``sinceVersion: int``. If it matches the LSP's
+          cached version, the response is a tiny ``{unchanged: true, version}``
+          envelope and the client keeps its previously-rendered tree intact.
+        - First request (no ``sinceVersion`` or stale value) returns the full
+          serialized tree, cached on the LSP side keyed by ``(uri, version)`` so
+          repeat fetches at the same version don't re-serialize.
+
         Schema: ``schemas/elaborated-tree.json`` v0.1.0. Returns the cached
         last-good tree when the current parse has failed (design D7).
         """
         uri = None
+        since_version: int | None = None
         if isinstance(params, dict):
             uri = params.get("uri") or params.get("textDocument", {}).get("uri")
+            raw = params.get("sinceVersion")
+            if isinstance(raw, int):
+                since_version = raw
         else:
             uri = getattr(params, "uri", None)
             if uri is None and hasattr(params, "text_document"):
                 uri = params.text_document.uri
+            raw = getattr(params, "sinceVersion", None)
+            if isinstance(raw, int):
+                since_version = raw
+
         if not uri:
-            return _serialize_root([], stale=False)
+            return _serialize_root([], stale=False, version=0)
         cached = state.cache.get(uri)
         if cached is None:
-            return _serialize_root([], stale=False)
+            return _serialize_root([], stale=False, version=0)
+
+        # Version-gated fast path: client already has this version, skip both
+        # serialization and transport of the (potentially huge) tree body.
+        if since_version is not None and since_version == cached.version:
+            return _unchanged_envelope(cached.version)
+
+        # Reuse the previously-serialized JSON when version hasn't advanced —
+        # multiple fetches at the same version (e.g. tab focus changes,
+        # re-mount) cost a dict reference rather than a full tree walk.
+        if cached.serialized is not None:
+            return cached.serialized
+
         try:
             original_path = _uri_to_path(uri)
         except ValueError:
@@ -572,10 +620,13 @@ def build_server() -> LanguageServer:
             if cached.temp_path is not None and original_path is not None
             else None
         )
-        return _serialize_root(
+        envelope = _serialize_root(
             cached.roots,
             stale=uri in state.stale_uris,
             path_translate=translate,
+            version=cached.version,
         )
+        cached.serialized = envelope
+        return envelope
 
     return server

@@ -343,6 +343,15 @@ class CachedElaboration:
     # underlying inst/SourceRef chain. Owned by the cache; unlinked when the
     # entry is replaced or cleared.
     temp_path: pathlib.Path | None = None
+    # Monotonic per-URI version. Incremented on every successful ``put`` so
+    # ``rdl/elaboratedTree`` clients can pass ``sinceVersion`` and the LSP
+    # answers with a tiny ``{unchanged: true}`` envelope when nothing changed
+    # (TODO-1: skip serialization on no-op refresh).
+    version: int = 0
+    # Serialized JSON dict, lazily populated on first ``rdl/elaboratedTree``
+    # request and re-used for every subsequent same-version request. Cleared
+    # whenever the entry is replaced.
+    serialized: dict[str, Any] | None = None
 
 
 class ElaborationCache:
@@ -371,10 +380,17 @@ class ElaborationCache:
         temp_path: pathlib.Path | None = None,
     ) -> None:
         old = self._entries.get(uri)
-        if old is not None and old.temp_path is not None:
-            old.temp_path.unlink(missing_ok=True)
+        old_version = 0
+        if old is not None:
+            old_version = old.version
+            if old.temp_path is not None:
+                old.temp_path.unlink(missing_ok=True)
         self._entries[uri] = CachedElaboration(
-            roots=roots, text=text, elaborated_at=time.time(), temp_path=temp_path
+            roots=roots,
+            text=text,
+            elaborated_at=time.time(),
+            temp_path=temp_path,
+            version=old_version + 1,
         )
 
     def clear(self) -> None:

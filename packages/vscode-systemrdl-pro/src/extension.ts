@@ -12,6 +12,13 @@ import {
 // will replace this hand-written shadow type in Week 5.
 type ElaboratedTree = {
   schemaVersion: '0.1.0';
+  // Per-URI monotonic counter. TODO-1: clients pass `sinceVersion` to skip
+  // serialization+transport when the cached tree hasn't advanced. Absent in
+  // the legacy reply shape so we keep it optional.
+  version?: number;
+  // True when the LSP recognized the client's `sinceVersion`. The body is
+  // empty in this case; the client must keep its previously-rendered tree.
+  unchanged?: boolean;
   elaboratedAt?: string;
   stale?: boolean;
   roots: Addrmap[];
@@ -246,6 +253,23 @@ async function startServer(context: vscode.ExtensionContext): Promise<void> {
   try {
     await client.start();
     outputChannel?.info(`LSP started via ${python}`);
+
+    // TODO-1: server-pushed "tree changed" notifications eliminate the wait
+    // for didSaveTextDocument. The payload is metadata-only (uri + version);
+    // refreshMemoryMap then asks for the body only when our cached version
+    // is older. Skip the refresh when no panel is open for that URI — no
+    // point re-fetching a tree nobody is rendering.
+    client.onNotification('rdl/elaboratedTreeChanged', (params: { uri: string; version: number }) => {
+      if (!params || typeof params.uri !== 'string') return;
+      const entry = memoryMapPanels.get(params.uri);
+      if (!entry) return;
+      // If we already have this exact version, the request would round-trip
+      // for no benefit; skip even the request.
+      if (entry.lastTree?.version === params.version) return;
+      refreshMemoryMap(params.uri).catch(err =>
+        outputChannel?.warn(`refresh on push failed: ${err}`),
+      );
+    });
   } catch (err) {
     outputChannel?.error(`Failed to start LSP: ${err}`);
     showRestartBanner();
@@ -513,13 +537,26 @@ async function refreshMemoryMap(uri: string): Promise<void> {
   if (!entry || !client) return;
 
   try {
-    const tree = await client.sendRequest<ElaboratedTree>('rdl/elaboratedTree', { uri });
-    safePostTo(entry, { type: 'tree', tree });
-    entry.lastTree = tree;
-    // Only update the status bar when the active editor is on this URI —
-    // otherwise the user sees the wrong file's count.
+    // TODO-1: send the version we last rendered so the LSP can skip
+    // serialization + transport when nothing changed (e.g. focus changes,
+    // panel re-mount, multiple notifications during a debounce window).
+    const sinceVersion = entry.lastTree?.version;
+    const reply = await client.sendRequest<ElaboratedTree>('rdl/elaboratedTree', {
+      uri,
+      ...(sinceVersion !== undefined ? { sinceVersion } : {}),
+    });
+    if (reply.unchanged) {
+      // Cached version still current — keep the existing tree, but refresh
+      // status-bar diagnostics counters since those track LSP-published diags
+      // independently of the tree.
+      const active = vscode.window.activeTextEditor?.document.uri.toString();
+      if (active === uri && entry.lastTree) updateStatusBar(entry.lastTree, uri);
+      return;
+    }
+    safePostTo(entry, { type: 'tree', tree: reply });
+    entry.lastTree = reply;
     const active = vscode.window.activeTextEditor?.document.uri.toString();
-    if (active === uri) updateStatusBar(tree, uri);
+    if (active === uri) updateStatusBar(reply, uri);
   } catch (err) {
     outputChannel?.error(`rdl/elaboratedTree failed: ${err}`);
     safePostTo(entry, {
