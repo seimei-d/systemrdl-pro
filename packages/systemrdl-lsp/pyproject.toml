@@ -1,14 +1,14 @@
 [project]
 name = "systemrdl-lsp"
-version = "0.15.0"
-description = "Language Server for SystemRDL 2.0 — diagnostics, hover, outline (powered by systemrdl-compiler)"
+version = "0.15.1"
+description = "Language Server Protocol implementation for SystemRDL 2.0 — diagnostics, hover, goto-def, completion, semantic tokens, and the full LSP feature surface (powered by systemrdl-compiler)"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "seimei-d" }]
 keywords = ["systemrdl", "lsp", "language-server", "hardware", "registers"]
 classifiers = [
-  "Development Status :: 3 - Alpha",
+  "Development Status :: 4 - Beta",
   "License :: OSI Approved :: MIT License",
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
