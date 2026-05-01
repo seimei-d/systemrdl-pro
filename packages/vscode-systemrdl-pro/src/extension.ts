@@ -16,6 +16,16 @@ import type {
 } from './types/elaborated-tree.generated';
 
 let client: LanguageClient | undefined;
+// Resolves once `client.start()` has succeeded. The webview-panel
+// deserializer awaits this so it doesn't race the LSP boot — without
+// it a panel restored on Reload Window arrives before the LSP is up
+// and gets an empty tree.
+let clientReady: Promise<void> = new Promise(() => { /* replaced in startServer */ });
+let signalClientReady: () => void = () => undefined;
+function resetClientReadyPromise(): void {
+  clientReady = new Promise(resolve => { signalClientReady = resolve; });
+}
+resetClientReadyPromise();
 let outputChannel: vscode.LogOutputChannel | undefined;
 
 // One Memory Map panel per .rdl file (markdown-preview-style). Key is the
@@ -133,6 +143,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           localResourceRoots: [viewerDist],
         };
         attachMemoryMapPanel(context, panel, uri);
+        // The LSP may still be starting — its `client.start()` hasn't
+        // resolved yet during early-activation deserialization. Wait
+        // for it, then open the document so the language client fires
+        // didOpen and the LSP populates its elaboration cache.
+        // Without this step the panel comes up empty — the user had to
+        // click into the editor to trigger a didOpen manually.
+        try {
+          await clientReady;
+          await vscode.workspace.openTextDocument(vscode.Uri.parse(uri));
+        } catch (err) {
+          outputChannel?.warn(`deserialize: open document failed for ${uri}: ${err}`);
+        }
         await refreshMemoryMap(uri).catch(() => undefined);
       },
     }),
@@ -215,6 +237,7 @@ async function startServer(context: vscode.ExtensionContext): Promise<void> {
   try {
     await client.start();
     outputChannel?.info(`LSP started via ${python}`);
+    signalClientReady();
 
     // TODO-1: server-pushed "tree changed" notifications eliminate the wait
     // for didSaveTextDocument. The payload is metadata-only (uri + version);
@@ -246,6 +269,9 @@ async function restartServer(context: vscode.ExtensionContext): Promise<void> {
     await client.stop();
     client = undefined;
   }
+  // Reset the readiness gate so any deserializer waiting on a previous
+  // promise gets the fresh signal from the new client.start().
+  resetClientReadyPromise();
   await startServer(context);
 }
 

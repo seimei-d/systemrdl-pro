@@ -2,7 +2,7 @@
   "name": "vscode-systemrdl-pro",
   "displayName": "SystemRDL Pro",
   "description": "Live diagnostics + interactive memory-map viewer for SystemRDL 2.0",
-  "version": "0.22.9",
+  "version": "0.22.10",
   "publisher": "seimei-d",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -17,7 +17,10 @@
   "bugs": { "url": "https://github.com/seimei-d/systemrdl-pro/issues" },
   "homepage": "https://github.com/seimei-d/systemrdl-pro#readme",
   "main": "./out/extension.js",
-  "activationEvents": ["onLanguage:systemrdl-pro"],
+  "activationEvents": [
+    "onLanguage:systemrdl-pro",
+    "onWebviewPanel:systemrdl-pro.memoryMap"
+  ],
   "contributes": {
     "languages": [
       {
