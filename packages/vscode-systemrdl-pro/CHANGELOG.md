@@ -4,6 +4,40 @@ All notable changes to **SystemRDL Pro** are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [SemVer](https://semver.org/).
 
+## [0.20.1] — 2026-05-01
+
+Hot-fixes for the four issues reported on 0.20.0:
+
+### Fixed
+
+- **Semantic tokens request failure caused editor lag.** The handler
+  was throwing on some buffers, and VSCode retries failing
+  `semanticTokens/full` on every keystroke — that's where the
+  "the bigger the window the more it lags" came from. Switched
+  registration to the simpler `SemanticTokensLegend` form (was
+  `SemanticTokensRegistrationOptions`) and wrapped the handler in
+  defensive try/except so a future bug returns empty tokens instead
+  of looping forever.
+- **Workspace pre-index defaulted to ON.** Multi-window setups had
+  every VSCode window racing its own pre-index walk, pegging CPU.
+  Default flipped to OFF; users who want workspace-wide search opt
+  in via `systemrdl-pro.preindex.enabled`. When enabled, the walker
+  is now serial (1 file at a time) with a 5 s startup delay so it
+  doesn't compete with initial editor activity.
+
+### Changed (viewer)
+
+- **Bit-field grid: multi-line names + no duplicate bit indices.**
+  Names like `TRANSMIT_BUFFER_FULL` were truncating to "f…" because
+  cells were locked single-line. They now wrap (`word-break`,
+  `overflow-wrap: anywhere`) and cells are taller. Bit ranges no
+  longer appear inside cells — the header row above already shows
+  every index, datasheet-style.
+- **Scroll-to-top button redesigned.** The pulsing blue circle was
+  too loud for a navigation aid. Replaced with a small chip-style
+  button (28×28, panel background, accent border on hover) carrying
+  an SVG chevron. Same position, much quieter.
+
 ## [0.20.0] — 2026-05-01
 
 Seven LSP features in one release. Hardware register-map editing now has

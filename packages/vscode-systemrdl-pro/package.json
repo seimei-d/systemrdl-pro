@@ -2,7 +2,7 @@
   "name": "vscode-systemrdl-pro",
   "displayName": "SystemRDL Pro",
   "description": "Live diagnostics + interactive memory-map viewer for SystemRDL 2.0",
-  "version": "0.20.0",
+  "version": "0.20.1",
   "publisher": "seimei-d",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -131,9 +131,9 @@
         },
         "systemrdl-pro.preindex.enabled": {
           "type": "boolean",
-          "default": true,
+          "default": false,
           "scope": "window",
-          "description": "Pre-elaborate every `.rdl` file in the workspace on startup so workspace-wide search (Ctrl+T) finds symbols without first opening the source. Disable on huge monorepos where startup cost matters more than instant search."
+          "description": "Pre-elaborate every `.rdl` file in the workspace on startup so workspace-wide search (Ctrl+T) finds symbols without first opening the source. Off by default — multi-window setups can peg the CPU. Enable if you rely on workspace-wide symbol search."
         },
         "systemrdl-pro.preindex.maxFiles": {
           "type": "integer",

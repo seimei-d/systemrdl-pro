@@ -128,7 +128,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-SERVER_VERSION = "0.14.0"
+SERVER_VERSION = "0.14.1"
 
 
 def _iter_rdl_files(root: pathlib.Path, exclude_dirs: set[str]):
@@ -268,7 +268,10 @@ class ServerState:
     diag_affected: dict[str, set[str]] = dataclasses.field(default_factory=dict)
     # Background pre-index toggles. workspace/symbol only sees files the user
     # has opened; pre-warming the cache fixes Ctrl+T against unfamiliar trees.
-    preindex_enabled: bool = True
+    # Default off — on a multi-window workspace each VSCode window starts its
+    # own LSP and the parallel pre-indexes pegged the CPU. Users who want
+    # workspace-wide search opt in via settings.json.
+    preindex_enabled: bool = False
     preindex_max_files: int = 200
 
 
@@ -437,14 +440,19 @@ def build_server() -> LanguageServer:
     async def _preindex_workspace() -> None:
         """Walk every workspace folder for ``.rdl`` files and pre-elaborate them.
 
-        ``workspace/symbol`` (Ctrl+T) only sees files the LSP has touched —
-        without pre-index, search-by-name finds nothing on first launch even
-        for files visible in the explorer. Concurrency is capped at 4 to
-        avoid pegging CPU on big workspaces; total file count capped by
-        ``state.preindex_max_files``.
+        Disabled by default. Enable with ``systemrdl-pro.preindex.enabled``.
+
+        Trade-off: ``workspace/symbol`` (Ctrl+T) only sees files the LSP has
+        touched, so a cold workspace finds nothing. Pre-warming fixes that
+        but parallel pre-indexes across multiple VSCode windows can peg the
+        CPU. We default off; users who care about cross-file search opt in.
+
+        When enabled: serial (one compile at a time), delayed by 5s after
+        startup so it doesn't compete with the editor's own initial activity.
         """
         if not state.preindex_enabled:
             return
+        await asyncio.sleep(5.0)  # let initial editor activity settle
         try:
             folders = list(server.workspace.folders.values()) if server.workspace.folders else []
         except Exception:
@@ -469,23 +477,21 @@ def build_server() -> LanguageServer:
                 )
                 break
 
-        logger.info("preindex: %d .rdl files queued", len(rdl_paths))
-        sem = asyncio.Semaphore(4)
-
-        async def warm(path: pathlib.Path) -> None:
-            async with sem:
-                uri = path.as_uri()
-                if state.cache.get(uri) is not None:
-                    return
-                try:
-                    text = await asyncio.get_running_loop().run_in_executor(
-                        None, lambda: path.read_text(encoding="utf-8", errors="replace"),
-                    )
-                except OSError:
-                    return
+        logger.info("preindex: %d .rdl files queued (serial)", len(rdl_paths))
+        for path in rdl_paths:
+            uri = path.as_uri()
+            if state.cache.get(uri) is not None:
+                continue
+            try:
+                text = await asyncio.get_running_loop().run_in_executor(
+                    None, lambda p=path: p.read_text(encoding="utf-8", errors="replace"),
+                )
+            except OSError:
+                continue
+            try:
                 await _full_pass_async(uri, text)
-
-        await asyncio.gather(*(warm(p) for p in rdl_paths), return_exceptions=True)
+            except Exception:
+                logger.exception("preindex failed for %s", uri)
         logger.info("preindex: done (%d files)", len(rdl_paths))
 
     async def _debounced_full_pass(uri: str) -> None:
@@ -845,17 +851,13 @@ def build_server() -> LanguageServer:
         TEXT_DOCUMENT_SEMANTIC_TOKENS_FULL,
         SemanticTokens,
         SemanticTokensLegend,
-        SemanticTokensRegistrationOptions,
     )
 
     @server.feature(
         TEXT_DOCUMENT_SEMANTIC_TOKENS_FULL,
-        SemanticTokensRegistrationOptions(
-            legend=SemanticTokensLegend(
-                token_types=TOKEN_TYPES,
-                token_modifiers=TOKEN_MODIFIERS,
-            ),
-            full=True,
+        SemanticTokensLegend(
+            token_types=TOKEN_TYPES,
+            token_modifiers=TOKEN_MODIFIERS,
         ),
     )
     def _on_semantic_tokens(_ls: LanguageServer, params: Any) -> SemanticTokens:
@@ -864,13 +866,21 @@ def build_server() -> LanguageServer:
         Pure textual scan — works on broken files, doesn't depend on a
         successful elaboration. The returned ``data`` is a flat int array per
         the LSP wire format (delta-encoded by line + char).
+
+        Defensive: any exception returns an empty token list so VSCode doesn't
+        retry on every keystroke (which manifests as full-editor lag — a
+        broken handler that throws gets re-invoked on every change).
         """
-        uri = params.text_document.uri
-        text = _read_buffer(uri)
-        if text is None:
-            cached = state.cache.get(uri)
-            text = cached.text if cached is not None else ""
-        return SemanticTokens(data=_semantic_tokens_for_text(text))
+        try:
+            uri = params.text_document.uri
+            text = _read_buffer(uri)
+            if text is None:
+                cached = state.cache.get(uri)
+                text = cached.text if cached is not None else ""
+            return SemanticTokens(data=_semantic_tokens_for_text(text))
+        except Exception:
+            logger.exception("semanticTokens/full handler failed; returning empty")
+            return SemanticTokens(data=[])
 
     @server.feature("textDocument/formatting")
     def _on_formatting(_ls: LanguageServer, params: Any) -> list[Any]:

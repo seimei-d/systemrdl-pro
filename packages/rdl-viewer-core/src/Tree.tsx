@@ -127,7 +127,11 @@ export function Tree({
             aria-label="Scroll to top"
             title="Scroll to top"
             onClick={scrollTop}
-          >▲</button>
+          >
+            <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+              <path d="M4 10 L8 6 L12 10" />
+            </svg>
+          </button>
         )}
       </div>
     </>

@@ -62,7 +62,6 @@ export function BitGrid({ reg }: Props) {
                 title={`reserved [${range}]`}
               >
                 <span className="fieldname">—</span>
-                <span className="bitrange">{range}</span>
               </div>
             );
           }
@@ -75,7 +74,6 @@ export function BitGrid({ reg }: Props) {
               title={`[${range}] ${c.field.name} (${acc.toUpperCase()})`}
             >
               <span className="fieldname">{c.field.name}</span>
-              <span className="bitrange">{range}</span>
             </div>
           );
         })}
