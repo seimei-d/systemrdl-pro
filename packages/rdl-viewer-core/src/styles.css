@@ -94,9 +94,38 @@ html, body { margin: 0; padding: 0; background: var(--rdl-bg); color: var(--rdl-
   50%      { box-shadow: 0 2px 16px rgba(74,158,255,0.85); transform: scale(1.06); }
 }
 .rdl-row .caret { color: var(--rdl-dim); font-size: 11px; text-align: right; }
-.rdl-row .caret-toggle { cursor: pointer; padding: 0 4px; border-radius: 2px;
-  transition: background 0.08s; }
-.rdl-row .caret-toggle:hover { background: rgba(74,158,255,0.18); color: var(--rdl-fg); }
+/* Real <button> for the expand/collapse affordance. Persistent subtle background
+   so it reads as a button at rest, not just on hover. SVG chevron scales cleanly
+   on HiDPI, unlike the ▼/▶ glyphs which were jagged at 11px. */
+.rdl-row .caret-toggle {
+  width: 22px; height: 22px;
+  margin: -2px 0 -2px auto;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: rgba(127,127,127,0.10);
+  border: 1px solid transparent;
+  border-radius: 3px;
+  padding: 0; cursor: pointer;
+  transition: background 0.1s, border-color 0.1s;
+  color: var(--rdl-fg);
+}
+.rdl-row .caret-toggle:hover {
+  background: rgba(74,158,255,0.22);
+  border-color: rgba(74,158,255,0.45);
+}
+.rdl-row .caret-toggle:active {
+  background: rgba(74,158,255,0.35);
+}
+.rdl-row .caret-toggle:focus-visible {
+  outline: 2px solid var(--rdl-accent); outline-offset: 1px;
+}
+.rdl-row .caret-toggle svg {
+  width: 10px; height: 10px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
 .rdl-row .addr { color: var(--rdl-dim); }
 .rdl-row .name { font-weight: 600; }
 .rdl-row .access { color: var(--rdl-dim); font-size: 12px; text-align: right;

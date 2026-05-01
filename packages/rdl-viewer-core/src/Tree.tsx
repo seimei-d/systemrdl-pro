@@ -155,7 +155,6 @@ function TreeRow({ row, selected, onSelectReg, onToggleCollapse, onContextMenu }
 
   if (row.kind === 'container') {
     const node = row.node;
-    const caret = row.expanded ? '▼' : '▶';
     const kindLabel = node.kind + (node.type ? ` (${node.type})` : '');
     return (
       <div
@@ -164,14 +163,20 @@ function TreeRow({ row, selected, onSelectReg, onToggleCollapse, onContextMenu }
         aria-level={row.depth + 1}
         aria-expanded={row.expanded}
         data-key={row.key}
-        title="Click caret to fold"
         onContextMenu={(e) => onContextMenu(e, row)}
       >
-        <span
-          className="caret caret-toggle"
+        <button
+          type="button"
+          className="caret-toggle"
+          aria-label={row.expanded ? 'Collapse' : 'Expand'}
+          aria-expanded={row.expanded}
           title={row.expanded ? 'Click to collapse' : 'Click to expand'}
           onClick={(e) => { e.stopPropagation(); onToggleCollapse(row.key); }}
-        >{caret}</span>
+        >
+          <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+            <path d={row.expanded ? 'M3 6 L8 11 L13 6' : 'M6 3 L11 8 L6 13'} />
+          </svg>
+        </button>
         <span className="addr">{node.address}</span>
         <span className="name">{node.name}</span>
         <span className="access" title={kindLabel}>{kindLabel}</span>
