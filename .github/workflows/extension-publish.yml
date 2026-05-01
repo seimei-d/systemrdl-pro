@@ -1,9 +1,25 @@
-name: Publish vscode-systemrdl-pro to Marketplace
+name: Publish systemrdl-pro to VSCode Marketplace (DISABLED — no VSCE_PAT)
 
+# DISABLED 2026-05-01.
+#
+# We do not have a valid Azure DevOps PAT for the official VSCode
+# Marketplace; every prior run failed with TF400813. Open VSX
+# (extension-publish-ovsx.yml) covers VSCodium / Cursor / Theia /
+# Gitpod users and works fine.
+#
+# To re-enable when a VSCE_PAT is available:
+#   1. Create a new PAT at https://dev.azure.com/{org}/_usersSettings/tokens
+#      with scope: Marketplace > Manage
+#   2. Add it to repo secrets at
+#      https://github.com/seimei-d/systemrdl-pro/settings/secrets/actions
+#      as `VSCE_PAT`
+#   3. Restore the on: block below to:
+#      on:
+#        push:
+#          tags: ["ext-v*"]
+#        workflow_dispatch:
 on:
-  push:
-    tags: ["ext-v*"]
-  workflow_dispatch:
+  workflow_dispatch:   # manual-only — won't auto-fire on ext-v* tags
 
 permissions:
   contents: read
