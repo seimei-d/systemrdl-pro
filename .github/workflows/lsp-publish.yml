@@ -19,9 +19,11 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v3
       - name: Build wheel + sdist
-        run: |
-          cd packages/systemrdl-lsp
-          uv build
+        # uv is workspace-aware — `uv build` from anywhere in the tree drops
+        # artifacts at the workspace root `dist/`, not the package-local one.
+        # Use --package + --out-dir to land them where pypa/gh-action-pypi-publish
+        # expects them.
+        run: uv build --package systemrdl-lsp --out-dir packages/systemrdl-lsp/dist/
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
