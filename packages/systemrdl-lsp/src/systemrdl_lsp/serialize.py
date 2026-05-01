@@ -34,7 +34,7 @@ class _TypeCache:
     - ``def_src_refs[def_id]`` -> serialized def_src_ref dict (or None)
     """
 
-    __slots__ = ("props", "def_src_refs")
+    __slots__ = ("def_src_refs", "props")
 
     def __init__(self) -> None:
         self.props: dict[tuple[int, str], Any] = {}
