@@ -1,3 +1,21 @@
+/* Theme tokens — three signals, in priority order:
+ *
+ *   1. VSCode webview body classes (`vscode-light`, `vscode-dark`,
+ *      `vscode-high-contrast`, `vscode-high-contrast-light`). VSCode
+ *      adds these on the body and updates them when the user changes
+ *      theme — authoritative for the embedded viewer.
+ *   2. `prefers-color-scheme` media query — covers the standalone CLI
+ *      where there is no VSCode wrapper.
+ *   3. `forced-colors: active` for Windows High Contrast Mode.
+ *
+ * VSCode body classes are listed BEFORE the media queries so they win
+ * when both apply: a user on a light OS who picks VSCode dark theme
+ * gets dark, not light.
+ */
+
+/* Default = DARK. Used by the standalone CLI when the OS preference
+   is dark (or unset) and inside VSCode webviews until a body class
+   resolves. */
 :root {
   color-scheme: dark light;
   --rdl-bg: #1e1e1e;
@@ -17,23 +35,35 @@
   --rdl-font-chrome: 'Inter', system-ui, sans-serif;
   --rdl-font-mono: 'JetBrains Mono', 'SF Mono', Consolas, monospace;
 }
+
+/* LIGHT palette — applied when the OS prefers light (browser CLI) OR
+   VSCode reports a light theme via the `vscode-light` body class. */
 @media (prefers-color-scheme: light) {
-  :root {
-    --rdl-bg: #ffffff;
-    --rdl-panel: #f5f5f5;
-    --rdl-chrome: #ececec;
-    --rdl-border: #d4d4d4;
-    --rdl-fg: #1a1a1a;
-    --rdl-dim: #6b6b6b;
-    --rdl-selected: #d6e7fa;
-    --rdl-accent: #0066cc;
-    --rdl-warning: #b87a18;
-    --rdl-acc-ro:  #5a7a90;
-    --rdl-acc-rw:  #3a8a5f;
-    --rdl-acc-w1c: #b87a18;
-    --rdl-acc-wo:  #4a5a90;
-    --rdl-acc-rsv: #8a3a3a;
-  }
+  :root { color-scheme: light; }
+  body { --rdl-bg: #ffffff; --rdl-panel: #f5f5f5; --rdl-chrome: #ececec;
+         --rdl-border: #d4d4d4; --rdl-fg: #1a1a1a; --rdl-dim: #6b6b6b;
+         --rdl-selected: #d6e7fa; --rdl-accent: #0066cc;
+         --rdl-warning: #b87a18; --rdl-acc-ro: #5a7a90; --rdl-acc-rw: #3a8a5f;
+         --rdl-acc-w1c: #b87a18; --rdl-acc-wo: #4a5a90; --rdl-acc-rsv: #8a3a3a; }
+}
+body.vscode-light, body.vscode-high-contrast-light {
+  color-scheme: light;
+  --rdl-bg: #ffffff; --rdl-panel: #f5f5f5; --rdl-chrome: #ececec;
+  --rdl-border: #d4d4d4; --rdl-fg: #1a1a1a; --rdl-dim: #6b6b6b;
+  --rdl-selected: #d6e7fa; --rdl-accent: #0066cc;
+  --rdl-warning: #b87a18; --rdl-acc-ro: #5a7a90; --rdl-acc-rw: #3a8a5f;
+  --rdl-acc-w1c: #b87a18; --rdl-acc-wo: #4a5a90; --rdl-acc-rsv: #8a3a3a;
+}
+
+/* Force DARK back when VSCode reports a dark theme — overrides the
+   prefers-color-scheme media query if the OS is light but VSCode is dark. */
+body.vscode-dark, body.vscode-high-contrast {
+  color-scheme: dark;
+  --rdl-bg: #1e1e1e; --rdl-panel: #252526; --rdl-chrome: #2d2d30;
+  --rdl-border: #3c3c3c; --rdl-fg: #d4d4d4; --rdl-dim: #858585;
+  --rdl-selected: #213c5a; --rdl-accent: #4a9eff;
+  --rdl-warning: #d7a85a; --rdl-acc-ro: #8aa6b8; --rdl-acc-rw: #6fb98f;
+  --rdl-acc-w1c: #d7a85a; --rdl-acc-wo: #7a87b8; --rdl-acc-rsv: #5a3a3a;
 }
 
 /* High-contrast theme. Activates on Windows High Contrast Mode and on
@@ -43,7 +73,8 @@
    the user's actual high-contrast scheme. WCAG AAA-friendly because the
    OS guarantees the contrast ratios. */
 @media (forced-colors: active) {
-  :root {
+  body, body.vscode-light, body.vscode-dark,
+  body.vscode-high-contrast, body.vscode-high-contrast-light {
     --rdl-bg: Canvas;
     --rdl-panel: Canvas;
     --rdl-chrome: Canvas;
@@ -62,13 +93,9 @@
     --rdl-acc-wo:  CanvasText;
     --rdl-acc-rsv: GrayText;
   }
-  /* Force underlines on links/buttons so they're distinguishable when
-     all colours collapse to CanvasText. */
   .rdl-tab.active, .rdl-overview-toggle, .rdl-tree-action {
     text-decoration: underline;
   }
-  /* Selected row needs an explicit border in HC since background tints
-     are unreliable. */
   .rdl-row.selected { outline: 2px solid Highlight; outline-offset: -2px; }
 }
 *, *::before, *::after { box-sizing: border-box; }
