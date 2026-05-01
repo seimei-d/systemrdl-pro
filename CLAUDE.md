@@ -29,8 +29,8 @@ Read these before making non-trivial changes:
 - **Decision 8B**: separate extension `vscode-systemrdl-pro` with language id `systemrdl-pro`
   (not `systemrdl`) — peaceful coexistence with `SystemRDL/vscode-systemrdl`.
 - **Decision 9A**: JSON Schema codegen in both directions (Python `TypedDict` + TS `type`).
-- **Approved viewer mockup**: `~/.gstack/projects/systemrdl-vscode/designs/viewer-panel-20260429/variant-B-tree-detail.html`
-  (Variant B — Tree + Detail Pane).
+- **Locked viewer layout**: Variant B — Tree + Detail Pane (locked in design review;
+  see `docs/design.md` for the D4-D15 UX decisions tied to this layout).
 
 ## Conventions
 

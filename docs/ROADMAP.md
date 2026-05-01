@@ -33,8 +33,8 @@ empty viewer panel that opens via "Show Memory Map" command.
 
 ## Week 4-5 — Live Svelte viewer
 
-Source of truth mockup: `~/.gstack/projects/systemrdl-vscode/designs/viewer-panel-20260429/variant-B-tree-detail.html`.
-All design decisions D4-D15 from the design review are non-negotiable inputs.
+Source of truth: the locked Variant B — Tree + Detail Pane layout. All
+design decisions D4-D15 in `docs/design.md` are non-negotiable inputs.
 
 - [x] `rdl-viewer-core`: React components (Viewer, Tree, TreeRow, Detail,
       ContextMenu) — went with React over Svelte per user choice 2026-04-30
@@ -48,7 +48,7 @@ All design decisions D4-D15 from the design review are non-negotiable inputs.
 - [x] Dark + light theme tokens (D14) — defined as CSS variables, follow
       `prefers-color-scheme`
 - [x] Auto-stack at < 700px viewport (D13) — actually always-stacked per user
-      feedback ("сделай всегда такой view")
+      feedback ("just always lay it out this way")
 - [x] WAI-ARIA Tree (roles + tabindex retained for screen readers; arrow-key
       nav was removed per user request 2026-04-30 — too easily disrupted by
       VSCode's editor focus model and not worth the maintenance)
@@ -71,7 +71,7 @@ All design decisions D4-D15 from the design review are non-negotiable inputs.
   full-tree push handles 1000-reg fixture in <1s)
 - TODO-4: Perl preprocessor polish — surface "perl missing" notification +
   `perlSafeOpcodes` setting (the preprocessor itself already works upstream)
-- TODO-V1: caret-toggle button visual polish ("UI кнопки ужасен")
+- TODO-V1: caret-toggle button visual polish ("the button UI is ugly")
 - TODO-R1: refactor `server.py` (~1500 lines) into themed modules
 - TODO-D1: user-overridable color palette
 - TODO-D2: high-contrast theme tokens
