@@ -62,6 +62,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand('systemrdl-pro.restartServer', () =>
       restartServer(context),
     ),
+    vscode.commands.registerCommand('systemrdl-pro.showIncludePaths', () =>
+      showIncludePaths(),
+    ),
     // Save → refresh the panel for that exact URI (if one is open).
     vscode.workspace.onDidSaveTextDocument(doc => {
       if (doc.languageId !== 'systemrdl-pro') return;
@@ -547,6 +550,66 @@ function pickTargetUri(): vscode.Uri | undefined {
     if (editor.document.languageId === 'systemrdl-pro') return editor.document.uri;
   }
   return undefined;
+}
+
+type IncludePathsReply = {
+  uri: string | null;
+  paths: { path: string; source: 'setting' | 'peakrdl.toml' | 'sibling' }[];
+};
+
+async function showIncludePaths(): Promise<void> {
+  const target = pickTargetUri();
+  if (!target) {
+    vscode.window.showInformationMessage(
+      'Open a SystemRDL (.rdl) file first — include paths are resolved per-file.',
+    );
+    return;
+  }
+  if (!client) {
+    vscode.window.showWarningMessage('LSP not running.');
+    return;
+  }
+
+  let reply: IncludePathsReply;
+  try {
+    reply = await client.sendRequest<IncludePathsReply>('rdl/includePaths', {
+      uri: target.toString(),
+    });
+  } catch (err) {
+    vscode.window.showErrorMessage(`rdl/includePaths failed: ${err}`);
+    return;
+  }
+
+  if (!reply.paths.length) {
+    vscode.window.showInformationMessage(
+      'No include search paths in effect. Set systemrdl-pro.includePaths or drop a peakrdl.toml.',
+    );
+    return;
+  }
+
+  const items: vscode.QuickPickItem[] = reply.paths.map(p => ({
+    label: p.path,
+    description: `· from ${p.source}`,
+    detail: p.source === 'setting'
+      ? 'systemrdl-pro.includePaths (workspace settings.json)'
+      : p.source === 'peakrdl.toml'
+        ? '[parser] incl_search_paths in an ancestor peakrdl.toml'
+        : "Implicit fallback to the file's own directory",
+  }));
+
+  const picked = await vscode.window.showQuickPick(items, {
+    title: `Effective include paths for ${vscode.workspace.asRelativePath(target)}`,
+    placeHolder: 'Press Enter on a path to reveal it in the OS file manager. Esc to dismiss.',
+    matchOnDescription: true,
+    matchOnDetail: true,
+  });
+  if (picked) {
+    try {
+      await vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(picked.label));
+    } catch (err) {
+      outputChannel?.warn(`revealFileInOS failed for ${picked.label}: ${err}`);
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -31,6 +31,7 @@ from systemrdl_lsp.server import (
     _peakrdl_toml_paths,
     _perl_available,
     _perl_in_source,
+    _resolve_search_paths,
     _src_ref_to_range,
     _word_at_position,
 )
@@ -639,6 +640,38 @@ def test_cache_version_increments_on_each_put(tmp_path):
     v2 = cache.get(uri).version
     assert v2 == v1 + 1, f"version must increment monotonically; {v1} → {v2}"
     cache.clear()
+
+
+def test_resolve_search_paths_dedups_and_labels(tmp_path):
+    """Three sources collapse into one ordered, deduped list with provenance.
+
+    Setting beats peakrdl.toml beats sibling-dir on collision (first-source-wins).
+    The user-explicit setting taking priority is the whole reason for the
+    `setting` label on the front of the list.
+    """
+    (tmp_path / "lib").mkdir()
+    (tmp_path / "shared").mkdir()
+    (tmp_path / "peakrdl.toml").write_text(
+        '[parser]\nincl_search_paths = ["lib", "shared"]\n',
+        encoding="utf-8",
+    )
+    rdl = tmp_path / "x.rdl"
+    rdl.write_text(VALID_RDL, encoding="utf-8")
+
+    setting_paths = [str(tmp_path / "lib"), "/some/other/dir"]
+    resolved = _resolve_search_paths(rdl.as_uri(), setting_paths)
+
+    sources = [src for _p, src in resolved]
+    paths = [p for p, _src in resolved]
+
+    # `lib` appears in BOTH setting and peakrdl.toml; setting wins → only one entry.
+    assert paths.count(str(tmp_path / "lib")) == 1
+    # Setting entries come first.
+    assert sources[0] == "setting"
+    # peakrdl.toml entries follow.
+    assert "peakrdl.toml" in sources
+    # File's own directory is the implicit `sibling` fallback.
+    assert any(s == "sibling" for s in sources)
 
 
 def test_cross_file_diagnostics_bucket_by_source(tmp_path):

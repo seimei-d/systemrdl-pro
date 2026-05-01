@@ -72,6 +72,7 @@ Powered by [`systemrdl-lsp`](https://pypi.org/project/systemrdl-lsp/) +
 |---------|------------------|------|
 | `SystemRDL: Show Memory Map` | **Ctrl+Shift+V** (Cmd+Shift+V on macOS), only on `.rdl` files | Open the memory-map viewer panel beside the editor. |
 | `SystemRDL: Restart Language Server` | — | Manually restart `systemrdl-lsp` (the extension also auto-restarts up to three times in 60 s on crash). |
+| `SystemRDL: Show effective include paths` | — | Quick-pick of the deduped include path list for the current `.rdl` file, labeled by source (`setting` / `peakrdl.toml` / `sibling`). Press Enter on a row to reveal it in your OS file manager. |
 
 ## Standalone CLI
 

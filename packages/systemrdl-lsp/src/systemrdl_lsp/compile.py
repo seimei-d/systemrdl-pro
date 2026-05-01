@@ -144,6 +144,47 @@ def _expand_include_vars(text: str, vars_map: dict[str, str]) -> str:
     return _INCLUDE_DIRECTIVE_RE.sub(expand_path, text)
 
 
+def _resolve_search_paths(
+    uri: str, setting_paths: list[str] | None = None
+) -> list[tuple[str, str]]:
+    r"""Return the deduped, source-labeled include search path list for ``uri``.
+
+    Sources, in priority order:
+
+    1. ``"setting"`` — entries from ``systemrdl-pro.includePaths`` (workspace
+       settings.json). User-explicit, wins on ties.
+    2. ``"peakrdl.toml"`` — paths from a ``[parser] incl_search_paths``
+       block in any ancestor ``peakrdl.toml`` (auto-discovered, matches
+       PeakRDL CLI semantics).
+    3. ``"sibling"`` — implicit fallback to the file's own directory so
+       relative `\include "x.rdl"` works without extra config.
+
+    Dedup is by literal path string. Workspace-relative paths from the setting
+    are left unresolved here (handled downstream by the compiler); peakrdl.toml
+    paths are already absolutized.
+    """
+    seen: set[str] = set()
+    out: list[tuple[str, str]] = []
+
+    def push(p: str, source: str) -> None:
+        if not p or p in seen:
+            return
+        seen.add(p)
+        out.append((p, source))
+
+    for p in setting_paths or []:
+        push(str(p), "setting")
+
+    original_path = _uri_to_path(uri)
+    for p in _peakrdl_toml_paths(original_path):
+        push(p, "peakrdl.toml")
+
+    if original_path.parent.exists():
+        push(str(original_path.parent), "sibling")
+
+    return out
+
+
 def _peakrdl_toml_paths(start: pathlib.Path) -> list[str]:
     """Walk upward from ``start`` looking for ``peakrdl.toml`` and read its
     ``[parser] incl_search_paths`` array.
@@ -244,12 +285,10 @@ def _compile_text(
     from systemrdl.component import Addrmap
 
     original_path = _uri_to_path(uri)
-    search_paths = list(incl_search_paths or [])
-    # peakrdl.toml's [parser] incl_search_paths are appended *after* the user's
-    # explicit setting, so per-workspace overrides win on collision.
-    search_paths.extend(_peakrdl_toml_paths(original_path))
-    if original_path.parent.exists():
-        search_paths.append(str(original_path.parent))
+    # Deduped, source-labeled list — _resolve_search_paths is also exposed
+    # to clients via the rdl/includePaths JSON-RPC for the "Show effective
+    # include paths" command.
+    search_paths = [p for p, _src in _resolve_search_paths(uri, incl_search_paths)]
 
     printer = CapturingPrinter()
     compiler_kwargs: dict[str, Any] = {"message_printer": printer}

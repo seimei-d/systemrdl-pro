@@ -58,6 +58,7 @@ from .compile import (
     _peakrdl_toml_paths,
     _perl_available,
     _perl_in_source,
+    _resolve_search_paths,
     _SimpleRef,
 )
 from .completion import (
@@ -117,7 +118,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-SERVER_VERSION = "0.12.0"
+SERVER_VERSION = "0.13.0"
 DEBOUNCE_SECONDS = 0.3
 # Eng-review safety net #3: cap a single elaborate pass at 10s wall-clock.
 # Past that we keep last-good (D7) and surface a synthetic diagnostic. A pathological
@@ -171,6 +172,7 @@ __all__ = [
     "_path_to_uri",
     "_peakrdl_toml_paths",
     "_publish_diagnostics",
+    "_resolve_search_paths",
     "_safe_get_property",
     "_serialize_addressable",
     "_serialize_field",
@@ -573,6 +575,32 @@ def build_server() -> LanguageServer:
             else None
         )
         return _definition_location(comp, translate)
+
+    @server.feature("rdl/includePaths")
+    def _on_include_paths(_ls: LanguageServer, params: Any) -> dict[str, Any]:
+        """Return the deduped, source-labeled include search path list for a URI.
+
+        Powers the "SystemRDL: Show effective include paths" command. Lets the
+        user see exactly which paths are in effect — formerly opaque, especially
+        with multiple sources (settings.json + peakrdl.toml + sibling-dir).
+        """
+        uri = None
+        if isinstance(params, dict):
+            uri = params.get("uri") or params.get("textDocument", {}).get("uri")
+        else:
+            uri = getattr(params, "uri", None)
+            if uri is None and hasattr(params, "text_document"):
+                uri = params.text_document.uri
+        if not uri:
+            return {"uri": None, "paths": []}
+        try:
+            resolved = _resolve_search_paths(uri, state.include_paths)
+        except (ValueError, OSError):
+            resolved = []
+        return {
+            "uri": uri,
+            "paths": [{"path": p, "source": src} for p, src in resolved],
+        }
 
     @server.feature("rdl/elaboratedTree")
     def _on_elaborated_tree(_ls: LanguageServer, params: Any) -> dict[str, Any]:
