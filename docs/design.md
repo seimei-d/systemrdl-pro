@@ -86,8 +86,9 @@ either match an existing decision or go through a fresh design review.
 - Two-way editing (modify the rendered map → patch the source) — same.
 - A custom parser. We rely on `systemrdl-compiler` exclusively.
 
-## Future work — see [`../TODOS.md`](../TODOS.md)
+## Future work
 
-The TODOS file tracks deferred work with the rationale for deferring.
-Promotions to active require either user request or hitting the
-trigger condition listed in the TODO body.
+Roadmap items (when there are any) live in
+[`docs/ROADMAP.md`](ROADMAP.md). Bug reports and feature requests go
+through
+[GitHub Issues](https://github.com/seimei-d/systemrdl-pro/issues).

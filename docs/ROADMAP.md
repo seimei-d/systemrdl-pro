@@ -71,21 +71,10 @@ design decisions D4-D15 in `docs/design.md` are non-negotiable inputs.
 - [x] Cursor position in editor → viewer auto-selects matching tree node (D10, 500ms debounce)
 - [x] Right-click context menu in viewer: Copy Address / Copy Name / Reveal in Editor (U5)
 
-## Deferred (TODOS.md)
-
-- TODO-1: diff-based JSON-RPC push (after profiling shows >200ms lag — current
-  full-tree push handles 1000-reg fixture in <1s)
-- TODO-4: Perl preprocessor polish — surface "perl missing" notification +
-  `perlSafeOpcodes` setting (the preprocessor itself already works upstream)
-- TODO-V1: caret-toggle button visual polish ("the button UI is ugly")
-- TODO-R1: refactor `server.py` (~1500 lines) into themed modules
-- TODO-D1: user-overridable color palette
-- TODO-D2: high-contrast theme tokens
-
 ## Beyond Week 6 (post-v0.20.0)
 
-Most of the post-Week-6 work landed in batches; see the full
-[`TODOS.md`](../TODOS.md) (now empty) and the v0.22.10 release notes:
+Most of the post-Week-6 work landed in batches — every backlog
+item that existed at v0.20.0 has shipped:
 
 - **server.py refactor** (TODO-R1) — split into seven themed modules
   (`compile`, `diagnostics`, `hover`, `completion`, `definition`,

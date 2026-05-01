@@ -14,7 +14,6 @@ Read these before making non-trivial changes:
 - `docs/design.md` — full design doc, including the **Viewer UX** section that locks 12 design
   decisions (D4-D15). Do not change UX without an approved design review.
 - `docs/ROADMAP.md` — Week 1-6 build sequence.
-- `TODOS.md` — deferred work with rationale.
 - `schemas/elaborated-tree.json` — JSON Schema source of truth for the elaborated AST shape.
 
 ## Locked architectural decisions (do not relitigate without explicit user request)
