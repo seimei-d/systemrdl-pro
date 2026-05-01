@@ -4,7 +4,6 @@ import { findFirstReg, findRegByKey, isContainer, subtreeMatches, type FilterSco
 import { buildFlatList, FlatRow, Tree } from './Tree';
 import { Detail } from './Detail';
 import { ContextMenu, CtxMenuItem, CtxMenuState } from './ContextMenu';
-import { OverviewMap } from './OverviewMap';
 
 type Props = { transport: Transport };
 
@@ -17,7 +16,6 @@ export function Viewer({ transport }: Props) {
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
   const [ctxMenu, setCtxMenu] = useState<CtxMenuState>(null);
   const [toast, setToast] = useState<string | null>(null);
-  const [overviewOpen, setOverviewOpen] = useState(true);
 
   // Initial fetch + live updates.
   useEffect(() => {
@@ -79,14 +77,6 @@ export function Viewer({ transport }: Props) {
   const selectReg = useCallback((row: FlatRow & { kind: 'reg' }) => {
     setSelectedKey(row.key);
     if (row.node.source && transport.reveal) transport.reveal(row.node.source);
-  }, [transport]);
-
-  const onOverviewReveal = useCallback((reg: Reg, segs: string[]) => {
-    // Selecting by `segs.join('.')` matches the key format buildFlatList /
-    // findRegByKey use in the tree, so the reg auto-highlights in the
-    // tree below as soon as the user clicks an overview tile.
-    setSelectedKey(segs.join('.'));
-    if (reg.source && transport.reveal) transport.reveal(reg.source);
   }, [transport]);
 
   // Cmd/Ctrl-F to focus filter (the input is already in the page; we just focus it).
@@ -184,18 +174,8 @@ export function Viewer({ transport }: Props) {
             }}
           >{r.name}</button>
         ))}
-        <button
-          className="rdl-overview-toggle"
-          type="button"
-          aria-pressed={overviewOpen}
-          title={overviewOpen ? 'Hide map overview' : 'Show map overview'}
-          onClick={() => setOverviewOpen(o => !o)}
-        >{overviewOpen ? 'Hide map' : 'Show map'}</button>
       </div>
-      <div className={'rdl-body' + (overviewOpen ? ' with-overview' : '')}>
-        {overviewOpen && root && (
-          <OverviewMap root={root} onRevealReg={onOverviewReveal} />
-        )}
+      <div className="rdl-body">
         <div className="rdl-tree-pane">
           <div className="rdl-filter-bar">
             <div className="rdl-filter-row">
