@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: SystemRDL specification
+    url: https://www.accellera.org/downloads/standards/systemrdl
+    about: Questions about the SystemRDL 2.0 language itself (not this extension).
+  - name: systemrdl-compiler
+    url: https://github.com/SystemRDL/systemrdl-compiler/issues
+    about: Bugs in parsing / elaboration / Perl preprocessor — those live upstream.

@@ -1,0 +1,83 @@
+name: Bug report
+description: Something doesn't work as expected.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing! Please fill in everything below — vague reports
+        end up sitting in the queue while we ask follow-up questions.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: |
+        What did you do, what did you see, what did you expect to see instead?
+        Screenshots welcome (drag-drop into the field).
+      placeholder: |
+        I clicked … and the editor … but I expected ….
+    validations:
+      required: true
+
+  - type: textarea
+    id: rdl-snippet
+    attributes:
+      label: Minimal `.rdl` that triggers it
+      description: |
+        Smallest snippet that reproduces. If the file is large, please reduce
+        it — half of bug reports become 5-line repros after reduction.
+      render: rdl
+      placeholder: |
+        addrmap top {
+            reg { field { sw=rw; hw=r; } a[0:0]=0; } CTRL @ 0;
+        };
+    validations:
+      required: true
+
+  - type: input
+    id: extension-version
+    attributes:
+      label: Extension version
+      description: From VSCode → Extensions → SystemRDL Pro → details panel.
+      placeholder: "0.22.10"
+    validations:
+      required: true
+
+  - type: input
+    id: lsp-version
+    attributes:
+      label: LSP backend version
+      description: |
+        Run `uv pip show systemrdl-lsp | grep Version` (or `pip show
+        systemrdl-lsp`) — or look at the first line of the SystemRDL Pro
+        output panel after a restart.
+      placeholder: "0.15.0"
+    validations:
+      required: true
+
+  - type: input
+    id: vscode-version
+    attributes:
+      label: VSCode version
+      description: VSCode → Help → About.
+      placeholder: "1.95.3"
+    validations:
+      required: true
+
+  - type: input
+    id: platform
+    attributes:
+      label: OS / platform
+      placeholder: "Ubuntu 24.04 / macOS 14.5 / Windows 11 + WSL2"
+    validations:
+      required: true
+
+  - type: textarea
+    id: log-output
+    attributes:
+      label: LSP log output (optional but helpful)
+      description: |
+        Set `systemrdl-pro.trace.server` to `verbose`, restart the LSP, reproduce,
+        then paste the relevant lines from the "SystemRDL Pro" output channel.
+      render: text

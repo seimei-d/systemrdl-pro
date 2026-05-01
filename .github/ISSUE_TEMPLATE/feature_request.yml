@@ -1,0 +1,46 @@
+name: Feature request
+description: Capability you want added or extended.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: |
+        What are you trying to do? Why does the current extension make it
+        hard? Concrete scenarios beat abstract requests.
+      placeholder: |
+        I work with parametric RDL files where each chip variant overrides
+        WIDTH. When I read someone else's code I can't tell …
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: |
+        How would you like this to work in the extension? UX details, what
+        commands or hovers should appear, etc. Sketches / mockups welcome.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches you thought about, even if rejected.
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Which surface?
+      multiple: true
+      options:
+        - LSP (editor — diagnostics, hover, completion, goto-def, …)
+        - Memory Map viewer (tree, detail, bit grid)
+        - Extension wiring (settings, commands, walkthrough)
+        - CLI viewer (`rdl-viewer`)
+        - Documentation
+    validations:
+      required: true

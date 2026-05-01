@@ -1,0 +1,33 @@
+name: Question
+description: Usage / setup question that isn't (yet) a bug.
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Setup or usage question? Please make sure you've looked at:
+
+        - [README](https://github.com/seimei-d/systemrdl-pro/blob/main/packages/vscode-systemrdl-pro/README.md)
+        - [examples/README.md](https://github.com/seimei-d/systemrdl-pro/tree/main/examples)
+        - [docs/architecture.md](https://github.com/seimei-d/systemrdl-pro/blob/main/docs/architecture.md)
+
+        For SystemRDL language questions (not extension behaviour),
+        try the [Accellera spec](https://www.accellera.org/downloads/standards/systemrdl)
+        or the [`systemrdl-compiler` issue tracker](https://github.com/SystemRDL/systemrdl-compiler/issues)
+        upstream.
+
+  - type: textarea
+    id: question
+    attributes:
+      label: Your question
+      description: |
+        What are you trying to do, and where are you stuck? Concrete
+        commands / settings / `.rdl` snippets help us answer fast.
+    validations:
+      required: true
+
+  - type: textarea
+    id: tried
+    attributes:
+      label: What have you tried?
+      description: Even non-working attempts help us see what isn't obvious yet.
