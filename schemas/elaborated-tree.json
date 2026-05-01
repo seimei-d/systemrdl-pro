@@ -50,6 +50,10 @@
         "address": { "$ref": "#/$defs/HexU64" },
         "size": { "$ref": "#/$defs/HexU64" },
         "desc": { "type": "string" },
+        "isBridge": {
+          "type": "boolean",
+          "description": "True when the addrmap is marked as a bus bridge (SystemRDL clause 9.2). RTL backends use it as a synthesis hint; the viewer surfaces it in tooltips."
+        },
         "source": { "$ref": "#/$defs/SourceLoc" },
         "children": {
           "type": "array",

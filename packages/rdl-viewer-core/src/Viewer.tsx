@@ -200,7 +200,12 @@ export function Viewer({ transport }: Props) {
             className={'rdl-tab' + (i === activeRoot ? ' active' : '')}
             role="tab"
             aria-selected={i === activeRoot}
-            title={`${r.type ? r.type + ' · ' : ''}${r.address} · click to reveal in editor`}
+            title={[
+              r.type,
+              r.address,
+              r.isBridge ? 'bridge' : null,
+              'click to reveal in editor',
+            ].filter(Boolean).join(' · ')}
             onClick={() => {
               // Switch active tab if different.
               if (i !== activeRoot) {
@@ -212,7 +217,12 @@ export function Viewer({ transport }: Props) {
               // tabs are the primary surface for jumping to a top-level addrmap.
               if (r.source && transport.reveal) transport.reveal(r.source);
             }}
-          >{r.name}</button>
+          >
+            {r.name}
+            {r.isBridge && (
+              <span className="rdl-tag bridge" title="Bridge addrmap (clause 9.2)">bridge</span>
+            )}
+          </button>
         ))}
       </div>
       <div className="rdl-body">

@@ -339,6 +339,8 @@ html, body { margin: 0; padding: 0; background: var(--rdl-bg); color: var(--rdl-
 }
 .rdl-tag.counter { color: var(--rdl-acc-rw);   background: rgba(111,185,143,0.16); }
 .rdl-tag.intr    { color: var(--rdl-warning);  background: rgba(215,168,90,0.18); }
+.rdl-tag.bridge  { color: var(--rdl-accent);   background: rgba(74,158,255,0.16); margin-left: 8px; }
+.rdl-tab .rdl-tag.bridge { font-size: 9px; line-height: 14px; padding: 0 5px; }
 /* Bit-grid cells stay as glyph-only because there's no horizontal room for
    a text tag — the whole cell may be 4 bits wide. */
 .rdl-bitgrid-cell .rdl-badge {

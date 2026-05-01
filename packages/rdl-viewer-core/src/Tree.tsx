@@ -164,7 +164,10 @@ function TreeRow({
 
   if (row.kind === 'container') {
     const node = row.node;
-    const kindLabel = node.kind + (node.type ? ` (${node.type})` : '');
+    const isBridge = node.kind === 'addrmap' && (node as { isBridge?: boolean }).isBridge;
+    const kindLabel = node.kind + (node.type ? ` (${node.type})` : '') + (isBridge ? ' · bridge' : '');
+    const rowTitle = (isBridge ? 'bridge addrmap · ' : '') +
+      'Click to reveal in editor · use the chevron to collapse';
     // Click on the row body (not the caret button) reveals the container's
     // source in the host editor — same UX as register rows. Caret button
     // keeps its own click handler with stopPropagation so it only collapses,
@@ -178,7 +181,7 @@ function TreeRow({
         data-key={row.key}
         onClick={() => onRevealContainer(row)}
         onContextMenu={(e) => onContextMenu(e, row)}
-        title="Click to reveal in editor · use the chevron to collapse"
+        title={rowTitle}
         style={{ cursor: 'pointer' }}
       >
         <button

@@ -79,6 +79,7 @@ class Addrmap(TypedDict):
     address: "HexU64"
     size: "HexU64"
     desc: NotRequired[str]
+    isBridge: NotRequired[bool]
     source: NotRequired["SourceLoc"]
     children: list[Union["Addrmap", "Regfile", "Reg"]]
 

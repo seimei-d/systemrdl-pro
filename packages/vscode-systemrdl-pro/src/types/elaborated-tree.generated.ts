@@ -70,6 +70,7 @@ export type Addrmap = {
   address: HexU64;
   size: HexU64;
   desc?: string;
+  isBridge?: boolean;
   source?: SourceLoc;
   children: (Addrmap | Regfile | Reg)[];
 };

@@ -272,6 +272,14 @@ def _serialize_addressable(
         }
         if hasattr(node.inst, "type_name") and node.inst.type_name:
             out["type"] = str(node.inst.type_name)
+        # Bridge flag (clause 9.2) — only meaningful on AddrmapNode but
+        # safe to read on regfiles too (returns False / LookupError there).
+        if isinstance(node, AddrmapNode):
+            try:
+                if node.get_property("bridge"):
+                    out["isBridge"] = True
+            except (LookupError, AttributeError):
+                pass
         display_name = _safe_get_property(node, "name")
         if display_name:
             out["displayName"] = str(display_name)
