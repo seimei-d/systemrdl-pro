@@ -232,6 +232,21 @@ async function startServer(context: vscode.ExtensionContext): Promise<void> {
     clientOptions,
   );
 
+  // T1.6: register a StaticFeature that injects experimental.systemrdlLazyTree
+  // into the InitializeParams. Server reads this in INITIALIZED and switches
+  // its rdl/elaboratedTree responses to spine envelopes (placeholder regs +
+  // on-demand expandNode). Old servers see an unknown experimental key and
+  // ignore it; we still get a full tree from them. Forward-compat both ways.
+  client.registerFeature({
+    fillClientCapabilities: (capabilities: { experimental?: Record<string, unknown> }) => {
+      const exp = (capabilities.experimental ??= {});
+      exp.systemrdlLazyTree = true;
+    },
+    initialize: () => {},
+    getState: () => ({ kind: 'static' as const }),
+    clear: () => {},
+  });
+
   context.subscriptions.push({ dispose: () => client?.stop() });
 
   try {
@@ -476,15 +491,59 @@ function safePostTo(entry: PanelEntry, message: unknown): void {
 
 type WebviewMessage =
   | { type: 'reveal'; source: SourceLoc }
-  | { type: 'copy'; text: string; label?: string };
+  | { type: 'copy'; text: string; label?: string }
+  | { type: 'expandNode'; uri: string; version: number; nodeId: string };
 
-async function handleWebviewMessage(msg: WebviewMessage, _panelUri: string): Promise<void> {
+async function handleWebviewMessage(msg: WebviewMessage, panelUri: string): Promise<void> {
   if (msg.type === 'reveal') {
     await revealLocation(msg.source);
   } else if (msg.type === 'copy') {
     await vscode.env.clipboard.writeText(msg.text);
     const label = msg.label || 'value';
     vscode.window.setStatusBarMessage(`Copied ${label}: ${msg.text}`, 2_000);
+  } else if (msg.type === 'expandNode') {
+    // T1.6: viewer asked to flesh out a placeholder reg's fields[]. Forward
+    // to the LSP, post the result back to the webview, and splice it into
+    // entry.lastTree so subsequent sinceVersion checks stay coherent.
+    if (!client) return;
+    const entry = memoryMapPanels.get(panelUri);
+    if (!entry) return;
+    try {
+      const reg = await client.sendRequest<unknown>('rdl/expandNode', {
+        uri: msg.uri,
+        version: msg.version,
+        nodeId: msg.nodeId,
+      });
+      safePostTo(entry, { type: 'expandNodeResult', nodeId: msg.nodeId, reg });
+      if (entry.lastTree) {
+        spliceExpandedNode(entry.lastTree, msg.nodeId, reg);
+      }
+    } catch (err) {
+      outputChannel?.warn(`rdl/expandNode failed for ${msg.nodeId}: ${err}`);
+      safePostTo(entry, {
+        type: 'expandNodeError',
+        nodeId: msg.nodeId,
+        message: String(err),
+      });
+    }
+  }
+}
+
+/** Walk an ElaboratedTree and replace the matching placeholder reg with
+ * the expanded full reg dict. Mutates `tree` in place. T1.6: keeps
+ * `entry.lastTree` consistent with what the webview now displays so the
+ * next sinceVersion check on the same version returns `unchanged` correctly.
+ */
+function spliceExpandedNode(tree: ElaboratedTree, nodeId: string, expanded: unknown): void {
+  type Walkable = { nodeId?: string; children?: unknown[]; fields?: unknown[]; loadState?: string; kind?: string };
+  const stack: Walkable[] = [...((tree.roots as Walkable[]) ?? [])];
+  while (stack.length > 0) {
+    const node = stack.pop()!;
+    if (node.kind === 'reg' && node.nodeId === nodeId && node.loadState === 'placeholder') {
+      Object.assign(node, expanded);
+      return;
+    }
+    if (Array.isArray(node.children)) stack.push(...(node.children as Walkable[]));
   }
 }
 
