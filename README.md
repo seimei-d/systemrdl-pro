@@ -1,3 +1,5 @@
+<img src="packages/vscode-systemrdl-pro/media/icon.svg" width="96" alt="systemrdl-pro icon" align="right">
+
 # systemrdl-pro
 
 LSP server + interactive memory-map viewer for the

@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- Variant A: Bit Quadrant — 2x2 grid of access-mode bit-cells -->
+  <rect width="1024" height="1024" rx="184" fill="#1e1e1e"/>
+  <g transform="translate(160 160)">
+    <!-- 2x2 grid: 704x704 area, 32px gap, 336x336 cells, 24px corner radius -->
+    <rect x="0"   y="0"   width="336" height="336" rx="24" fill="#6fb98f"/>  <!-- RW  green     -->
+    <rect x="368" y="0"   width="336" height="336" rx="24" fill="#8aa6b8"/>  <!-- RO  blue-grey -->
+    <rect x="0"   y="368" width="336" height="336" rx="24" fill="#d7a85a"/>  <!-- W1C amber     -->
+    <rect x="368" y="368" width="336" height="336" rx="24" fill="#7a87b8"/>  <!-- WO  purple    -->
+  </g>
+</svg>
