@@ -2,61 +2,6 @@
 
 ## Deferred
 
-### TODO-1: Diff-based JSON-RPC push for elaborated tree
-
-**What:** Replace full-tree push (`rdl/elaboratedTree`) with diff push for incremental updates.
-
-**Why:** On large register maps (5MB+ JSON), pushing the full tree on every edit causes
-serialization lag (~1s on the LSP side, similar on viewer parse). User-perceptible.
-
-**Pros:** Latency stays sub-100ms even for very large maps. Less memory churn in viewer.
-**Cons:** Tree-id + version tracking on every node. More complex invalidation logic. Risk
-of subtle bugs where viewer state diverges from LSP state.
-
-**Context:** Current MVP design (Approach B, week 4-5) does full tree push on every
-elaboration with 300ms debounce. Profile real-world maps (typical chip: 500-2000 regs,
-200KB-1MB JSON) before deciding if needed. If profiling shows >200ms lag on viewer side,
-graduate this from TODO to active work.
-
-**Depends on / blocked by:** Need real usage profiling first. Premature optimization
-otherwise. Triggered when first user reports "viewer feels slow on my chip."
-
----
-
-### TODO-4: Perl preprocessor — surface options & document caveats (RESOLVED upstream)
-
-**STATUS update 2026-04-30:** systemrdl-compiler 1.32.x **already supports** the
-Perl preprocessor — `systemrdl/preprocessor/perl_preprocessor.py` shells out to a
-real `perl` binary via subprocess. ``compile_file()`` runs Perl + Verilog
-preprocessors in order before parsing. Earlier README claim was wrong.
-
-**Tested working** with `<% for my $i (0..3) { %>… <%=$i%> …<% } %>` register
-generation on the dev machine.
-
-**What's left (small, surface-level):**
-
-- **Pre-flight check**: when `perl` is not on PATH, the LSP should detect it
-  and show a one-time "install Perl to enable Perl preprocessor" notification
-  instead of letting the fatal diagnostic fire on every save.
-- **Setting** `systemrdl-pro.perlSafeOpcodes`: the compiler's default Perl
-  ``Safe`` opcode set bans `print` and most I/O. Power users who do code
-  generation via `print` need to extend the list (add `:base_io`). Plumb the
-  setting through to `RDLCompiler(perl_safe_opcodes=…)`.
-- **Document the gotcha**: `<%=expr%>` rejects leading whitespace inside the
-  tags — `<%= $i %>` errors with "Invalid text found in Perl macro expansion".
-  README + a sample that demonstrates the working form.
-
-**Not in scope:** my own `$VAR` substitution (committed 2026-04-30) overlaps
-with what Perl can do via `<%=$ENV{IP_ROOT}%>`. Keep the lightweight setting
-for users who don't have `perl` installed; users with perl can use the full
-preprocessor instead.
-
-**Depends on / blocked by:** Nothing — incremental polish on an already-working
-feature. Promote to active when a user reports `perl` not detected or runs
-into the safe-opcode wall.
-
----
-
 ### TODO-D1: User-overridable color palette via VSCode settings.json
 
 **What:** Allow workspace/user override of access-mode colors and chrome tokens via
@@ -79,74 +24,6 @@ Add when first user opens an issue with concrete corp palette.
 
 **Depends on / blocked by:** v1.0 must ship first. CSS variable architecture is a
 prerequisite, already in Pass 5 design tokens.
-
----
-
-### TODO-V1: Polish caret-toggle button visual
-
-**What:** The `.caret-toggle` span in the tree-pane container row works but reads
-as a hover-highlighted text glyph, not a button. User feedback 2026-04-30:
-"UI кнопки ужасен."
-
-**Why:** Affordance is unclear — the caret looks identical to a regular row's
-caret column except on hover. New users don't realise it's a click target.
-
-**Pros (of fix):** Higher discoverability, more polished feel.
-**Cons:** Risks breaking the tree's information density — anything bigger
-crowds the addr/name columns.
-
-**Sketch of fix:**
-- Slightly bolder caret glyph (▾/▸ instead of ▼/▶, or use Codicon chevrons
-  via vscode-codicons font when bundled in the webview)
-- Subtle background even when not hovered (low-opacity panel tint)
-- Increase clickable area without growing visible width (use ::before
-  pseudo-element with negative margin)
-- Possibly switch to a real `<button>` element with VSCode-themed background
-  for proper a11y semantics (also helps WAI-ARIA work).
-
-**Context:** Logged at 0.9.1. Defer until WAI-ARIA + keyboard nav lands so the
-visual + a11y work happens in one pass.
-
----
-
-### TODO-R1: Refactor `systemrdl_lsp/server.py` into focused modules
-
-**What:** Split the now ~1300-line `server.py` into themed modules:
-
-- `compile.py` — `_compile_text`, `_elaborate`, `ElaborationCache`,
-  `CapturingPrinter`, `CompilerMessage`
-- `diagnostics.py` — severity mapping, `_publish_diagnostics`, range builders
-- `hover.py` — `_hover_text_for_node`, `_hover_for_word`, `_node_at_position`
-- `completion.py` — keyword/property/value catalogues, `_completion_*`
-- `definition.py` — `_word_at_position`, `_definition_location`,
-  `_comp_defs_from_cached`
-- `serialize.py` — `_serialize_root`, `_serialize_addressable`, `_serialize_reg`,
-  `_serialize_field`
-- `outline.py` — `_document_symbols`
-- `server.py` — keeps `build_server()`, `ServerState`, and the LSP feature
-  registrations only
-
-**Why:** `server.py` mixes seven distinct concerns. New features (more
-hover scopes, signature help, code actions) inevitably grow the same file
-because everything is closure-bound to `build_server`. Module split unblocks
-typed test surface (each helper testable in isolation), reduces merge friction
-between feature additions, and makes onboarding read-the-source viable.
-
-**Pros:** ~7 ×150-line files vs one 1300-liner; LSP request handlers stay
-small and obvious. Tests already import each helper individually so the
-move is mechanical.
-**Cons:** Cache, server state, and capture-printer have to thread through as
-explicit args (currently closure-captured by `build_server`). Some helpers
-need shared imports (e.g. `systemrdl.node.AddrmapNode`) — pull into a
-`_node_imports.py` to avoid circular deps.
-
-**Context:** User flagged file size 2026-04-30 after the completion +
-context-aware hover landed. Defer until the LSP feature surface stabilises
-(after Week 6 right-click context menu lands) to avoid double-refactor.
-
-**Depends on / blocked by:** Feature-complete LSP first (Week 2-3 + Week 6).
-Plan: do the refactor in one PR per module, each passing the existing tests
-unchanged.
 
 ---
 
@@ -173,3 +50,16 @@ Mockup B colors (D12) need parallel hc set.
 
 **Depends on / blocked by:** v1.0 ships first. Light + dark token system from Pass 5
 must be finalized before adding the third variant.
+
+---
+
+## Resolved
+
+- **TODO-1** — Version-gated tree push + `rdl/elaboratedTreeChanged` push
+  notifications (commit `fa64908`, 2026-05-01).
+- **TODO-4** — Perl preprocessor pre-flight check, `perlSafeOpcodes` setting,
+  README docs for `<%=expr%>` whitespace gotcha (commit `5ef57d1`, 2026-05-01).
+- **TODO-V1** — Caret-toggle redesigned as a real `<button>` with SVG chevrons
+  and persistent affordance (commit `9f14cf9`, 2026-05-01).
+- **TODO-R1** — `server.py` split into themed modules (commit `0bc6c2c`,
+  2026-05-01). 1900-line monolith → 7 modules + ~470-line wiring shim.
