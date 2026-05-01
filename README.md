@@ -11,6 +11,12 @@ runs both inside VSCode and as a standalone browser app.
 [![Latest release](https://img.shields.io/github/v/release/seimei-d/systemrdl-pro)](https://github.com/seimei-d/systemrdl-pro/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
+<video src="https://github.com/seimei-d/systemrdl-pro/raw/main/docs/demo.mp4" autoplay loop muted playsinline width="100%"></video>
+
+> 30-second tour: live diagnostics, hover with resolved values, F12
+> goto-def, click-to-reveal, register binary decode, theme follows
+> VSCode.
+
 ## Install (end-user)
 
 The latest `.vsix` lives on
