@@ -53,4 +53,14 @@ export type Transport = {
    * navigator.clipboard with a toast on failure.
    */
   copy?(text: string, label?: string): void;
+  /**
+   * T1.7: lazy expansion of a placeholder Reg. The host forwards this to
+   * the LSP's `rdl/expandNode` (VSCode extension, using the panel's URI
+   * implicitly) or to its `/expand` HTTP endpoint (CLI, no URI needed
+   * since CLI is single-file). Absent in surfaces that don't support
+   * lazy mode — the viewer just won't see placeholders in that case
+   * (server stays on the full-tree path because the client never
+   * advertised lazy capability).
+   */
+  expandNode?(version: number, nodeId: string): Promise<Reg>;
 };

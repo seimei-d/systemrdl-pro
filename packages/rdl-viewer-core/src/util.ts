@@ -40,6 +40,12 @@ export function subtreeMatches(node: TreeNode, filter: string, scope: FilterScop
     if (m('name') && node.name.toLowerCase().includes(lower)) return true;
     if (m('address') && hex && normalizeAddr(node.address).includes(hex)) return true;
     if (m('field')) {
+      // T1.7: a placeholder reg is opaque to field-scope filters — its
+      // fields[] hasn't been fetched yet. Treat as match (false positive
+      // beats false negative — user can click the reg to expand and see
+      // for sure). Without this, filtering by field name in a lazy tree
+      // would silently miss every unloaded reg.
+      if (node.loadState === 'placeholder') return true;
       return (node.fields || []).some(f => f.name.toLowerCase().includes(lower));
     }
     return false;

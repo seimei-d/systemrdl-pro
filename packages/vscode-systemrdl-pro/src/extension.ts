@@ -492,7 +492,7 @@ function safePostTo(entry: PanelEntry, message: unknown): void {
 type WebviewMessage =
   | { type: 'reveal'; source: SourceLoc }
   | { type: 'copy'; text: string; label?: string }
-  | { type: 'expandNode'; uri: string; version: number; nodeId: string };
+  | { type: 'expandNode'; version: number; nodeId: string };
 
 async function handleWebviewMessage(msg: WebviewMessage, panelUri: string): Promise<void> {
   if (msg.type === 'reveal') {
@@ -503,14 +503,15 @@ async function handleWebviewMessage(msg: WebviewMessage, panelUri: string): Prom
     vscode.window.setStatusBarMessage(`Copied ${label}: ${msg.text}`, 2_000);
   } else if (msg.type === 'expandNode') {
     // T1.6: viewer asked to flesh out a placeholder reg's fields[]. Forward
-    // to the LSP, post the result back to the webview, and splice it into
-    // entry.lastTree so subsequent sinceVersion checks stay coherent.
+    // to the LSP using the panel's URI (implicit — webview doesn't track it),
+    // post the result back to the webview, and splice it into entry.lastTree
+    // so subsequent sinceVersion checks stay coherent.
     if (!client) return;
     const entry = memoryMapPanels.get(panelUri);
     if (!entry) return;
     try {
       const reg = await client.sendRequest<unknown>('rdl/expandNode', {
-        uri: msg.uri,
+        uri: panelUri,
         version: msg.version,
         nodeId: msg.nodeId,
       });

@@ -462,3 +462,15 @@ html, body { margin: 0; padding: 0; background: var(--rdl-bg); color: var(--rdl-
   font-size: 13px; box-shadow: 0 4px 12px rgba(0,0,0,0.4);
   pointer-events: none; opacity: 0; transition: opacity 0.18s; z-index: 999; }
 .rdl-toast.shown { opacity: 1; }
+
+/* T1.7: lazy-load placeholder indicator in the Detail pane */
+.rdl-loading {
+  padding: 16px;
+  margin-top: 12px;
+  text-align: center;
+  color: var(--rdl-dim);
+  font-style: italic;
+  background: var(--rdl-panel);
+  border: 1px dashed var(--rdl-border);
+  border-radius: 4px;
+}

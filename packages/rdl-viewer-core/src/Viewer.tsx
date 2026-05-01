@@ -177,6 +177,38 @@ export function Viewer({ transport }: Props) {
 
   const found = root && selectedKey ? findRegByKey(root, selectedKey) : null;
 
+  // T1.7: lazy expansion of placeholder regs. When the user selects a reg
+  // whose `loadState === 'placeholder'`, fire `transport.expandNode` and
+  // splice the populated reg into the tree state so Detail re-renders with
+  // real fields. Per-nodeId in-flight tracking avoids stampedes when the
+  // user rapidly clicks through siblings.
+  const [pendingExpansions] = useState<Set<string>>(() => new Set());
+  const [, forceTick] = useState(0);
+  useEffect(() => {
+    if (!found || !tree || !transport.expandNode) return;
+    const reg = found.reg;
+    if (reg.loadState !== 'placeholder' || !reg.nodeId) return;
+    if (pendingExpansions.has(reg.nodeId)) return;
+    pendingExpansions.add(reg.nodeId);
+    const version = tree.version ?? 0;
+    transport.expandNode(version, reg.nodeId)
+      .then(populated => {
+        // Splice the populated reg into the live tree state. We mutate the
+        // existing tree object's nested node and then re-set tree to a fresh
+        // top-level wrapper so React notices the change.
+        if (!reg.nodeId) return;
+        spliceExpandedReg(tree, reg.nodeId, populated);
+        forceTick(t => t + 1);
+      })
+      .catch(() => {
+        // Swallow errors — placeholder stays visible. Detail.tsx renders a
+        // small "failed to load" hint so the user understands.
+      })
+      .finally(() => {
+        if (reg.nodeId) pendingExpansions.delete(reg.nodeId);
+      });
+  }, [found, tree, transport, pendingExpansions]);
+
   if (!tree) {
     return (
       <div className="rdl-viewer">
@@ -291,6 +323,26 @@ function filterScopePlaceholder(scope: FilterScope): string {
     case 'address': return 'Filter by address (e.g. 0x10, 0010)…';
     case 'field':   return 'Filter by field name…';
     default:        return 'Filter (matches name, address, or field name)…';
+  }
+}
+
+/**
+ * T1.7: walk a tree and replace the placeholder Reg with the populated one
+ * returned by `transport.expandNode`. Mutation in place — the caller is
+ * responsible for nudging React (we just bump a tick state).
+ */
+function spliceExpandedReg(tree: ElaboratedTree, nodeId: string, populated: Reg): void {
+  type Walkable = TreeNode & { children?: TreeNode[] };
+  const stack: Walkable[] = [...((tree.roots ?? []) as Walkable[])];
+  while (stack.length > 0) {
+    const node = stack.pop()!;
+    if (node.kind === 'reg' && node.nodeId === nodeId && node.loadState === 'placeholder') {
+      Object.assign(node, populated);
+      return;
+    }
+    if ('children' in node && Array.isArray(node.children)) {
+      stack.push(...(node.children as Walkable[]));
+    }
   }
 }
 
