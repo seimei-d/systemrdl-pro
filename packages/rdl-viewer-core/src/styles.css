@@ -281,20 +281,29 @@ html, body { margin: 0; padding: 0; background: var(--rdl-bg); color: var(--rdl-
   color: var(--rdl-dim); }
 .rdl-bitgrid-cell.reserved .fieldname { font-weight: 400; opacity: 0.7; }
 
-/* Counter / interrupt badges. Tiny, dimmed, but visible enough to flag the
-   field as having a side-effect beyond plain RW storage. */
-.rdl-badge {
-  display: inline-block; margin-left: 6px; padding: 0 4px;
-  font-size: 10px; line-height: 14px; vertical-align: middle;
-  border-radius: 7px; background: var(--rdl-chrome);
-  color: var(--rdl-dim); border: 1px solid var(--rdl-border);
-  font-weight: 400;
+/* Counter / interrupt tags. Calm chrome — no border, subtle background tint
+   keyed off the access palette so they read as "side-effect annotations" not
+   alert badges. Sit on the baseline next to the field name without inflating
+   the row. */
+.rdl-field-name {
+  font-weight: 600; display: inline-flex; align-items: baseline; gap: 6px;
+  min-width: 0;
 }
-.rdl-badge.counter { color: var(--rdl-acc-rw); }
-.rdl-badge.intr    { color: var(--rdl-warning); }
+.rdl-tag {
+  display: inline-block; padding: 0 6px;
+  font-family: var(--rdl-font-chrome); font-weight: 500; font-size: 9.5px;
+  line-height: 15px; letter-spacing: 0.04em; text-transform: lowercase;
+  border-radius: 8px; vertical-align: baseline;
+  color: var(--rdl-dim); background: var(--rdl-chrome);
+}
+.rdl-tag.counter { color: var(--rdl-acc-rw);   background: rgba(111,185,143,0.16); }
+.rdl-tag.intr    { color: var(--rdl-warning);  background: rgba(215,168,90,0.18); }
+/* Bit-grid cells stay as glyph-only because there's no horizontal room for
+   a text tag — the whole cell may be 4 bits wide. */
 .rdl-bitgrid-cell .rdl-badge {
-  margin: 0; padding: 0 3px; font-size: 9px; line-height: 12px;
-  background: rgba(255,255,255,0.12); border-color: transparent;
+  display: inline-block; margin-left: 4px; padding: 0;
+  font-size: 9px; line-height: 12px;
+  color: rgba(0,0,0,0.55);
 }
 
 /* Encode-enum block — collapsible <details> wrapper around the value table.

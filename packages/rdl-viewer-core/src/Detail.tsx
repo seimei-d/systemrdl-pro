@@ -77,21 +77,21 @@ function FieldRow({ field, reveal }: { field: Field; reveal: (s: SourceLoc | und
       title={onClick ? 'Click to reveal in editor' : undefined}
     >
       <b>[{field.msb}:{field.lsb}]</b>
-      <b>
+      <span className="rdl-field-name">
         {field.name}
         {field.isCounter && (
           <span
-            className="rdl-badge counter"
-            title="Counter — field auto-increments on its `incr` signal (SystemRDL 9.10)."
-          >◷ counter</span>
+            className="rdl-tag counter"
+            title="Counter — increments on its `incr` signal (SystemRDL 9.10)."
+          >counter</span>
         )}
         {field.isIntr && (
           <span
-            className="rdl-badge intr"
-            title="Interrupt source — field is set by hardware on a triggering condition; software clears it (SystemRDL 9.7)."
-          >⚡ intr</span>
+            className="rdl-tag intr"
+            title="Interrupt — set by hardware on a triggering condition; cleared by software (SystemRDL 9.7)."
+          >intr</span>
         )}
-      </b>
+      </span>
       <span className={'rdl-pill ' + acc}>{acc.toUpperCase()}</span>
       <span>{field.reset || '—'}</span>
       <span className="desc">{blurb}</span>
