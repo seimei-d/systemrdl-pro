@@ -88,10 +88,10 @@ Powered by [`systemrdl-lsp`](https://pypi.org/project/systemrdl-lsp/) +
 The latest `.vsix` lives on
 [GitHub Releases](https://github.com/seimei-d/systemrdl-pro/releases).
 
-1. **Download** `vscode-systemrdl-pro-<version>.vsix` from the assets.
+1. **Download** `systemrdl-pro-<version>.vsix` from the assets.
 2. **Install** in VSCode — either drag the file onto the Extensions
    sidebar (`Ctrl+Shift+X`) or run
-   `code --install-extension /path/to/vscode-systemrdl-pro-<version>.vsix`.
+   `code --install-extension /path/to/systemrdl-pro-<version>.vsix`.
 3. **LSP backend**:
 
    ```bash

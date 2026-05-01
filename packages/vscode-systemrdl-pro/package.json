@@ -1,8 +1,8 @@
 {
-  "name": "vscode-systemrdl-pro",
+  "name": "systemrdl-pro",
   "displayName": "SystemRDL Pro",
   "description": "Live diagnostics + interactive memory-map viewer for SystemRDL 2.0",
-  "version": "0.22.16",
+  "version": "0.22.17",
   "publisher": "seimei-d",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -168,7 +168,7 @@
     "typecheck": "tsc --noEmit",
     "package": "vsce package --no-dependencies --no-yarn",
     "publish": "vsce publish --no-dependencies --no-yarn",
-    "publish:ovsx": "ovsx publish vscode-systemrdl-pro-*.vsix --no-dependencies"
+    "publish:ovsx": "ovsx publish systemrdl-pro-*.vsix --no-dependencies"
   },
   "dependencies": {
     "@systemrdl-pro/viewer-core": "workspace:*",

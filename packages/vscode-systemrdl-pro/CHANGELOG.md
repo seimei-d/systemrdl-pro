@@ -4,6 +4,19 @@ All notable changes to **SystemRDL Pro** are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [SemVer](https://semver.org/).
 
+## [0.22.17] — 2026-05-01
+
+### Changed
+
+- **Marketplace ID renamed.** Package `name` field went from
+  `vscode-systemrdl-pro` to `systemrdl-pro`, so the new full ID is
+  `seimei-d.systemrdl-pro` (was `seimei-d.vscode-systemrdl-pro`). The
+  display name "SystemRDL Pro" and language id `systemrdl-pro` are
+  unchanged. The old listing on Marketplace and Open VSX stays as a
+  zombie pointing at v0.22.16; future updates ship under the new ID.
+  - **CLI install command:** `code --install-extension seimei-d.systemrdl-pro`
+  - **Old listing:** ignore — install the new one.
+
 ## [0.22.16] — 2026-05-01
 
 ### Added

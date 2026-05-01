@@ -24,9 +24,9 @@ runs both inside VSCode and as a standalone browser app.
 The latest `.vsix` lives on
 [GitHub Releases](https://github.com/seimei-d/systemrdl-pro/releases/latest).
 
-1. **Download** `vscode-systemrdl-pro-<version>.vsix` from the release assets.
+1. **Download** `systemrdl-pro-<version>.vsix` from the release assets.
 2. **Install** in VSCode — drag onto the Extensions sidebar (`Ctrl+Shift+X`),
-   or `code --install-extension /path/to/vscode-systemrdl-pro-<version>.vsix`.
+   or `code --install-extension /path/to/systemrdl-pro-<version>.vsix`.
 3. **LSP backend**: `pip install systemrdl-lsp`.
 
 See [`packages/vscode-systemrdl-pro/README.md`](packages/vscode-systemrdl-pro/README.md)

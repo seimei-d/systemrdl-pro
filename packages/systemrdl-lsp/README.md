@@ -20,8 +20,8 @@ The server speaks LSP over stdio. Editor integrations launch the
 
 ### VSCode / VSCodium / Cursor / Theia
 
-Install the [`SystemRDL Pro`](https://marketplace.visualstudio.com/items?itemName=seimei-d.vscode-systemrdl-pro)
-extension (also on [Open VSX](https://open-vsx.org/extension/seimei-d/vscode-systemrdl-pro)).
+Install the [`SystemRDL Pro`](https://marketplace.visualstudio.com/items?itemName=seimei-d.systemrdl-pro)
+extension (also on [Open VSX](https://open-vsx.org/extension/seimei-d/systemrdl-pro)).
 The extension supervises this LSP for you — restart, crash recovery, the lot.
 
 ### Neovim (`nvim-lspconfig`)

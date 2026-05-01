@@ -1,7 +1,7 @@
 # rdl-viewer
 
 Standalone browser-served SystemRDL memory-map viewer. No editor required.
-Same renderer as the [VSCode extension](https://marketplace.visualstudio.com/items?itemName=seimei-d.vscode-systemrdl-pro)
+Same renderer as the [VSCode extension](https://marketplace.visualstudio.com/items?itemName=seimei-d.systemrdl-pro)
 (shared React component in [`@systemrdl-pro/viewer-core`](../rdl-viewer-core)),
 different transport.
 
