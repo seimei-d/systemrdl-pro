@@ -4,6 +4,17 @@ All notable changes to **SystemRDL Pro** are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [SemVer](https://semver.org/).
 
+## [0.22.16] — 2026-05-01
+
+### Added
+
+- **Demo GIF in Marketplace listing.** Marketplace and Open VSX render
+  `packages/vscode-systemrdl-pro/README.md`, which previously had no
+  visuals. Bundled `demo.gif` into the extension under `media/` and
+  embedded it in the README so the listing now shows the 30-second
+  tour (live diagnostics, hover, F12 goto-def, viewer click-to-reveal,
+  binary decode, theme follow). `.vsix` size grew from 163 KB to 3.9 MB.
+
 ## [0.22.15] — 2026-05-01
 
 ### Added

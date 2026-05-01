@@ -7,6 +7,12 @@ mainstream languages.
 Powered by [`systemrdl-lsp`](https://pypi.org/project/systemrdl-lsp/) +
 [`systemrdl-compiler`](https://github.com/SystemRDL/systemrdl-compiler).
 
+![SystemRDL Pro: live diagnostics, memory-map viewer, click-to-reveal](media/demo.gif)
+
+> 30-second tour: live diagnostics, hover with resolved values, F12
+> goto-def, click-to-reveal, register binary decode, theme follows
+> VSCode.
+
 ## What you get
 
 ### In the editor (LSP)
