@@ -131,7 +131,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-SERVER_VERSION = "0.14.4"
+SERVER_VERSION = "0.14.5"
 
 
 def _iter_rdl_files(root: pathlib.Path, exclude_dirs: set[str]):

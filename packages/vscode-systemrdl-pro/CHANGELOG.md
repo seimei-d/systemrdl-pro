@@ -4,6 +4,38 @@ All notable changes to **SystemRDL Pro** are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [SemVer](https://semver.org/).
 
+## [0.21.0] — 2026-05-01
+
+### Added (viewer)
+
+- **Memory map overview strip.** A new horizontal pane above the tree
+  shows every direct child of the active addrmap as a clickable tile.
+  Tiles flex-grow by `log²(size)` so multi-MB regfiles take more visual
+  space than 4-byte registers but the smallest items never disappear.
+  Reserved gaps render as dashed empty tiles between named children.
+  - **Click on a regfile/addrmap tile** drills into it; a breadcrumb at
+    the top tracks the stack and lets you climb back up.
+  - **Click on a register tile** reveals it in the editor and selects the
+    matching node in the tree below.
+  - Hover any tile for full address + size + access summary tooltip.
+  - Toggle button in the tabs row hides/shows the overview pane.
+- Tiles are colour-accented by access mode (left-border stripe — RW
+  green, RO blue, W1C amber, etc.) without overpowering the chrome
+  background.
+
+### Fixed
+
+- **`textDocument/semanticTokens/full` failure resolved.** Diagnosed
+  via the user-shared traceback as a pygls signature-introspection
+  edge case: `from __future__ import annotations` + `get_type_hints`
+  evaluating a return-type annotation imported only in a local scope
+  returned NameError, which `has_ls_param_or_annotation`'s try/except
+  swallowed, so pygls thought the handler didn't take an `ls` arg
+  and called it with one positional instead of two — `TypeError` on
+  every keystroke, visible as editor lag. Fix: import
+  `SemanticTokens`, `SemanticTokensLegend`, and the method constant
+  at module level.
+
 ## [0.20.1] — 2026-05-01
 
 Hot-fixes for the four issues reported on 0.20.0:

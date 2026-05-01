@@ -50,6 +50,72 @@ html, body { margin: 0; padding: 0; background: var(--rdl-bg); color: var(--rdl-
 .rdl-tab:hover { color: var(--rdl-fg); }
 .rdl-tab.active { color: var(--rdl-fg); background: var(--rdl-bg);
   border-bottom: 2px solid var(--rdl-accent); margin-bottom: -1px; }
+.rdl-overview-toggle {
+  margin-left: auto; align-self: center; margin-right: 8px;
+  background: transparent; color: var(--rdl-dim);
+  border: 1px solid var(--rdl-border); border-radius: 3px;
+  padding: 3px 10px; font: inherit; font-size: 11px;
+  cursor: pointer; transition: color 0.1s, border-color 0.1s;
+}
+.rdl-overview-toggle:hover { color: var(--rdl-fg); border-color: var(--rdl-accent); }
+.rdl-overview-toggle[aria-pressed="true"] { color: var(--rdl-fg); }
+
+/* Overview strip — addrmap memory map at a glance. Tiles flex-grow by
+   log² of size so multi-MB regfiles take more space than 4-byte regs but
+   the scale doesn't completely flatten anything below the largest. */
+.rdl-overview { background: var(--rdl-panel);
+  border-bottom: 1px solid var(--rdl-border); padding: 6px 12px 8px; }
+.rdl-overview-crumbs { display: flex; align-items: center; gap: 4px;
+  margin-bottom: 6px; font-size: 11px; color: var(--rdl-dim);
+  font-family: var(--rdl-font-chrome); }
+.rdl-overview-crumb { display: inline-flex; align-items: center; gap: 4px; }
+.rdl-overview-crumb-btn { background: transparent; border: 0;
+  color: var(--rdl-dim); padding: 1px 4px; cursor: pointer;
+  font: inherit; border-radius: 2px; }
+.rdl-overview-crumb-btn:hover { color: var(--rdl-fg); background: var(--rdl-chrome); }
+.rdl-overview-crumb-btn.active { color: var(--rdl-fg); cursor: default; }
+.rdl-overview-crumb-sep { color: var(--rdl-dim); opacity: 0.6; }
+.rdl-overview-meta { margin-left: auto; font-family: var(--rdl-font-mono);
+  font-size: 10px; color: var(--rdl-dim); }
+.rdl-overview-strip { display: flex; gap: 2px; height: 56px;
+  align-items: stretch; overflow-x: auto; }
+.rdl-overview-tile {
+  display: flex; flex-direction: column; align-items: stretch;
+  justify-content: center; gap: 2px;
+  background: var(--rdl-chrome); color: var(--rdl-fg);
+  border: 1px solid var(--rdl-border); border-radius: 3px;
+  padding: 4px 6px; min-width: 60px; min-height: 0;
+  font: inherit; cursor: pointer; text-align: left; overflow: hidden;
+  transition: border-color 0.08s, transform 0.08s;
+  flex-basis: 0; flex-shrink: 1;
+}
+.rdl-overview-tile:hover {
+  border-color: var(--rdl-accent); transform: translateY(-1px);
+}
+.rdl-overview-tile-name { font-weight: 600; font-size: 11px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  font-family: var(--rdl-font-mono); }
+.rdl-overview-tile-addr { font-size: 9px; color: var(--rdl-dim);
+  font-family: var(--rdl-font-mono);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rdl-overview-tile-label { font-size: 11px; color: var(--rdl-dim); text-align: center; }
+/* Reg colour-by-access (subtle, just a left border accent so the tile
+   text stays legible against the chrome background). */
+.rdl-overview-tile.reg.acc-rw  { border-left: 3px solid var(--rdl-acc-rw); }
+.rdl-overview-tile.reg.acc-ro  { border-left: 3px solid var(--rdl-acc-ro); }
+.rdl-overview-tile.reg.acc-r   { border-left: 3px solid var(--rdl-acc-ro); }
+.rdl-overview-tile.reg.acc-wo  { border-left: 3px solid var(--rdl-acc-wo); }
+.rdl-overview-tile.reg.acc-w   { border-left: 3px solid var(--rdl-acc-wo); }
+.rdl-overview-tile.reg.acc-w1c { border-left: 3px solid var(--rdl-acc-w1c); }
+.rdl-overview-tile.reg.acc-w1s { border-left: 3px solid var(--rdl-acc-rw); }
+.rdl-overview-tile.reg.acc-w0c { border-left: 3px solid var(--rdl-acc-w1c); }
+.rdl-overview-tile.reg.acc-na  { border-left: 3px solid var(--rdl-acc-rsv); }
+.rdl-overview-tile.container.addrmap { background: var(--rdl-panel);
+  border-color: var(--rdl-accent); }
+.rdl-overview-tile.container.regfile { background: var(--rdl-chrome);
+  border-style: dashed; }
+.rdl-overview-tile.reserved { background: transparent; border-style: dashed;
+  opacity: 0.4; cursor: default; pointer-events: none; }
 .rdl-body { display: grid; grid-template-rows: minmax(120px, min(50%, max-content)) 1fr; min-height: 0; }
 .rdl-tree-pane { display: grid; grid-template-rows: auto 1fr; min-height: 0;
   border-bottom: 1px solid var(--rdl-border); }
