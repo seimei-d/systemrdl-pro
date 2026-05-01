@@ -106,7 +106,12 @@ function EncodeTable({ entries }: { entries: EncodeEntry[] }) {
         {entries.map((e, i) => (
           <tr key={i}>
             <td className="v">{e.value}</td>
-            <td className="n">{e.name}</td>
+            <td className="n">
+              {e.name}
+              {e.displayName && e.displayName !== e.name && (
+                <span className="display-name"> · {e.displayName}</span>
+              )}
+            </td>
             <td className="d">{e.desc || ''}</td>
           </tr>
         ))}

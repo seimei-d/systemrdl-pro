@@ -29,6 +29,7 @@ AccessMode = Literal['rw', 'ro', 'wo', 'w1c', 'w0c', 'w1s', 'w0s', 'rclr', 'rset
 
 class EncodeEntry(TypedDict):
     name: str
+    displayName: NotRequired[str]
     value: "HexU64"
     desc: NotRequired[str]
 

@@ -16,6 +16,7 @@ export type AccessMode = 'rw' | 'ro' | 'wo' | 'w1c' | 'w0c' | 'w1s' | 'w0s' | 'r
 
 export type EncodeEntry = {
   name: string;
+  displayName?: string;
   value: HexU64;
   desc?: string;
 };

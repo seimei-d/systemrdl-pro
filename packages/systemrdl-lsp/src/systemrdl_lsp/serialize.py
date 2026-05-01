@@ -143,12 +143,14 @@ def _serialize_field(
 def _serialize_encode_entries(enc: Any, width_bits: int) -> list[dict[str, Any]]:
     """Walk a systemrdl-compiler ``enum`` component → list of entries.
 
-    Each entry has ``name`` + ``value`` (hex). ``desc`` if present. Width
-    drives the hex padding so the value column lines up with the field width
-    in the viewer.
+    Each entry has ``name`` + ``value`` (hex). ``desc`` if present. Hex
+    padding is **field-width-tight** — a 3-bit field produces ``0x4``, not
+    ``0x00000000``. ``_hex`` (used elsewhere for addresses) has a 32-bit
+    floor that's wrong for enum values bound to narrow fields.
     """
     entries: list[dict[str, Any]] = []
     members = getattr(enc, "members", None) or {}
+    digits = max(1, (max(1, width_bits) + 3) // 4)
     for member_name, member in members.items():
         try:
             value = int(getattr(member, "value", 0))
@@ -156,12 +158,18 @@ def _serialize_encode_entries(enc: Any, width_bits: int) -> list[dict[str, Any]]
             continue
         item: dict[str, Any] = {
             "name": member_name,
-            "value": _hex(value, max(8, width_bits)),
+            "value": f"0x{value:0{digits}X}",
         }
-        for prop_name in ("desc", "name"):
-            prop_val = getattr(member, prop_name, None)
-            if prop_val:
-                item.setdefault(prop_name, str(prop_val))
+        # systemrdl-compiler exposes the enum member's RDL `desc` and `name`
+        # properties as `rdl_desc` / `rdl_name`. The unprefixed `name` /
+        # `desc` attributes return the Python class name and docstring,
+        # which aren't what the user wrote in the .rdl file.
+        rdl_desc = getattr(member, "rdl_desc", None)
+        if rdl_desc:
+            item["desc"] = str(rdl_desc)
+        rdl_name = getattr(member, "rdl_name", None)
+        if rdl_name:
+            item["displayName"] = str(rdl_name)
         entries.append(item)
     return entries
 

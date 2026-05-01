@@ -150,6 +150,10 @@
       "additionalProperties": false,
       "properties": {
         "name": { "type": "string" },
+        "displayName": {
+          "type": "string",
+          "description": "Optional human-readable label from the enum entry's `name` property — distinct from the identifier `name`."
+        },
         "value": { "$ref": "#/$defs/HexU64" },
         "desc": { "type": "string" }
       }
