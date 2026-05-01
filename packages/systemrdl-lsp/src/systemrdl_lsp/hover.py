@@ -194,7 +194,16 @@ def _hover_text_for_node(node: Any) -> str | None:
     if isinstance(node, AddressableNode):
         addr = node.absolute_address
         size = getattr(node, "size", None)
-        lines.append(f"**{type_name}** `{name}`")
+        # Detect the SystemRDL `bridge` flag (clause 9.2) — only valid on
+        # addrmap; surface it in the title so the user notices when an
+        # addrmap is a bus bridge rather than a regular block.
+        is_bridge = False
+        try:
+            is_bridge = bool(node.get_property("bridge"))
+        except (LookupError, AttributeError):
+            is_bridge = False
+        title_extra = " · _bridge_" if is_bridge else ""
+        lines.append(f"**{type_name}** `{name}`{title_extra}")
         lines.append("")
         lines.append(f"- **address**: {_format_hex(addr)}")
         if size is not None:

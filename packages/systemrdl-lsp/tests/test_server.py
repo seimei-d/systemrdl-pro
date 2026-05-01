@@ -741,6 +741,50 @@ def test_cache_version_increments_on_each_put(tmp_path):
     cache.clear()
 
 
+def test_bridge_keyword_in_completion_and_hover(tmp_path):
+    """`bridge` is a top-level addrmap modifier — it must surface in completion
+    and word-based hover, and an instance hover should mark the addrmap as a
+    bridge in its title.
+    """
+    from systemrdl_lsp.server import _completion_items_static, _hover_for_word, _hover_text_for_node
+
+    # 1. Static completion catalogue includes `bridge`.
+    labels = {it.label for it in _completion_items_static()}
+    assert "bridge" in labels
+
+    # 2. Word-based hover explains the keyword.
+    md = _hover_for_word("bridge", roots=[])
+    assert md is not None and "bridge" in md.lower() and "(keyword)" in md
+
+    # 3. Instance hover on a bridge-marked addrmap calls it out.
+    # SystemRDL constraint: a `bridge` addrmap can only contain other addrmaps,
+    # and must have at least two — encode that in the fixture.
+    rdl = textwrap.dedent("""
+        addrmap soc {
+            bridge;
+            addrmap apb {
+                reg { field { sw=rw; hw=r; } a[0:0]=0; } CTRL @ 0x0;
+            } apb_block @ 0x0000;
+            addrmap ahb {
+                reg { field { sw=rw; hw=r; } b[0:0]=0; } STATUS @ 0x0;
+            } ahb_block @ 0x1000;
+        };
+    """).strip()
+    rdl_path = tmp_path / "x.rdl"
+    rdl_path.write_text(rdl, encoding="utf-8")
+    _msgs, roots, tmp = _compile_text(rdl_path.as_uri(), rdl)
+    try:
+        from systemrdl_lsp.server import _node_at_position
+        # Cursor on `addrmap soc {` (line 0 in 0-based).
+        node = _node_at_position(roots, 0, 10)
+        assert node is not None, "expected to find soc addrmap node"
+        text = _hover_text_for_node(node)
+        assert text is not None
+        assert "bridge" in text.lower(), f"hover should mark bridge; got {text!r}"
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 def test_address_conflicts_scope_per_top_level_addrmap(tmp_path):
     """A reg at 0x0 inside ``addrmap a`` does NOT conflict with a reg at 0x0
     inside a separate ``addrmap b`` — each top-level addrmap is its own

@@ -29,6 +29,10 @@ SYSTEMRDL_TOP_KEYWORDS: dict[str, str] = {
     "signal": "External signal — wired to/from logic outside the register block.",
     "external": "Marks an instance as external — backing logic lives outside the generated RTL.",
     "internal": "Marks an instance as internal (default; usually omitted).",
+    "bridge": (
+        "Marks this `addrmap` as a bus bridge. RTL backends use it as a synthesis "
+        "hint to wire two address spaces together (clause 9.2)."
+    ),
     "default": "Default-property assignment — applies to every later sibling unless overridden.",
     "property": "User-defined property declaration.",
     "constraint": "User-defined constraint declaration (rarely used).",
