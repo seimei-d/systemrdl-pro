@@ -1,6 +1,9 @@
 # rdl-viewer
 
 Standalone browser-served SystemRDL memory-map viewer. No editor required.
+Same renderer as the [VSCode extension](https://marketplace.visualstudio.com/items?itemName=seimei-d.vscode-systemrdl-pro)
+(shared React component in [`@systemrdl-pro/viewer-core`](../rdl-viewer-core)),
+different transport.
 
 ```bash
 # Install systemrdl-lsp once (provides the elaboration backend):
@@ -13,9 +16,9 @@ bun /path/to/rdl-viewer-cli/src/index.ts my-chip.rdl
 
 ## What it does
 
-- Compiles the file via `systemrdl-lsp` (one-shot `python -m systemrdl_lsp.dump`)
+- Compiles the file via `python -m systemrdl_lsp.dump` (one-shot)
 - Watches the file with `fs.watch`, recompiles on every save
-- Serves the same tree+detail-pane layout as the VSCode webview at
+- Serves the same tree + detail-pane layout as the VSCode webview at
   `http://localhost:<port>/`
 - Pushes updates to the browser over Server-Sent Events (`/events`)
 
@@ -37,10 +40,11 @@ bun /path/to/rdl-viewer-cli/src/index.ts my-chip.rdl
 
 | path | content |
 |---|---|
-| `GET /` | Inline single-page app (HTML + CSS + JS, ~17 KB) |
+| `GET /` | SPA shell that loads the shared viewer-core bundle |
 | `GET /tree` | Latest elaborated-tree JSON (matches `schemas/elaborated-tree.json`) |
 | `GET /events` | Server-Sent Events stream — one frame per recompile |
-| `GET /diagnostics` | Stderr from the latest `systemrdl-lsp.dump` invocation |
+| `GET /diagnostics` | Stderr from the latest `systemrdl_lsp.dump` invocation |
+| `GET /viewer/*` | Static assets from `@systemrdl-pro/viewer-core/dist/` |
 
 ## Architecture
 
@@ -54,17 +58,22 @@ bun /path/to/rdl-viewer-cli/src/index.ts my-chip.rdl
                                ▼
                         ┌────────────────┐
                         │ browser SPA    │
+                        │ (viewer-core)  │
                         └────────────────┘
 ```
 
-The CLI is a thin shell that re-uses the same elaborated-tree contract
-(`schemas/elaborated-tree.json` v0.1.0) the VSCode webview consumes — the
-renderer is currently inlined here, will move to `@systemrdl-pro/viewer-core`
-once Svelte/codegen lands (see `docs/ROADMAP.md` Week 5).
+The CLI is a thin shell. The renderer lives in
+[`@systemrdl-pro/viewer-core`](../rdl-viewer-core) and is shared with the
+VSCode webview pixel-for-pixel — same React components, same CSS variables,
+same elaborated-tree contract.
 
 ## Caveats
 
-- Single-file watch only; `\`include`-d files don't auto-trigger recompile yet.
+- Single-file watch only; `` `include ``d files don't auto-trigger recompile yet.
 - No "reveal in editor" — there is no editor in this surface.
 - Cmd-F filter, tabs, stale-bar, and the detail pane all match the VSCode
-  webview pixel-for-pixel (Decision 1C: same renderer, different transport).
+  webview behaviour.
+
+## License
+
+MIT — see [`LICENSE`](https://github.com/seimei-d/systemrdl-pro/blob/main/LICENSE).
