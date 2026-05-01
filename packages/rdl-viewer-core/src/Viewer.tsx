@@ -192,10 +192,10 @@ export function Viewer({ transport }: Props) {
           onClick={() => setOverviewOpen(o => !o)}
         >{overviewOpen ? 'Hide map' : 'Show map'}</button>
       </div>
-      {overviewOpen && root && (
-        <OverviewMap root={root} onRevealReg={onOverviewReveal} />
-      )}
-      <div className="rdl-body">
+      <div className={'rdl-body' + (overviewOpen ? ' with-overview' : '')}>
+        {overviewOpen && root && (
+          <OverviewMap root={root} onRevealReg={onOverviewReveal} />
+        )}
         <div className="rdl-tree-pane">
           <div className="rdl-filter-bar">
             <div className="rdl-filter-row">

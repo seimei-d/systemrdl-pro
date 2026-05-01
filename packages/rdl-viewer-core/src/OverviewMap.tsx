@@ -117,44 +117,60 @@ export function OverviewMap({ root, onRevealReg }: Props) {
 
   return (
     <div className="rdl-overview" role="region" aria-label="Memory map overview">
-      <div className="rdl-overview-crumbs" role="navigation" aria-label="Map breadcrumb">
-        {path.map((c, i) => {
-          const last = i === path.length - 1;
-          return (
-            <span key={`${c.name}-${i}`} className="rdl-overview-crumb">
-              <button
-                type="button"
-                className={'rdl-overview-crumb-btn' + (last ? ' active' : '')}
-                onClick={() => {
-                  if (last) return;
-                  setPath(prev => prev.slice(0, i + 1));
-                }}
-                title={`${c.kind} ${c.name} · ${c.address} · ${fmtBytes(parseHex(c.size))}`}
-              >{c.name}</button>
-              {!last && <span className="rdl-overview-crumb-sep">›</span>}
-            </span>
-          );
-        })}
-        <span className="rdl-overview-meta">
+      <div className="rdl-overview-header">
+        <div className="rdl-overview-crumbs" role="navigation" aria-label="Map breadcrumb">
+          {path.map((c, i) => {
+            const last = i === path.length - 1;
+            return (
+              <span key={`${c.name}-${i}`} className="rdl-overview-crumb">
+                <button
+                  type="button"
+                  className={'rdl-overview-crumb-btn' + (last ? ' active' : '')}
+                  onClick={() => {
+                    if (last) return;
+                    setPath(prev => prev.slice(0, i + 1));
+                  }}
+                  title={`${c.kind} ${c.name} · ${c.address} · ${fmtBytes(parseHex(c.size))}`}
+                >{c.name}</button>
+                {!last && <span className="rdl-overview-crumb-sep">›</span>}
+              </span>
+            );
+          })}
+        </div>
+        <div className="rdl-overview-meta">
           {tiles.filter(t => t.kind === 'node').length} children · {fmtBytes(parseHex(current.size))}
-        </span>
+        </div>
       </div>
-      <div className="rdl-overview-strip">
+      <div className="rdl-overview-column">
         {tiles.map((tile, i) => {
-          const flexGrow = Math.log2(Math.max(2, tile.size)) ** 2;
+          // Linear flex-grow = byte size: tiles take vertical space *proportional
+          // to their address-space share* of the parent addrmap. A 4 MB regfile
+          // inside a 4 MB addrmap fills the whole column; a 4 B reg is a thin
+          // strip at the appropriate y-offset. Min-height (CSS) clamps the
+          // smallest tiles so their text stays readable; holes have no clamp
+          // so a sparse map shows its real holes at their honest size.
+          const flexGrow = Math.max(1, tile.size);
           if (tile.kind === 'hole') {
+            const showLabel = tile.size >= 16;  // tiny gaps render as a thin line
             return (
               <div
                 key={`hole-${i}`}
                 className={accentClass(tile)}
-                style={{ flexGrow, minWidth: MIN_TILE_PX / 2 }}
+                style={{ flexGrow }}
                 title={`reserved · 0x${tile.start.toString(16)} · ${fmtBytes(tile.size)}`}
               >
-                <span className="rdl-overview-tile-label">—</span>
+                {showLabel && (
+                  <>
+                    <span className="rdl-overview-tile-addr">0x{tile.start.toString(16)}</span>
+                    <span className="rdl-overview-tile-label">— reserved —</span>
+                    <span className="rdl-overview-tile-size">{fmtBytes(tile.size)}</span>
+                  </>
+                )}
               </div>
             );
           }
           const node = tile.node;
+          const accSummary = node.kind === 'reg' ? (node.accessSummary || '') : node.kind;
           const tooltip = `${node.kind} ${node.name}\n${node.address} · ${fmtBytes(tile.size)}` +
             (node.kind === 'reg' && node.accessSummary ? `\n${node.accessSummary}` : '');
           return (
@@ -162,20 +178,13 @@ export function OverviewMap({ root, onRevealReg }: Props) {
               key={`${node.name}-${i}`}
               type="button"
               className={accentClass(tile)}
-              style={{ flexGrow, minWidth: MIN_TILE_PX }}
+              style={{ flexGrow }}
               onClick={() => onTileClick(tile)}
-              onContextMenu={(e) => {
-                if (node.kind !== 'reg' && node.source) {
-                  // Right-click on a container: same behaviour as click — drill in.
-                  // Source reveal is reserved for register tiles only.
-                  e.preventDefault();
-                  setPath(prev => [...prev, node as Container]);
-                }
-              }}
               title={tooltip}
             >
-              <span className="rdl-overview-tile-name">{node.name}</span>
               <span className="rdl-overview-tile-addr">{node.address}</span>
+              <span className="rdl-overview-tile-name">{node.name}</span>
+              <span className="rdl-overview-tile-size">{accSummary}</span>
             </button>
           );
         })}

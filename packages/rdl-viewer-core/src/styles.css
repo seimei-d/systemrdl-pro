@@ -60,47 +60,64 @@ html, body { margin: 0; padding: 0; background: var(--rdl-bg); color: var(--rdl-
 .rdl-overview-toggle:hover { color: var(--rdl-fg); border-color: var(--rdl-accent); }
 .rdl-overview-toggle[aria-pressed="true"] { color: var(--rdl-fg); }
 
-/* Overview strip — addrmap memory map at a glance. Tiles flex-grow by
-   log² of size so multi-MB regfiles take more space than 4-byte regs but
-   the scale doesn't completely flatten anything below the largest. */
-.rdl-overview { background: var(--rdl-panel);
-  border-bottom: 1px solid var(--rdl-border); padding: 6px 12px 8px; }
-.rdl-overview-crumbs { display: flex; align-items: center; gap: 4px;
-  margin-bottom: 6px; font-size: 11px; color: var(--rdl-dim);
+/* Memory-map overview — vertical column on the left of the body. Reads
+   top-to-bottom in address order (low → high), which matches how engineers
+   normally scan a memory map in datasheet form. Each row is a tile whose
+   height grows with log²(size) so multi-MB regfiles dominate visually but
+   tiny regs still get a 28 px min-height row. */
+.rdl-overview {
+  background: var(--rdl-panel);
+  border-right: 1px solid var(--rdl-border);
+  padding: 6px 8px 8px;
+  display: flex; flex-direction: column; min-height: 0;
+}
+.rdl-overview-header { margin-bottom: 6px; }
+.rdl-overview-crumbs { display: flex; align-items: center; flex-wrap: wrap;
+  gap: 2px; font-size: 11px; color: var(--rdl-dim);
   font-family: var(--rdl-font-chrome); }
-.rdl-overview-crumb { display: inline-flex; align-items: center; gap: 4px; }
+.rdl-overview-crumb { display: inline-flex; align-items: center; gap: 2px; }
 .rdl-overview-crumb-btn { background: transparent; border: 0;
   color: var(--rdl-dim); padding: 1px 4px; cursor: pointer;
   font: inherit; border-radius: 2px; }
 .rdl-overview-crumb-btn:hover { color: var(--rdl-fg); background: var(--rdl-chrome); }
 .rdl-overview-crumb-btn.active { color: var(--rdl-fg); cursor: default; }
 .rdl-overview-crumb-sep { color: var(--rdl-dim); opacity: 0.6; }
-.rdl-overview-meta { margin-left: auto; font-family: var(--rdl-font-mono);
+.rdl-overview-meta { margin-top: 2px; font-family: var(--rdl-font-mono);
   font-size: 10px; color: var(--rdl-dim); }
-.rdl-overview-strip { display: flex; gap: 2px; height: 56px;
-  align-items: stretch; overflow-x: auto; }
+.rdl-overview-column { display: flex; flex-direction: column;
+  gap: 2px; flex: 1 1 auto; overflow-y: auto; min-height: 0; }
 .rdl-overview-tile {
-  display: flex; flex-direction: column; align-items: stretch;
-  justify-content: center; gap: 2px;
+  display: grid; grid-template-columns: minmax(0, auto) 1fr minmax(0, auto);
+  align-items: center; gap: 8px;
   background: var(--rdl-chrome); color: var(--rdl-fg);
   border: 1px solid var(--rdl-border); border-radius: 3px;
-  padding: 4px 6px; min-width: 60px; min-height: 0;
+  padding: 4px 8px; min-height: 28px;
   font: inherit; cursor: pointer; text-align: left; overflow: hidden;
-  transition: border-color 0.08s, transform 0.08s;
+  transition: border-color 0.08s, transform 0.08s, background 0.08s;
   flex-basis: 0; flex-shrink: 1;
 }
-.rdl-overview-tile:hover {
-  border-color: var(--rdl-accent); transform: translateY(-1px);
+/* Holes have NO min-height so a sparse address map renders honestly: a 4 MB
+   gap is a tall band, a 4-byte gap is a thin line, and zero gap is invisible.
+   This is the user-visible cue for "this addrmap is mostly empty space". */
+.rdl-overview-tile.reserved {
+  min-height: 0;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
 }
-.rdl-overview-tile-name { font-weight: 600; font-size: 11px;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  font-family: var(--rdl-font-mono); }
-.rdl-overview-tile-addr { font-size: 9px; color: var(--rdl-dim);
+.rdl-overview-tile:hover {
+  border-color: var(--rdl-accent); background: var(--rdl-bg);
+}
+.rdl-overview-tile-addr { font-size: 10px; color: var(--rdl-dim);
   font-family: var(--rdl-font-mono);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.rdl-overview-tile-label { font-size: 11px; color: var(--rdl-dim); text-align: center; }
-/* Reg colour-by-access (subtle, just a left border accent so the tile
-   text stays legible against the chrome background). */
+.rdl-overview-tile-name { font-weight: 600; font-size: 12px;
+  font-family: var(--rdl-font-mono); color: var(--rdl-fg);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rdl-overview-tile-size { font-size: 10px; color: var(--rdl-dim);
+  font-family: var(--rdl-font-mono); text-align: right;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rdl-overview-tile-label { font-size: 11px; color: var(--rdl-dim);
+  font-style: italic; text-align: center; }
+/* Reg colour-by-access — left-edge stripe, identical palette to bit grid. */
 .rdl-overview-tile.reg.acc-rw  { border-left: 3px solid var(--rdl-acc-rw); }
 .rdl-overview-tile.reg.acc-ro  { border-left: 3px solid var(--rdl-acc-ro); }
 .rdl-overview-tile.reg.acc-r   { border-left: 3px solid var(--rdl-acc-ro); }
@@ -111,12 +128,27 @@ html, body { margin: 0; padding: 0; background: var(--rdl-bg); color: var(--rdl-
 .rdl-overview-tile.reg.acc-w0c { border-left: 3px solid var(--rdl-acc-w1c); }
 .rdl-overview-tile.reg.acc-na  { border-left: 3px solid var(--rdl-acc-rsv); }
 .rdl-overview-tile.container.addrmap { background: var(--rdl-panel);
-  border-color: var(--rdl-accent); }
+  border-color: var(--rdl-accent); border-left: 3px solid var(--rdl-accent); }
 .rdl-overview-tile.container.regfile { background: var(--rdl-chrome);
-  border-style: dashed; }
+  border-style: dashed; border-left: 3px solid var(--rdl-dim); }
 .rdl-overview-tile.reserved { background: transparent; border-style: dashed;
   opacity: 0.4; cursor: default; pointer-events: none; }
 .rdl-body { display: grid; grid-template-rows: minmax(120px, min(50%, max-content)) 1fr; min-height: 0; }
+.rdl-body.with-overview { grid-template-columns: minmax(180px, 240px) 1fr;
+  grid-template-rows: 1fr;
+  grid-template-areas: "overview main"; }
+.rdl-body.with-overview .rdl-overview { grid-area: overview; }
+.rdl-body.with-overview .rdl-tree-pane { grid-area: main;
+  display: grid; grid-template-rows: auto 1fr; }
+.rdl-body.with-overview .rdl-detail { grid-area: main; align-self: end;
+  border-top: 1px solid var(--rdl-border); }
+/* When the overview is open the tree pane shares its grid cell with the
+   detail pane (stacked vertically), so we restore the row-track layout
+   on the inner tree-pane wrapper. */
+.rdl-body.with-overview { grid-template-areas: "overview main" "overview main";
+  grid-template-rows: minmax(120px, min(50%, max-content)) 1fr; }
+.rdl-body.with-overview .rdl-tree-pane { grid-area: 1 / 2 / 2 / 3; }
+.rdl-body.with-overview .rdl-detail { grid-area: 2 / 2 / 3 / 3; }
 .rdl-tree-pane { display: grid; grid-template-rows: auto 1fr; min-height: 0;
   border-bottom: 1px solid var(--rdl-border); }
 .rdl-filter-bar { padding: 6px 12px; border-bottom: 1px solid var(--rdl-border);
