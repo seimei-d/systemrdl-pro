@@ -255,10 +255,13 @@ def _is_valid_identifier(name: str) -> bool:
 
 
 DEBOUNCE_SECONDS = 0.3
-# Eng-review safety net #3: cap a single elaborate pass at 10s wall-clock.
+# Eng-review safety net #3: cap a single elaborate pass at 10s wall-clock by default.
 # Past that we keep last-good (D7) and surface a synthetic diagnostic. A pathological
 # Perl-style include cycle in a third-party RDL pack should NOT freeze the editor.
+# Override per-workspace via systemrdl-pro.elaborationTimeoutMs (state.elaboration_timeout_s).
 ELABORATION_TIMEOUT_SECONDS = 10.0
+ELABORATION_TIMEOUT_SECONDS_MIN = 1.0
+ELABORATION_TIMEOUT_SECONDS_MAX = 300.0
 
 
 # Re-exports for backwards-compat — tests import several private helpers
@@ -368,6 +371,10 @@ class ServerState:
     # workspace-wide search opt in via settings.json.
     preindex_enabled: bool = False
     preindex_max_files: int = 200
+    # Per-workspace override for ELABORATION_TIMEOUT_SECONDS. systemrdl-pro.elaborationTimeoutMs
+    # surfaces this so big chip designs (multi-subsystem aggregates in the 10-25k+ register
+    # range) can lift the 10s cap when their elaboration legitimately takes longer.
+    elaboration_timeout_s: float = ELABORATION_TIMEOUT_SECONDS
 
 
 # ---------------------------------------------------------------------------
@@ -484,12 +491,12 @@ def build_server() -> LanguageServer:
         )
         try:
             messages, roots, tmp_path = await asyncio.wait_for(
-                asyncio.shield(fut), timeout=ELABORATION_TIMEOUT_SECONDS
+                asyncio.shield(fut), timeout=state.elaboration_timeout_s
             )
         except asyncio.TimeoutError:
             logger.warning(
                 "elaborate timeout on %s after %.0fs; keeping last-good",
-                uri, ELABORATION_TIMEOUT_SECONDS,
+                uri, state.elaboration_timeout_s,
             )
 
             def _drop_late_result(f: asyncio.Future) -> None:
@@ -509,8 +516,10 @@ def build_server() -> LanguageServer:
             timeout_msg = CompilerMessage(
                 severity=Severity.ERROR,
                 text=(
-                    f"systemrdl-lsp: elaborate exceeded {ELABORATION_TIMEOUT_SECONDS:.0f}s — "
-                    "viewer is showing last-good tree."
+                    f"systemrdl-lsp: elaborate exceeded {state.elaboration_timeout_s:.0f}s — "
+                    "viewer is showing last-good tree. Increase the cap with "
+                    "systemrdl-pro.elaborationTimeoutMs if your design legitimately "
+                    "needs longer."
                 ),
                 file_path=target_path,
                 line_1b=1,
@@ -629,12 +638,21 @@ def build_server() -> LanguageServer:
                         max_files = preindex_cfg.get("maxFiles")
                         if isinstance(max_files, int) and max_files > 0:
                             state.preindex_max_files = max_files
+                    timeout_ms = cfg.get("elaborationTimeoutMs")
+                    if isinstance(timeout_ms, (int, float)) and timeout_ms > 0:
+                        state.elaboration_timeout_s = max(
+                            ELABORATION_TIMEOUT_SECONDS_MIN,
+                            min(ELABORATION_TIMEOUT_SECONDS_MAX, timeout_ms / 1000.0),
+                        )
                     logger.info("includePaths from initial config: %s", state.include_paths)
                     logger.info("includeVars from initial config: %s", list(state.include_vars))
                     logger.info("perlSafeOpcodes override: %s", state.perl_safe_opcodes)
                     logger.info(
                         "preindex enabled=%s max=%d",
                         state.preindex_enabled, state.preindex_max_files,
+                    )
+                    logger.info(
+                        "elaboration timeout: %.1fs", state.elaboration_timeout_s,
                     )
             except Exception:
                 logger.debug("could not fetch initial workspace configuration", exc_info=True)
@@ -696,6 +714,12 @@ def build_server() -> LanguageServer:
                     raw_opcodes = configs[0].get("perlSafeOpcodes") or []
                     if isinstance(raw_opcodes, list):
                         state.perl_safe_opcodes = [str(op) for op in raw_opcodes if op]
+                    timeout_ms = configs[0].get("elaborationTimeoutMs")
+                    if isinstance(timeout_ms, (int, float)) and timeout_ms > 0:
+                        state.elaboration_timeout_s = max(
+                            ELABORATION_TIMEOUT_SECONDS_MIN,
+                            min(ELABORATION_TIMEOUT_SECONDS_MAX, timeout_ms / 1000.0),
+                        )
             except Exception:
                 logger.debug("config refresh failed", exc_info=True)
 

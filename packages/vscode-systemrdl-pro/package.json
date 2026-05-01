@@ -145,6 +145,14 @@
           "scope": "window",
           "description": "Cap on the number of `.rdl` files the pre-index walks. Beyond this, additional files are loaded lazily on first edit. Tune up for big monorepos at the cost of higher startup memory."
         },
+        "systemrdl-pro.elaborationTimeoutMs": {
+          "type": "integer",
+          "default": 10000,
+          "minimum": 1000,
+          "maximum": 300000,
+          "scope": "resource",
+          "description": "Wall-clock cap (ms) for a single elaboration pass. After this the LSP keeps the last-good tree and surfaces a synthetic diagnostic. Default 10000 fits chip designs up to ~3-5k registers. Aggregated multi-subsystem designs in the 10-25k range may need 30000-60000."
+        },
         "systemrdl-pro.viewer.colors": {
           "type": "object",
           "scope": "resource",

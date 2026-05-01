@@ -1,4 +1,13 @@
-"""Elaborated tree → JSON serializer (rdl/elaboratedTree, schema v0.1.0)."""
+"""Elaborated tree → JSON serializer (rdl/elaboratedTree, schema v0.1.0).
+
+Performance note: a per-call ``_TypeCache`` memoizes type-level property
+lookups (``get_property`` walks the override → type → default chain on every
+call, which is O(N) work repeated for every instance of the same regtype).
+Instance overrides are detected via ``inst.properties`` and bypass the cache,
+preserving correctness. For stress-fixture-shaped designs (one regtype
+instantiated thousands of times) this turns the serializer from
+super-linear into linear in instance count.
+"""
 
 from __future__ import annotations
 
@@ -15,12 +24,61 @@ logger = logging.getLogger(__name__)
 ELABORATED_TREE_SCHEMA_VERSION = "0.1.0"
 
 
-def _safe_get_property(node: Any, prop: str) -> Any:
-    """``node.get_property(prop)`` with LookupError + AttributeError swallowed."""
+class _TypeCache:
+    """Per-call cache of type-level lookups, keyed by id(component_def).
+
+    Discarded at the end of each ``_serialize_root`` call so it never leaks
+    state across LSP requests. Two stores:
+
+    - ``props[(def_id, prop_name)]`` -> resolved property value (or None)
+    - ``def_src_refs[def_id]`` -> serialized def_src_ref dict (or None)
+    """
+
+    __slots__ = ("props", "def_src_refs")
+
+    def __init__(self) -> None:
+        self.props: dict[tuple[int, str], Any] = {}
+        self.def_src_refs: dict[int, dict[str, Any] | None] = {}
+
+
+def _cached_prop(node: Any, name: str, cache: _TypeCache) -> Any:
+    """``node.get_property(name)`` memoized by component def id.
+
+    Bypasses the cache when the property is overridden on this specific
+    instance (``inst.properties`` contains the name) — correctness wins
+    over speed for the rare per-instance override.
+    """
+    inst = getattr(node, "inst", None)
+    if inst is None:
+        try:
+            return node.get_property(name)
+        except (LookupError, AttributeError):
+            return None
+    inst_props = getattr(inst, "properties", None)
+    if inst_props is not None and name in inst_props:
+        try:
+            return node.get_property(name)
+        except (LookupError, AttributeError):
+            return None
+    def_obj = getattr(inst, "original_def", None)
+    if def_obj is None:
+        try:
+            return node.get_property(name)
+        except (LookupError, AttributeError):
+            return None
+    key = (id(def_obj), name)
+    cached = cache.props.get(key, _MISSING)
+    if cached is not _MISSING:
+        return cached
     try:
-        return node.get_property(prop)
+        value = node.get_property(name)
     except (LookupError, AttributeError):
-        return None
+        value = None
+    cache.props[key] = value
+    return value
+
+
+_MISSING = object()
 
 
 def _hex(value: int, width_bits: int = 32) -> str:
@@ -59,17 +117,38 @@ def _src_ref_to_dict(
     }
 
 
-def _field_access_token(node: Any) -> str:
-    """Map systemrdl-compiler field semantics to the schema's AccessMode enum."""
-    try:
-        sw = node.get_property("sw")
-    except LookupError:
-        sw = None
-    try:
-        onwrite = node.get_property("onwrite")
-    except LookupError:
-        onwrite = None
+def _cached_def_src_ref(
+    node: Any,
+    cache: _TypeCache,
+    path_translate: dict[pathlib.Path, pathlib.Path] | None,
+) -> dict[str, Any] | None:
+    """``def_src_ref`` (where the type is *defined*) is identical across all
+    instances of the same type, so cache by component def id. ``inst_src_ref``
+    (where this *instance* is declared) varies per instance and isn't cached.
+    """
+    inst = getattr(node, "inst", None)
+    if inst is None:
+        return None
+    def_obj = getattr(inst, "original_def", None)
+    if def_obj is None:
+        return _src_ref_to_dict(getattr(inst, "def_src_ref", None), path_translate)
+    def_id = id(def_obj)
+    if def_id in cache.def_src_refs:
+        return cache.def_src_refs[def_id]
+    result = _src_ref_to_dict(getattr(inst, "def_src_ref", None), path_translate)
+    cache.def_src_refs[def_id] = result
+    return result
 
+
+def _field_access_token(node: Any, cache: _TypeCache) -> str:
+    """Map systemrdl-compiler field semantics to the schema's AccessMode enum.
+
+    Cached at the type level — ``sw`` and ``onwrite`` for a given field
+    definition are the same across every instance unless explicitly
+    overridden, and overrides are surfaced through ``_cached_prop``.
+    """
+    sw = _cached_prop(node, "sw", cache)
+    onwrite = _cached_prop(node, "onwrite", cache)
     sw_name = getattr(sw, "name", "").lower() if sw else ""
     on_name = getattr(onwrite, "name", "").lower() if onwrite else ""
 
@@ -96,50 +175,39 @@ def _field_access_token(node: Any) -> str:
 
 
 def _serialize_field(
-    node: Any, path_translate: dict[pathlib.Path, pathlib.Path] | None = None
+    node: Any,
+    cache: _TypeCache,
+    path_translate: dict[pathlib.Path, pathlib.Path] | None = None,
 ) -> dict[str, Any]:
     out: dict[str, Any] = {
         "name": node.inst_name or "",
         "lsb": node.lsb,
         "msb": node.msb,
-        "access": _field_access_token(node),
+        "access": _field_access_token(node, cache),
     }
-    display_name = _safe_get_property(node, "name")
+    display_name = _cached_prop(node, "name", cache)
     if display_name:
         out["displayName"] = str(display_name)
-    try:
-        reset = node.get_property("reset")
-        if reset is not None:
-            # Width-tight hex: `_hex` enforces a 32-bit floor (right for
-            # register addresses), but a 1-bit field should show `0x0`,
-            # not `0x00000000`. Pad to exactly `ceil(width / 4)` digits.
-            width_bits = max(1, node.msb - node.lsb + 1)
-            digits = max(1, (width_bits + 3) // 4)
-            out["reset"] = f"0x{int(reset):0{digits}X}"
-    except LookupError:
-        pass
-    try:
-        desc = node.get_property("desc")
-        if desc:
-            out["desc"] = str(desc)
-    except LookupError:
-        pass
-    # `counter` / `intr` SystemRDL flags — surface as booleans so the
-    # viewer can render badges. systemrdl-compiler returns False for unset
-    # flags (not LookupError), so a defensive bool() suffices.
-    if _safe_get_property(node, "counter"):
+    reset = _cached_prop(node, "reset", cache)
+    if reset is not None:
+        # Width-tight hex: a 1-bit field shows `0x0`, not `0x00000000`.
+        width_bits = max(1, node.msb - node.lsb + 1)
+        digits = max(1, (width_bits + 3) // 4)
+        out["reset"] = f"0x{int(reset):0{digits}X}"
+    desc = _cached_prop(node, "desc", cache)
+    if desc:
+        out["desc"] = str(desc)
+    if _cached_prop(node, "counter", cache):
         out["isCounter"] = True
-    if _safe_get_property(node, "intr"):
+    if _cached_prop(node, "intr", cache):
         out["isIntr"] = True
-    # `encode = my_enum;` → flatten the enum's entries into a JSON array.
-    enc = _safe_get_property(node, "encode")
+    enc = _cached_prop(node, "encode", cache)
     if enc is not None:
         out["encode"] = _serialize_encode_entries(enc, node.msb - node.lsb + 1)
     inst = getattr(node, "inst", None)
-    src = _src_ref_to_dict(
-        getattr(inst, "inst_src_ref", None) or getattr(inst, "def_src_ref", None),
-        path_translate,
-    )
+    inst_src = getattr(inst, "inst_src_ref", None) if inst is not None else None
+    src = _src_ref_to_dict(inst_src, path_translate) if inst_src is not None \
+        else _cached_def_src_ref(node, cache, path_translate)
     if src:
         out["source"] = src
     return out
@@ -180,37 +248,43 @@ def _serialize_encode_entries(enc: Any, width_bits: int) -> list[dict[str, Any]]
 
 
 def _serialize_reg(
-    node: Any, path_translate: dict[pathlib.Path, pathlib.Path] | None = None
+    node: Any,
+    cache: _TypeCache,
+    path_translate: dict[pathlib.Path, pathlib.Path] | None = None,
 ) -> dict[str, Any]:
     fields = []
     accesses: list[str] = []
     reg_reset = 0
     have_all_resets = True
     for f in node.fields():
-        sf = _serialize_field(f, path_translate)
+        sf = _serialize_field(f, cache, path_translate)
         fields.append(sf)
         accesses.append(sf["access"].upper())
-        try:
-            fr = f.get_property("reset")
-            if fr is None:
-                have_all_resets = False
-            else:
+        fr = _cached_prop(f, "reset", cache)
+        if fr is None:
+            have_all_resets = False
+        else:
+            try:
                 width = f.msb - f.lsb + 1
                 reg_reset |= (int(fr) & ((1 << width) - 1)) << f.lsb
-        except (LookupError, AttributeError):
-            have_all_resets = False
+            except (TypeError, ValueError):
+                have_all_resets = False
 
     width_bits = 32
-    try:
-        width_bits = int(node.get_property("regwidth"))
-    except (LookupError, ValueError):
-        pass
+    rw = _cached_prop(node, "regwidth", cache)
+    if rw is not None:
+        try:
+            width_bits = int(rw)
+        except (TypeError, ValueError):
+            pass
 
     access_width = width_bits
-    try:
-        access_width = int(node.get_property("accesswidth"))
-    except (LookupError, ValueError):
-        pass
+    aw = _cached_prop(node, "accesswidth", cache)
+    if aw is not None:
+        try:
+            access_width = int(aw)
+        except (TypeError, ValueError):
+            pass
 
     out: dict[str, Any] = {
         "kind": "reg",
@@ -221,44 +295,42 @@ def _serialize_reg(
     }
     if access_width != width_bits:
         out["accessWidth"] = access_width
-    if hasattr(node.inst, "type_name") and node.inst.type_name:
-        out["type"] = str(node.inst.type_name)
-    display_name = _safe_get_property(node, "name")
+    inst = getattr(node, "inst", None)
+    if inst is not None and getattr(inst, "type_name", None):
+        out["type"] = str(inst.type_name)
+    display_name = _cached_prop(node, "name", cache)
     if display_name:
         out["displayName"] = str(display_name)
     if accesses:
         out["accessSummary"] = "/".join(dict.fromkeys(accesses))  # ordered unique
     if have_all_resets:
         out["reset"] = _hex(reg_reset, width_bits)
-    try:
-        desc = node.get_property("desc")
-        if desc:
-            out["desc"] = str(desc)
-    except LookupError:
-        pass
-    inst = getattr(node, "inst", None)
-    src = _src_ref_to_dict(
-        getattr(inst, "inst_src_ref", None) or getattr(inst, "def_src_ref", None),
-        path_translate,
-    )
+    desc = _cached_prop(node, "desc", cache)
+    if desc:
+        out["desc"] = str(desc)
+    inst_src = getattr(inst, "inst_src_ref", None) if inst is not None else None
+    src = _src_ref_to_dict(inst_src, path_translate) if inst_src is not None \
+        else _cached_def_src_ref(node, cache, path_translate)
     if src:
         out["source"] = src
     return out
 
 
 def _serialize_addressable(
-    node: Any, path_translate: dict[pathlib.Path, pathlib.Path] | None = None
+    node: Any,
+    cache: _TypeCache,
+    path_translate: dict[pathlib.Path, pathlib.Path] | None = None,
 ) -> dict[str, Any] | None:
     from systemrdl.node import AddrmapNode, RegfileNode, RegNode
 
     if isinstance(node, RegNode):
-        return _serialize_reg(node, path_translate)
+        return _serialize_reg(node, cache, path_translate)
     if isinstance(node, (AddrmapNode, RegfileNode)):
         kind = "addrmap" if isinstance(node, AddrmapNode) else "regfile"
         children: list[dict[str, Any]] = []
         try:
             for c in node.children(unroll=True):
-                child = _serialize_addressable(c, path_translate)
+                child = _serialize_addressable(c, cache, path_translate)
                 if child is not None:
                     children.append(child)
         except Exception:
@@ -270,30 +342,23 @@ def _serialize_addressable(
             "size": _hex(node.size),
             "children": children,
         }
-        if hasattr(node.inst, "type_name") and node.inst.type_name:
-            out["type"] = str(node.inst.type_name)
+        inst = getattr(node, "inst", None)
+        if inst is not None and getattr(inst, "type_name", None):
+            out["type"] = str(inst.type_name)
         # Bridge flag (clause 9.2) — only meaningful on AddrmapNode but
         # safe to read on regfiles too (returns False / LookupError there).
         if isinstance(node, AddrmapNode):
-            try:
-                if node.get_property("bridge"):
-                    out["isBridge"] = True
-            except (LookupError, AttributeError):
-                pass
-        display_name = _safe_get_property(node, "name")
+            if _cached_prop(node, "bridge", cache):
+                out["isBridge"] = True
+        display_name = _cached_prop(node, "name", cache)
         if display_name:
             out["displayName"] = str(display_name)
-        try:
-            desc = node.get_property("desc")
-            if desc:
-                out["desc"] = str(desc)
-        except LookupError:
-            pass
-        inst = getattr(node, "inst", None)
-        src = _src_ref_to_dict(
-            getattr(inst, "inst_src_ref", None) or getattr(inst, "def_src_ref", None),
-            path_translate,
-        )
+        desc = _cached_prop(node, "desc", cache)
+        if desc:
+            out["desc"] = str(desc)
+        inst_src = getattr(inst, "inst_src_ref", None) if inst is not None else None
+        src = _src_ref_to_dict(inst_src, path_translate) if inst_src is not None \
+            else _cached_def_src_ref(node, cache, path_translate)
         if src:
             out["source"] = src
         return out
@@ -340,11 +405,12 @@ def _serialize_root(
     else:
         root_list = [roots_input]
 
+    cache = _TypeCache()
     serialized_roots: list[dict[str, Any]] = []
     for r in root_list:
         try:
             for top in r.children(unroll=True):
-                serialized = _serialize_addressable(top, path_translate)
+                serialized = _serialize_addressable(top, cache, path_translate)
                 if serialized is not None and serialized.get("kind") == "addrmap":
                     serialized_roots.append(serialized)
         except Exception:
@@ -358,3 +424,14 @@ def _serialize_root(
         "stale": stale,
         "roots": serialized_roots,
     }
+
+
+# Public alias retained for backwards compatibility with the (private-by-convention)
+# `_safe_get_property` name used elsewhere in the codebase. Not used internally any
+# more — `_cached_prop` supersedes it for serialize.py's hot path.
+def _safe_get_property(node: Any, prop: str) -> Any:
+    """``node.get_property(prop)`` with LookupError + AttributeError swallowed."""
+    try:
+        return node.get_property(prop)
+    except (LookupError, AttributeError):
+        return None

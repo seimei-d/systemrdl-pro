@@ -35,3 +35,4 @@ bun.lockb
 *.log
 .DS_Store
 /tmp-*
+examples/stress_100k.rdl
