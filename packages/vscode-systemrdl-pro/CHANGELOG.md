@@ -4,6 +4,21 @@ All notable changes to **SystemRDL Pro** are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [SemVer](https://semver.org/).
 
+## [0.22.15] — 2026-05-01
+
+### Added
+
+- **Extension icon** — replaces the 69-byte placeholder. 2×2 grid of
+  access-mode bit-cells (RW green, RO blue-grey, W1C amber, WO purple)
+  on a dark slate background. Renders crisply from 32 px sidebar tile
+  to 256 px Marketplace tile. SVG source kept alongside the PNG in
+  `media/` for future re-renders.
+- **GitHub social-preview image** — 1280×640 card shown when the repo
+  URL is shared in Slack, Discord, X, LinkedIn. Stored at
+  `docs/social-preview.png`; uploaded via repo Settings → Social
+  preview.
+- **README icon header** — root README now leads with the new icon.
+
 ## [0.21.0] — 2026-05-01
 
 ### Added (viewer)
