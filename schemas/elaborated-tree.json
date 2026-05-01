@@ -98,6 +98,11 @@
         "displayName": { "type": "string" },
         "address": { "$ref": "#/$defs/HexU64" },
         "width": { "type": "integer", "enum": [8, 16, 32, 64] },
+        "accessWidth": {
+          "type": "integer",
+          "enum": [8, 16, 32, 64],
+          "description": "Smallest software access slice. When < `width`, the reg is split-access — software touches it in `width / accessWidth` chunks."
+        },
         "reset": { "$ref": "#/$defs/HexU64" },
         "accessSummary": {
           "type": "string",

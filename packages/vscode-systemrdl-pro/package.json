@@ -2,7 +2,7 @@
   "name": "vscode-systemrdl-pro",
   "displayName": "SystemRDL Pro",
   "description": "Live diagnostics + interactive memory-map viewer for SystemRDL 2.0",
-  "version": "0.21.4",
+  "version": "0.22.0",
   "publisher": "seimei-d",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -142,6 +142,13 @@
           "scope": "window",
           "description": "Cap on the number of `.rdl` files the pre-index walks. Beyond this, additional files are loaded lazily on first edit. Tune up for big monorepos at the cost of higher startup memory."
         },
+        "systemrdl-pro.viewer.colors": {
+          "type": "object",
+          "scope": "resource",
+          "default": {},
+          "additionalProperties": { "type": "string" },
+          "description": "Override viewer access-mode colours and chrome tokens. Each key maps to a CSS custom property (`--rdl-acc-rw`, `--rdl-acc-ro`, …). Values are any valid CSS colour. Empty = use the built-in palette. Recognised keys: `rw`, `ro`, `wo`, `w1c`, `rsv`, `accent`, `warning`, `bg`, `panel`, `chrome`, `border`, `fg`, `dim`, `selected`."
+        },
         "systemrdl-pro.trace.server": {
           "type": "string",
           "enum": ["off", "messages", "verbose"],
@@ -157,7 +164,8 @@
     "watch": "esbuild src/extension.ts --bundle --outfile=out/extension.js --external:vscode --format=cjs --platform=node --target=node18 --sourcemap --watch",
     "typecheck": "tsc --noEmit",
     "package": "vsce package --no-dependencies --no-yarn",
-    "publish": "vsce publish --no-dependencies --no-yarn"
+    "publish": "vsce publish --no-dependencies --no-yarn",
+    "publish:ovsx": "ovsx publish vscode-systemrdl-pro-*.vsix --no-dependencies"
   },
   "dependencies": {
     "@systemrdl-pro/viewer-core": "workspace:*",
@@ -168,6 +176,7 @@
     "@types/vscode": "^1.85.0",
     "@vscode/vsce": "^3.2.0",
     "esbuild": "^0.24.0",
+    "ovsx": "^0.10.0",
     "typescript": "^5.7.0"
   }
 }

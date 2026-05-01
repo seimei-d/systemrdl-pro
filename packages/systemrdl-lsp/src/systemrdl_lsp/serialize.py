@@ -193,6 +193,12 @@ def _serialize_reg(
     except (LookupError, ValueError):
         pass
 
+    access_width = width_bits
+    try:
+        access_width = int(node.get_property("accesswidth"))
+    except (LookupError, ValueError):
+        pass
+
     out: dict[str, Any] = {
         "kind": "reg",
         "name": node.inst_name or "",
@@ -200,6 +206,8 @@ def _serialize_reg(
         "width": width_bits,
         "fields": fields,
     }
+    if access_width != width_bits:
+        out["accessWidth"] = access_width
     if hasattr(node.inst, "type_name") and node.inst.type_name:
         out["type"] = str(node.inst.type_name)
     display_name = _safe_get_property(node, "name")

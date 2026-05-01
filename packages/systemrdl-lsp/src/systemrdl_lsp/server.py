@@ -88,8 +88,10 @@ from .definition import (
     _comp_defs_from_cached,
     _definition_location,
     _find_instance_by_name,
+    _path_at_position,
     _references_to_type,
     _rename_locations,
+    _resolve_path,
     _word_at_position,
 )
 from .diagnostics import (
@@ -139,7 +141,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-SERVER_VERSION = "0.14.7"
+SERVER_VERSION = "0.15.0"
 
 
 def _iter_rdl_files(root: pathlib.Path, exclude_dirs: set[str]):
@@ -1007,6 +1009,95 @@ def build_server() -> LanguageServer:
             logger.debug("signatureHelp handler failed", exc_info=True)
             return None
 
+    @server.feature("textDocument/prepareTypeHierarchy")
+    def _on_prepare_type_hierarchy(_ls: LanguageServer, params: Any) -> list[Any] | None:
+        """Anchor for a type-hierarchy request — returns the item the user picked.
+
+        SystemRDL has no inheritance chain, so we treat "subtypes" as
+        "instantiations" (where this type is used). The anchor is the type's
+        declaration; subtypes is the list of instance source locations.
+        """
+        from lsprotocol.types import SymbolKind, TypeHierarchyItem
+
+        uri = params.text_document.uri
+        cached = state.cache.get(uri)
+        if cached is None or not cached.roots:
+            return None
+        word = _word_at_position(cached.text, params.position.line, params.position.character)
+        if not word:
+            return None
+        defs = _comp_defs_from_cached(cached.roots)
+        comp = defs.get(word)
+        if comp is None:
+            return None
+        try:
+            original_path = _uri_to_path(uri)
+        except ValueError:
+            original_path = None
+        translate = (
+            {cached.temp_path: original_path}
+            if cached.temp_path is not None and original_path is not None
+            else None
+        )
+        loc = _definition_location(comp, translate)
+        if loc is None:
+            return None
+        kind_label = type(comp).__name__.lower()
+        return [
+            TypeHierarchyItem(
+                name=word,
+                kind=SymbolKind.Class,
+                uri=loc.uri,
+                range=loc.range,
+                selection_range=loc.range,
+                detail=kind_label,
+                data={"typeName": word, "uri": uri},
+            )
+        ]
+
+    @server.feature("typeHierarchy/subtypes")
+    def _on_type_hierarchy_subtypes(_ls: LanguageServer, params: Any) -> list[Any]:
+        """Subtypes ≡ instances of the type. Reuses `_references_to_type`."""
+        from lsprotocol.types import SymbolKind, TypeHierarchyItem
+
+        item = getattr(params, "item", None)
+        if item is None:
+            return []
+        data = getattr(item, "data", None) or {}
+        type_name = data.get("typeName") if isinstance(data, dict) else None
+        cached_uri = data.get("uri") if isinstance(data, dict) else None
+        if not type_name or not cached_uri:
+            return []
+        cached = state.cache.get(cached_uri)
+        if cached is None or not cached.roots:
+            return []
+        try:
+            original_path = _uri_to_path(cached_uri)
+        except ValueError:
+            original_path = None
+        translate = (
+            {cached.temp_path: original_path}
+            if cached.temp_path is not None and original_path is not None
+            else None
+        )
+        refs = _references_to_type(type_name, cached.roots, False, translate)
+        return [
+            TypeHierarchyItem(
+                name=type_name,
+                kind=SymbolKind.Variable,
+                uri=ref.uri,
+                range=ref.range,
+                selection_range=ref.range,
+                detail="instance",
+            )
+            for ref in refs
+        ]
+
+    @server.feature("typeHierarchy/supertypes")
+    def _on_type_hierarchy_supertypes(_ls: LanguageServer, _params: Any) -> list[Any]:
+        """SystemRDL has no inheritance — no supertypes ever."""
+        return []
+
     @server.feature("textDocument/references")
     def _on_references(_ls: LanguageServer, params: Any) -> list[Location]:
         """Find all instantiation sites of the type under the cursor.
@@ -1056,6 +1147,14 @@ def build_server() -> LanguageServer:
             if cached.temp_path is not None and original_path is not None
             else None
         )
+        # Try multi-segment path first — `top.CTRL.enable` walks the elaborated
+        # tree segment-by-segment. Falls through to single-word lookup when
+        # the path has no dots.
+        path = _path_at_position(cached.text, params.position.line, params.position.character)
+        if path and "." in path:
+            loc = _resolve_path(cached.roots, path, translate)
+            if loc is not None:
+                return loc
         defs = _comp_defs_from_cached(cached.roots)
         comp = defs.get(word)
         if comp is not None:

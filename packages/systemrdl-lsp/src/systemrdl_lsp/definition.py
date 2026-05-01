@@ -67,6 +67,105 @@ def _comp_defs_from_cached(roots: list[RootNode]) -> dict[str, Any]:
     return {}
 
 
+def _path_at_position(text: str, line_0b: int, col_0b: int) -> str | None:
+    """Return the dot-separated identifier path the cursor sits on, if any.
+
+    Recognises both ``foo`` (single ident) and ``foo.bar.baz`` paths. Walks
+    left and right from the cursor including ``.`` characters that connect
+    identifiers. Used by goto-def to resolve qualified references like
+    ``top.regfile.CTRL.enable``.
+    """
+    lines = text.splitlines()
+    if line_0b < 0 or line_0b >= len(lines):
+        return None
+    line = lines[line_0b]
+    if col_0b < 0 or col_0b > len(line):
+        return None
+
+    def is_path_char(c: str) -> bool:
+        return c.isalnum() or c == "_" or c == "."
+
+    left = col_0b
+    while left > 0 and is_path_char(line[left - 1]):
+        left -= 1
+    right = col_0b
+    while right < len(line) and is_path_char(line[right]):
+        right += 1
+    if right <= left:
+        return None
+    raw = line[left:right]
+    # Strip surrounding dots that don't form an identifier (cursor was on
+    # whitespace adjacent to a dot).
+    raw = raw.strip(".")
+    if not raw:
+        return None
+    # Reject paths starting with a digit (numeric literal).
+    if raw[0].isdigit():
+        return None
+    return raw
+
+
+def _resolve_path(
+    roots: list[RootNode],
+    path: str,
+    path_translate: dict[pathlib.Path, pathlib.Path] | None,
+) -> Location | None:
+    """Walk ``foo.bar.baz`` through the elaborated tree → final node Location.
+
+    Falls back to plain ``foo`` lookup (via comp_defs / instance search) when
+    the path has no dots — keeps a single entry point for the goto-def handler.
+    Each path segment matches an `inst_name` of a child within the previous
+    segment's scope.
+    """
+    if not path:
+        return None
+    segments = [s for s in path.split(".") if s]
+    if not segments:
+        return None
+    if len(segments) == 1:
+        # Plain identifier — let the caller's existing comp_defs / instance
+        # fallback handle it. We only own the multi-segment case here.
+        return None
+
+    from systemrdl.node import Node
+
+    head, *rest = segments
+    # Find an entry node matching ``head`` — top-level addrmap or any visible
+    # instance.
+    for r in roots:
+        for top in r.children(unroll=True):
+            if getattr(top, "inst_name", None) == head:
+                node = top
+                ok = True
+                for seg in rest:
+                    found = None
+                    if hasattr(node, "children"):
+                        try:
+                            for c in node.children(unroll=True):
+                                if isinstance(c, Node) and getattr(c, "inst_name", None) == seg:
+                                    found = c
+                                    break
+                        except Exception:
+                            found = None
+                    if found is None and hasattr(node, "fields"):
+                        try:
+                            for f in node.fields():
+                                if getattr(f, "inst_name", None) == seg:
+                                    found = f
+                                    break
+                        except Exception:
+                            found = None
+                    if found is None:
+                        ok = False
+                        break
+                    node = found
+                if ok:
+                    inst = getattr(node, "inst", None)
+                    sr = getattr(inst, "inst_src_ref", None) or getattr(inst, "def_src_ref", None)
+                    return _src_ref_to_location(sr, path_translate)
+    return None
+
+
 def _find_instance_by_name(
     roots: list[RootNode],
     name: str,

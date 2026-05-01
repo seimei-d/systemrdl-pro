@@ -52,6 +52,7 @@ class Reg(TypedDict):
     displayName: NotRequired[str]
     address: "HexU64"
     width: Literal[8, 16, 32, 64]
+    accessWidth: NotRequired[Literal[8, 16, 32, 64]]
     reset: NotRequired["HexU64"]
     accessSummary: NotRequired[str]
     desc: NotRequired[str]

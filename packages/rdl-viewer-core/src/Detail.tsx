@@ -35,6 +35,13 @@ export function Detail({ reg, path, transport }: Props) {
         <span className="k">Access</span><span className="v">{reg.accessSummary || '—'}</span>
       </div>
       {reg.desc && <div className="desc">{reg.desc}</div>}
+      {reg.accessWidth && reg.accessWidth !== reg.width && (
+        <div className="rdl-split-access">
+          <strong>Split access:</strong>{' '}
+          {reg.width}-bit register, software accesses in {reg.accessWidth}-bit chunks
+          {' '}({Math.ceil(reg.width / reg.accessWidth)}× {reg.accessWidth}-bit)
+        </div>
+      )}
       <BitGrid reg={reg} />
       <RegisterDecoder reg={reg} />
       <div className="fields-title">Bit fields</div>

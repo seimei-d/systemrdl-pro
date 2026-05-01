@@ -35,6 +35,42 @@
     --rdl-acc-rsv: #8a3a3a;
   }
 }
+
+/* High-contrast theme. Activates on Windows High Contrast Mode and on
+   VSCode's `hc-black` / `hc-light` themes (which set `forced-colors: active`
+   for embedded webviews). System colour keywords resolve to whatever
+   palette the OS / VSCode theme has chosen, so the viewer chrome inherits
+   the user's actual high-contrast scheme. WCAG AAA-friendly because the
+   OS guarantees the contrast ratios. */
+@media (forced-colors: active) {
+  :root {
+    --rdl-bg: Canvas;
+    --rdl-panel: Canvas;
+    --rdl-chrome: Canvas;
+    --rdl-border: CanvasText;
+    --rdl-fg: CanvasText;
+    --rdl-dim: GrayText;
+    --rdl-selected: Highlight;
+    --rdl-accent: LinkText;
+    --rdl-warning: Mark;
+    /* Access-mode colours collapse to CanvasText — distinction comes from
+       text labels, not fill, since system high-contrast palettes don't
+       provide enough orthogonal hues. */
+    --rdl-acc-ro:  CanvasText;
+    --rdl-acc-rw:  CanvasText;
+    --rdl-acc-w1c: CanvasText;
+    --rdl-acc-wo:  CanvasText;
+    --rdl-acc-rsv: GrayText;
+  }
+  /* Force underlines on links/buttons so they're distinguishable when
+     all colours collapse to CanvasText. */
+  .rdl-tab.active, .rdl-overview-toggle, .rdl-tree-action {
+    text-decoration: underline;
+  }
+  /* Selected row needs an explicit border in HC since background tints
+     are unreliable. */
+  .rdl-row.selected { outline: 2px solid Highlight; outline-offset: -2px; }
+}
 *, *::before, *::after { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; background: var(--rdl-bg); color: var(--rdl-fg);
   font-family: var(--rdl-font-chrome); font-size: 14px; height: 100vh; }
@@ -67,6 +103,13 @@ html, body { margin: 0; padding: 0; background: var(--rdl-bg); color: var(--rdl-
   padding: 5px 9px; font-size: 13px; font-family: var(--rdl-font-chrome);
   outline: none; border-radius: 2px; min-width: 0; }
 .rdl-filter-bar input:focus { border-color: var(--rdl-accent); }
+.rdl-tree-action {
+  background: var(--rdl-bg); color: var(--rdl-dim);
+  border: 1px solid var(--rdl-border); border-radius: 2px;
+  padding: 4px 8px; font-size: 11px; cursor: pointer;
+  transition: color 0.1s, border-color 0.1s;
+}
+.rdl-tree-action:hover { color: var(--rdl-fg); border-color: var(--rdl-accent); }
 .rdl-filter-hint { color: var(--rdl-dim); font-size: 11px; margin-top: 4px; }
 .rdl-tree-host { overflow: auto; padding: 8px 0; min-height: 0; outline: none; }
 .rdl-tree { font-family: var(--rdl-font-mono); font-size: 13px; }
@@ -243,6 +286,16 @@ html, body { margin: 0; padding: 0; background: var(--rdl-bg); color: var(--rdl-
   letter-spacing: 0.04em; }
 .rdl-encode-table td.v { color: var(--rdl-accent); }
 .rdl-encode-table td.d { color: var(--rdl-dim); }
+
+.rdl-split-access {
+  margin: 6px 0;
+  padding: 6px 10px;
+  background: var(--rdl-chrome);
+  border-left: 3px solid var(--rdl-warning);
+  border-radius: 2px;
+  font-size: 12px;
+  color: var(--rdl-fg);
+}
 
 /* Register binary decoder — input + live field breakdown. */
 .rdl-decoder { margin: 8px 0; padding: 6px 0;

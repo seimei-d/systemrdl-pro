@@ -41,6 +41,7 @@ export type Reg = {
   displayName?: string;
   address: HexU64;
   width: 8 | 16 | 32 | 64;
+  accessWidth?: 8 | 16 | 32 | 64;
   reset?: HexU64;
   accessSummary?: string;
   desc?: string;

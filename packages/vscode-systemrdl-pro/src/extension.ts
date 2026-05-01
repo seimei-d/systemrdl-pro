@@ -619,6 +619,38 @@ async function showIncludePaths(): Promise<void> {
 // the host element, transport bridge, and CSP.
 // ---------------------------------------------------------------------------
 
+/**
+ * Read `systemrdl-pro.viewer.colors` and emit a `:root { --rdl-...: …; }`
+ * block that overrides the design-token defaults baked into viewer.css.
+ *
+ * Empty config → empty string → no extra style. Unknown keys are silently
+ * ignored (we only forward documented tokens).
+ */
+function readPaletteOverrides(): string {
+  const cfg = vscode.workspace.getConfiguration('systemrdl-pro').get<Record<string, string>>('viewer.colors');
+  if (!cfg || typeof cfg !== 'object' || Object.keys(cfg).length === 0) return '';
+  // Map config key → CSS custom property name. Aligned with viewer-core/styles.css.
+  const map: Record<string, string> = {
+    rw: '--rdl-acc-rw', ro: '--rdl-acc-ro', wo: '--rdl-acc-wo',
+    w1c: '--rdl-acc-w1c', rsv: '--rdl-acc-rsv',
+    accent: '--rdl-accent', warning: '--rdl-warning',
+    bg: '--rdl-bg', panel: '--rdl-panel', chrome: '--rdl-chrome',
+    border: '--rdl-border', fg: '--rdl-fg', dim: '--rdl-dim',
+    selected: '--rdl-selected',
+  };
+  const lines: string[] = [];
+  for (const [key, val] of Object.entries(cfg)) {
+    const cssVar = map[key];
+    if (!cssVar || typeof val !== 'string' || !val.trim()) continue;
+    // Disallow any character that could escape the style block. CSS values
+    // are pretty open (rgb(), var(), etc.) but `;` `}` would terminate the rule.
+    if (/[;}<>]/.test(val)) continue;
+    lines.push(`${cssVar}: ${val.trim()};`);
+  }
+  if (!lines.length) return '';
+  return `:root{${lines.join(' ')}}`;
+}
+
 function renderViewerHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
   const viewerJs = webview.asWebviewUri(
     vscode.Uri.joinPath(extensionUri, 'media', 'viewer', 'viewer.js'),
@@ -629,6 +661,7 @@ function renderViewerHtml(webview: vscode.Webview, extensionUri: vscode.Uri): st
   // CSP: only allow scripts/styles from the webview source. The init script is
   // inline; we use a nonce so VSCode's webview CSP enforcement doesn't block it.
   const nonce = makeNonce();
+  const paletteOverrides = readPaletteOverrides();
   return /* html */ `<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8">
@@ -636,7 +669,7 @@ function renderViewerHtml(webview: vscode.Webview, extensionUri: vscode.Uri): st
       content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src ${webview.cspSource} 'nonce-${nonce}'; font-src ${webview.cspSource};">
 <title>SystemRDL Memory Map</title>
 <link rel="stylesheet" href="${viewerCss}">
-<style>html,body,#app-root{height:100%;margin:0;}</style>
+<style>html,body,#app-root{height:100%;margin:0;}${paletteOverrides}</style>
 </head>
 <body>
   <div id="app-root"></div>

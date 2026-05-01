@@ -74,6 +74,25 @@ export function Viewer({ transport }: Props) {
     });
   }, []);
 
+  const collapseAll = useCallback(() => {
+    if (!root) return;
+    // Walk every container and collect its `pathSegs.join('.')` key.
+    // Same key format buildFlatList uses.
+    const keys = new Set<string>();
+    const walk = (node: TreeNode, segs: string[]): void => {
+      if (isContainer(node)) {
+        keys.add(segs.join('.'));
+        (node.children ?? []).forEach(c => walk(c, [...segs, c.name]));
+      }
+    };
+    walk(root, [root.name]);
+    setCollapsed(keys);
+  }, [root]);
+
+  const expandAll = useCallback(() => {
+    setCollapsed(new Set());
+  }, []);
+
   const selectReg = useCallback((row: FlatRow & { kind: 'reg' }) => {
     setSelectedKey(row.key);
     if (row.node.source && transport.reveal) transport.reveal(row.node.source);
@@ -197,6 +216,18 @@ export function Viewer({ transport }: Props) {
                 placeholder={filterScopePlaceholder(filterScope)}
                 onChange={e => setFilter(e.target.value.toLowerCase())}
               />
+              <button
+                type="button"
+                className="rdl-tree-action"
+                title="Collapse all containers"
+                onClick={collapseAll}
+              >▸</button>
+              <button
+                type="button"
+                className="rdl-tree-action"
+                title="Expand all containers"
+                onClick={expandAll}
+              >▾</button>
             </div>
           </div>
           <Tree

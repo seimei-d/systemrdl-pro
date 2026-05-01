@@ -24,6 +24,63 @@ def _format_hex(value: int, width_hex_chars: int = 8) -> str:
     return f"0x{value:0{width_hex_chars}X}"
 
 
+def _format_parameter(p: Any) -> str:
+    """Render a Parameter object as `NAME` for the type signature line."""
+    return getattr(p, "name", "?") or "?"
+
+
+def _param_default_label(expr: Any) -> str:
+    """Best-effort stringification of a parameter's default expression."""
+    val = getattr(expr, "value", None)
+    if val is not None:
+        return str(val)
+    return repr(expr)
+
+
+def _property_origin_hint(node: Any, prop_name: str) -> str:
+    """Annotate a property's origin if it wasn't set on the node's own line.
+
+    Distinguishes the two off-line origins:
+
+    - **dynamic property assignment** — line contains ``->``. SystemRDL
+      lets the user post-assign properties to an instance with
+      ``some_inst->prop = value;`` outside the component body.
+    - **default inheritance** — line begins with ``default`` (a parent
+      scope's default-property assignment).
+
+    Returns an empty string when the property is missing or set on the
+    node's own declaration line.
+    """
+    inst = getattr(node, "inst", None)
+    psrc = getattr(inst, "property_src_ref", None)
+    if not isinstance(psrc, dict):
+        return ""
+    prop_ref = psrc.get(prop_name)
+    if prop_ref is None:
+        return ""
+    prop_line = getattr(prop_ref, "line", None)
+    own_ref = getattr(inst, "inst_src_ref", None) or getattr(inst, "def_src_ref", None)
+    own_line = getattr(own_ref, "line", None) if own_ref else None
+    if prop_line is None or own_line is None or prop_line == own_line:
+        return ""
+    # Peek at the source line to label the kind of off-line assignment.
+    label = "set"
+    try:
+        from pathlib import Path as _Path
+        filename = getattr(prop_ref, "filename", None)
+        if filename:
+            line_text = _Path(filename).read_text(encoding="utf-8", errors="replace")\
+                .splitlines()[prop_line - 1]
+            stripped = line_text.lstrip()
+            if "->" in line_text:
+                label = "dynamic"
+            elif stripped.startswith("default"):
+                label = "default"
+    except (OSError, IndexError):
+        pass
+    return f" _(← {label} at line {prop_line})_"
+
+
 def _node_at_position(
     roots: list[RootNode] | RootNode, line_0b: int, char_0b: int
 ) -> Any | None:
@@ -125,7 +182,15 @@ def _hover_for_word(word: str, roots: list[RootNode]) -> str | None:
     if comp is not None:
         kind = type(comp).__name__.lower()
         props = getattr(comp, "properties", {}) or {}
-        out = [f"**{kind}** `{word}`"]
+        # Parametrized types: surface their parameter list in the title so the
+        # user knows the type expects `#(...)` instantiation.
+        params = list(getattr(comp, "parameters", []) or [])
+        param_str = ""
+        if params:
+            param_str = " #(" + ", ".join(
+                _format_parameter(p) for p in params
+            ) + ")"
+        out = [f"**{kind}** `{word}{param_str}`"]
         display_name = props.get("name")
         desc = props.get("desc")
         if display_name:
@@ -134,9 +199,19 @@ def _hover_for_word(word: str, roots: list[RootNode]) -> str | None:
         if desc:
             out.append("")
             out.append(str(desc))
-        if not display_name and not desc:
+        if not display_name and not desc and not params:
             out.append("")
             out.append(f"User-defined `{kind}` type.")
+        if params:
+            out.append("")
+            out.append("**Parameters:**")
+            for p in params:
+                pt = getattr(getattr(p, "param_type", None), "__name__", "?")
+                pdefault = getattr(p, "default_expr", None)
+                line = f"- `{p.name}` : `{pt}`"
+                if pdefault is not None:
+                    line += f" (default: `{_param_default_label(pdefault)}`)"
+                out.append(line)
         return "\n".join(out)
 
     # 2. User-defined property (`property foo { ... };`).
@@ -191,10 +266,12 @@ def _hover_text_for_node(node: Any) -> str | None:
             reset_str = _format_hex(int(reset)) if reset is not None else "—"
         except LookupError:
             reset_str = "—"
+        access_origin = _property_origin_hint(node, "sw")
+        reset_origin = _property_origin_hint(node, "reset")
         lines.append(f"**field** `{name}` `[{msb}:{lsb}]`")
         lines.append("")
-        lines.append(f"- **access**: {access_label}")
-        lines.append(f"- **reset**: {reset_str}")
+        lines.append(f"- **access**: {access_label}{access_origin}")
+        lines.append(f"- **reset**: {reset_str}{reset_origin}")
         try:
             desc = node.get_property("desc")
             if desc:
@@ -215,8 +292,18 @@ def _hover_text_for_node(node: Any) -> str | None:
             is_bridge = bool(node.get_property("bridge"))
         except (LookupError, AttributeError):
             is_bridge = False
+        # Parametrized instance: surface resolved parameter values (e.g.
+        # `my_reg<WIDTH=16>`) so reused-with-different-params instances are
+        # distinguishable in hover.
+        inst = getattr(node, "inst", None)
+        inst_params = list(getattr(inst, "parameters", []) or [])
+        param_str = ""
+        if inst_params:
+            param_str = " #(" + ", ".join(
+                f"{p.name}={getattr(p, 'value', '?')}" for p in inst_params
+            ) + ")"
         title_extra = " · _bridge_" if is_bridge else ""
-        lines.append(f"**{type_name}** `{name}`{title_extra}")
+        lines.append(f"**{type_name}** `{name}{param_str}`{title_extra}")
         lines.append("")
         lines.append(f"- **address**: {_format_hex(addr)}")
         if size is not None:
