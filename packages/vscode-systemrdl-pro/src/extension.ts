@@ -7,79 +7,13 @@ import {
   type LanguageClientOptions,
   type ServerOptions,
 } from 'vscode-languageclient/node';
-
-// Mirrors schemas/elaborated-tree.json v0.1.0. Keep in sync — Decision 9A: codegen
-// will replace this hand-written shadow type in Week 5.
-type ElaboratedTree = {
-  schemaVersion: '0.1.0';
-  // Per-URI monotonic counter. TODO-1: clients pass `sinceVersion` to skip
-  // serialization+transport when the cached tree hasn't advanced. Absent in
-  // the legacy reply shape so we keep it optional.
-  version?: number;
-  // True when the LSP recognized the client's `sinceVersion`. The body is
-  // empty in this case; the client must keep its previously-rendered tree.
-  unchanged?: boolean;
-  elaboratedAt?: string;
-  stale?: boolean;
-  roots: Addrmap[];
-};
-
-type Addrmap = {
-  kind: 'addrmap';
-  name: string;
-  type?: string;
-  displayName?: string;
-  address: string;
-  size: string;
-  desc?: string;
-  source?: SourceLoc;
-  children: (Addrmap | Regfile | Reg)[];
-};
-
-type Regfile = {
-  kind: 'regfile';
-  name: string;
-  type?: string;
-  displayName?: string;
-  address: string;
-  size: string;
-  desc?: string;
-  source?: SourceLoc;
-  children: (Regfile | Reg)[];
-};
-
-type Reg = {
-  kind: 'reg';
-  name: string;
-  type?: string;
-  displayName?: string;
-  address: string;
-  width: 8 | 16 | 32 | 64;
-  reset?: string;
-  accessSummary?: string;
-  desc?: string;
-  source?: SourceLoc;
-  fields: Field[];
-};
-
-type Field = {
-  name: string;
-  displayName?: string;
-  lsb: number;
-  msb: number;
-  access: string;
-  reset?: string;
-  desc?: string;
-  source?: SourceLoc;
-};
-
-type SourceLoc = {
-  uri: string;
-  line: number;
-  column?: number;
-  endLine?: number;
-  endColumn?: number;
-};
+import type {
+  Addrmap,
+  ElaboratedTree,
+  Reg,
+  Regfile,
+  SourceLoc,
+} from './types/elaborated-tree.generated';
 
 let client: LanguageClient | undefined;
 let outputChannel: vscode.LogOutputChannel | undefined;

@@ -4,11 +4,7 @@
 #
 # Inputs:  schemas/elaborated-tree.json
 # Outputs: packages/systemrdl-lsp/src/systemrdl_lsp/_generated_types.py
-#          packages/rdl-viewer-core/src/_generated_types.ts
-#
-# Implementation deferred to Week 2: until then, both consumers use hand-written shadow
-# types that match the schema. CI validates the shadow types against the schema via
-# fixture round-trips. See docs/ROADMAP.md.
+#          packages/vscode-systemrdl-pro/src/types/elaborated-tree.generated.ts
 
 set -euo pipefail
 
@@ -19,6 +15,4 @@ if [[ ! -f "$SCHEMA" ]]; then
   exit 1
 fi
 
-echo "[codegen] schema present: $SCHEMA ($(wc -c <"$SCHEMA") bytes)"
-echo "[codegen] codegen step is a placeholder until Week 2; see docs/ROADMAP.md."
-echo "[codegen] no files were regenerated."
+uv run python tools/codegen.py

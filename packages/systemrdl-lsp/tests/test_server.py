@@ -641,6 +641,32 @@ def test_cache_version_increments_on_each_put(tmp_path):
     cache.clear()
 
 
+def test_generated_types_match_schema():
+    """Decision 9A: generated TypedDict + TS types are the source of truth.
+
+    If the schema changed but ``bun run codegen`` wasn't re-run, the generated
+    Python file falls out of date. CI catches that here so we don't ship a
+    drifted shadow. Re-run ``bun run codegen`` to fix.
+    """
+    import pathlib
+    import subprocess
+    repo_root = pathlib.Path(__file__).resolve().parents[3]
+    py_path = repo_root / "packages/systemrdl-lsp/src/systemrdl_lsp/_generated_types.py"
+    before = py_path.read_text(encoding="utf-8")
+    result = subprocess.run(
+        ["uv", "run", "python", "tools/codegen.py"],
+        cwd=str(repo_root),
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, f"codegen failed: {result.stderr}"
+    after = py_path.read_text(encoding="utf-8")
+    assert before == after, (
+        "Generated types out of sync with schemas/elaborated-tree.json. "
+        "Run `bun run codegen` and commit the diff."
+    )
+
+
 def test_unchanged_envelope_is_constant_size():
     """TODO-1 fast path: ``unchanged`` reply is small regardless of tree size."""
     from systemrdl_lsp.server import _unchanged_envelope

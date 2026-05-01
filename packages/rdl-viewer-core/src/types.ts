@@ -1,72 +1,24 @@
 /**
- * Mirrors `schemas/elaborated-tree.json` v0.1.0. Hand-written for now;
- * Decision 9A schedules codegen → these types get auto-generated from the
- * JSON Schema in a later pass.
+ * Re-exports the auto-generated SystemRDL elaborated-tree shape (Decision 9A)
+ * plus a few viewer-only types that aren't in the schema (TreeNode union,
+ * Container narrowing, Transport bridge contract).
+ *
+ * Schema source of truth: `schemas/elaborated-tree.json`. Regenerate via
+ * `bun run codegen` — never hand-edit `_generated/elaborated-tree.ts`.
  */
 
-export type ElaboratedTree = {
-  schemaVersion: '0.1.0';
-  elaboratedAt?: string;
-  stale?: boolean;
-  roots: Addrmap[];
-};
+export type {
+  AccessMode,
+  Addrmap,
+  ElaboratedTree,
+  Field,
+  HexU64,
+  Reg,
+  Regfile,
+  SourceLoc,
+} from './_generated/elaborated-tree';
 
-export type Addrmap = {
-  kind: 'addrmap';
-  name: string;
-  type?: string;
-  displayName?: string;
-  address: string;
-  size: string;
-  desc?: string;
-  source?: SourceLoc;
-  children: TreeNode[];
-};
-
-export type Regfile = {
-  kind: 'regfile';
-  name: string;
-  type?: string;
-  displayName?: string;
-  address: string;
-  size: string;
-  desc?: string;
-  source?: SourceLoc;
-  children: (Regfile | Reg)[];
-};
-
-export type Reg = {
-  kind: 'reg';
-  name: string;
-  type?: string;
-  displayName?: string;
-  address: string;
-  width: 8 | 16 | 32 | 64;
-  reset?: string;
-  accessSummary?: string;
-  desc?: string;
-  source?: SourceLoc;
-  fields: Field[];
-};
-
-export type Field = {
-  name: string;
-  displayName?: string;
-  lsb: number;
-  msb: number;
-  access: string;
-  reset?: string;
-  desc?: string;
-  source?: SourceLoc;
-};
-
-export type SourceLoc = {
-  uri: string;
-  line: number;
-  column?: number;
-  endLine?: number;
-  endColumn?: number;
-};
+import type { Addrmap, ElaboratedTree, Reg, Regfile, SourceLoc } from './_generated/elaborated-tree';
 
 export type TreeNode = Addrmap | Regfile | Reg;
 export type Container = Addrmap | Regfile;
