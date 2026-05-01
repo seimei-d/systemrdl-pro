@@ -211,6 +211,11 @@ class ServerState:
     # itself comes from systemrdl-compiler on every compile, so we only nag with
     # the modal banner once per session.
     perl_warning_shown: bool = False
+    # Per-primary-URI snapshot of which cross-file URIs we last published
+    # non-empty diagnostics to. Drives the clear-on-resolve cycle for
+    # `\`include`d files (a fixed error in common.rdl publishes [] there next
+    # compile so the stale squiggle disappears).
+    diag_affected: dict[str, set[str]] = dataclasses.field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -254,7 +259,10 @@ def build_server() -> LanguageServer:
             tmp_path.unlink(missing_ok=True)
             if state.cache.get(uri) is not None:
                 state.stale_uris.add(uri)
-        _publish_diagnostics(server, uri, messages)
+        previously_affected = state.diag_affected.get(uri, set())
+        state.diag_affected[uri] = _publish_diagnostics(
+            server, uri, messages, previously_affected
+        )
 
         # TODO-1 push: notify the client that a fresh elaborated tree is ready.
         # Payload is metadata-only ({uri, version}); the client decides whether
@@ -357,7 +365,10 @@ def build_server() -> LanguageServer:
                 col_start_1b=1,
                 col_end_1b=1,
             )
-            _publish_diagnostics(server, uri, [timeout_msg])
+            previously_affected = state.diag_affected.get(uri, set())
+            state.diag_affected[uri] = _publish_diagnostics(
+                server, uri, [timeout_msg], previously_affected
+            )
             return
         except Exception:
             logger.exception("unexpected error during async full-pass for %s", uri)

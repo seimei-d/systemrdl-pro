@@ -45,6 +45,7 @@ TS_OUTS = [
 ]
 
 PY_BANNER = """\
+# ruff: noqa: E501, UP007, UP037
 \"\"\"Auto-generated from ``schemas/elaborated-tree.json``. DO NOT EDIT.
 
 Regenerate via ``bun run codegen`` (Decision 9A).

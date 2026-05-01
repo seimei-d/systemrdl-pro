@@ -641,6 +641,44 @@ def test_cache_version_increments_on_each_put(tmp_path):
     cache.clear()
 
 
+def test_cross_file_diagnostics_bucket_by_source(tmp_path):
+    r"""An error in `\include`d common.rdl is reported against common.rdl's URI,
+    not the master file that was being compiled."""
+    common = tmp_path / "common.rdl"
+    common.write_text(
+        textwrap.dedent("""
+            reg my_ctrl_t {
+                // syntax error: missing semicolon after field declaration
+                field { sw=rw; hw=r } enable[0:0] = 0;
+            };
+        """).strip(),
+        encoding="utf-8",
+    )
+    master = tmp_path / "master.rdl"
+    master.write_text(
+        '`include "common.rdl"\n'
+        'addrmap top { my_ctrl_t CTRL @ 0; };\n',
+        encoding="utf-8",
+    )
+    msgs, _roots, tmp = _compile_text(master.as_uri(), master.read_text())
+    try:
+        common_msgs = [m for m in msgs if m.file_path == common]
+        master_msgs = [m for m in msgs if m.file_path == master]
+        assert common_msgs, (
+            f"expected at least one diagnostic on common.rdl; got file_paths "
+            f"{[m.file_path for m in msgs]}"
+        )
+        # The master itself should not carry the include's syntax error —
+        # that would land the squiggle on the master's `include line, which
+        # is not where the error actually is.
+        assert not any(
+            m.severity in (Severity.ERROR, Severity.FATAL)
+            for m in master_msgs
+        ), f"unexpected error on master.rdl: {master_msgs}"
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 def test_generated_types_match_schema():
     """Decision 9A: generated TypedDict + TS types are the source of truth.
 

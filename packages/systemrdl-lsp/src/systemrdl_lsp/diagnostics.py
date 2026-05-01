@@ -70,22 +70,53 @@ def _publish_diagnostics(
     server: LanguageServer,
     uri: str,
     messages: list[CompilerMessage],
-) -> None:
+    previously_affected: set[str] | None = None,
+) -> set[str]:
+    r"""Bucket messages by source file and publish each bucket to its own URI.
+
+    The compiler can emit diagnostics from `\include`d files (e.g. a syntax
+    error in ``common.rdl`` while compiling ``master.rdl``). We publish those
+    to their real file URIs so the squiggle lands in the right editor.
+
+    ``previously_affected`` is the set of URIs we published non-empty diags to
+    on the previous compile of this same primary. We clear any URI that drops
+    out so a fixed error doesn't leave a stale squiggle behind. The primary
+    URI itself is always published (empty or not).
+
+    Returns the set of URIs we published *non-empty* diagnostics to this round —
+    callers store it as the next round's ``previously_affected``.
+
+    Limitation: when two primaries `\include` the same file and only one has
+    an error in it, the clean primary's compile clears the shared file's
+    squiggle. This is eventually-consistent (next compile of the dirty primary
+    republishes), acceptable for v1; cross-primary diag ownership would need a
+    proper inverted index.
+    """
     target_path = _uri_to_path(uri)
-    diagnostics: list[Diagnostic] = []
+    try:
+        target_resolved = target_path.resolve()
+    except OSError:
+        target_resolved = target_path
+
+    buckets: dict[str, list[Diagnostic]] = {uri: []}
     for m in messages:
         if m.file_path is None:
             # Sourceless meta messages (e.g. "Parse aborted due to previous errors")
             # would otherwise pin to file line 1 as redundant noise.
             continue
         try:
-            same_file = m.file_path.resolve() == target_path.resolve()
+            mpath = m.file_path.resolve()
         except OSError:
-            same_file = m.file_path == target_path
-        if not same_file:
-            # Cross-file diagnostics (errors in `included files) — skip in this pass.
-            continue
-        diagnostics.append(
+            mpath = m.file_path
+        if mpath == target_resolved:
+            bucket_uri = uri
+        else:
+            try:
+                bucket_uri = mpath.as_uri()
+            except ValueError:
+                # Path not absolute or malformed — can't address as URI, drop.
+                continue
+        buckets.setdefault(bucket_uri, []).append(
             Diagnostic(
                 range=_message_to_range(m),
                 severity=_severity_to_lsp(m.severity),
@@ -94,9 +125,29 @@ def _publish_diagnostics(
             )
         )
 
-    server.text_document_publish_diagnostics(
-        PublishDiagnosticsParams(uri=uri, diagnostics=diagnostics)
-    )
+    affected: set[str] = set()
+    for bucket_uri, diags in buckets.items():
+        if diags or bucket_uri == uri:
+            # Always publish the primary, even empty, so its prior diags clear.
+            # Non-empty cross-file buckets get published; empty ones are skipped
+            # below in the "stale clear" pass which targets only URIs that had
+            # diags last round.
+            server.text_document_publish_diagnostics(
+                PublishDiagnosticsParams(uri=bucket_uri, diagnostics=diags)
+            )
+            if diags:
+                affected.add(bucket_uri)
+
+    # Clear cross-file URIs that had diagnostics last round but not this one.
+    # Without this pass, fixing the error in common.rdl would leave a stale
+    # squiggle there until something else re-touches the file.
+    if previously_affected:
+        for stale_uri in previously_affected - affected - {uri}:
+            server.text_document_publish_diagnostics(
+                PublishDiagnosticsParams(uri=stale_uri, diagnostics=[])
+            )
+
+    return affected
 
 
 def _address_conflict_diagnostics(
