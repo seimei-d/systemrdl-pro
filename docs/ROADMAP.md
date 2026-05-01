@@ -2,7 +2,11 @@
 
 Tracking the build sequence locked in `docs/design.md` (Approach B, post eng + design reviews).
 
-## Week 1 — Walking skeleton (publishable) *current*
+> **Status (2026-05-01):** all weekly milestones complete. Latest release
+> [v0.22.10](https://github.com/seimei-d/systemrdl-pro/releases/latest)
+> ships the full LSP + viewer surface. This file is now mostly historical.
+
+## Week 1 — Walking skeleton (publishable) *complete*
 
 Goal: `code --install-extension systemrdl-pro` + open `.rdl` → see live diagnostics in editor +
 empty viewer panel that opens via "Show Memory Map" command.
@@ -11,7 +15,9 @@ empty viewer panel that opens via "Show Memory Map" command.
 - [x] `schemas/elaborated-tree.json` v0.1 (codegen foundation)
 - [x] `systemrdl-lsp` v0.1: pygls + `publishDiagnostics` wrapping `systemrdl-compiler`
 - [x] `vscode-systemrdl-pro` v0.1: LSP client + "Show Memory Map" command + webview placeholder
-- [ ] First Marketplace publish (manual `vsce publish`, gated on token setup)
+- [x] First public release as a `.vsix` on GitHub Releases (Marketplace publish
+      deferred — requires Azure DevOps PAT; users install via drag-onto-Extensions
+      or `code --install-extension <path>`)
 
 ## Week 2-3 — Full LSP
 
@@ -76,7 +82,36 @@ design decisions D4-D15 in `docs/design.md` are non-negotiable inputs.
 - TODO-D1: user-overridable color palette
 - TODO-D2: high-contrast theme tokens
 
-## Open
+## Beyond Week 6 (post-v0.20.0)
 
-- [ ] **First Marketplace publish** — needs `vsce login` with a Personal Access
-      Token. Manual one-shot when ready; nothing in the codebase blocks it.
+Most of the post-Week-6 work landed in batches; see the full
+[`TODOS.md`](../TODOS.md) (now empty) and the v0.22.10 release notes:
+
+- **server.py refactor** (TODO-R1) — split into seven themed modules
+  (`compile`, `diagnostics`, `hover`, `completion`, `definition`,
+  `serialize`, `outline`) with a thin wiring shim.
+- **Tier 1.1**: user-defined properties surface in hover + completion.
+- **Tier 1.2**: `encode = my_enum;` rendered as a collapsible value
+  table inside the field row, with width-tight hex padding.
+- **Tier 1.3**: counter / interrupt tags on field rows.
+- **Tier 1.4**: hover annotates property origin (`(← default at line N)`,
+  `(← dynamic at line N)`).
+- **Tier 1.5**: instance-name fallback for goto-def (signals included).
+- **Tier 2.1**: parametrized type hover (`my_reg #(WIDTH=16)`).
+- **Tier 2.2**: reference-path goto-def (`top.regfile.CTRL.enable`).
+- **Tier 2.3**: dynamic property assignments distinguished in hover.
+- **Tier 2.4**: split-access banner when `accesswidth < regwidth`.
+- **Tier 3.3**: register binary decoder in Detail panel.
+- **Tier 3.4**: collapse-all / expand-all buttons.
+- **Tier 3.5** (TODO-D1): user palette via `systemrdl-pro.viewer.colors`.
+- **Tier 3.6** (TODO-D2): high-contrast theme via `forced-colors: active`.
+- **Tier 4** quick wins: documentHighlight, selectionRange, signatureHelp.
+- **Tier 4.4**: type hierarchy (subtypes ≡ instances).
+- **Codegen** (Decision 9A): `bun run codegen` regenerates Python +
+  TS types from `schemas/elaborated-tree.json`. CI fails on drift.
+- **Cross-file diagnostics**: errors in `\include`d files land on the
+  right URI; clear-on-resolve cycle.
+- **Webview-panel serializer**: Memory Map panels survive `Reload Window`
+  via `WebviewPanelSerializer`.
+- **Theme-aware chrome**: viewer routes through `--vscode-*` CSS
+  variables and inherits any active VSCode theme.
