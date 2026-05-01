@@ -836,6 +836,42 @@ def test_address_conflicts_skip_reused_type_body(tmp_path):
         tmp.unlink(missing_ok=True)
 
 
+def test_hover_works_on_field_inside_reused_reg_type(tmp_path):
+    """Field inside a reg type that has multiple instances must still hover.
+
+    The reused-type-body heuristic (line shared by many elaborated nodes →
+    skip) is right for AddressableNode hover (different instances have
+    different absolute_address values), but wrong for fields — their
+    properties don't vary per instance, so picking any one is fine.
+    Regression: the user reported hover on `enable[0:0]` returned None
+    when its containing `secure_ctrl_t` was instantiated 3×.
+    """
+    rdl = textwrap.dedent("""
+        reg my_status_t {
+            field { sw=rw; hw=r; } enable[0:0] = 0;
+        };
+        addrmap top {
+            my_status_t S0 @ 0x0;
+            my_status_t S1 @ 0x4;
+            my_status_t S2 @ 0x8;
+        };
+    """).strip()
+    rdl_path = tmp_path / "x.rdl"
+    rdl_path.write_text(rdl, encoding="utf-8")
+    _msgs, roots, tmp = _compile_text(rdl_path.as_uri(), rdl)
+    try:
+        # Field declaration `} enable[0:0] = 0;` is on line 2 (0-based 1).
+        # Even though my_status_t is reused 3×, hover on the field should
+        # work — fields are exempt from the reused-type-body filter.
+        node = _node_at_position(roots, 1, 14)  # cursor on `enable`
+        assert node is not None, "field hover should work despite reused container"
+        text = _hover_text_for_node(node)
+        assert text is not None and "enable" in text
+        assert "field" in text and "[0:0]" in text
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 def test_inlay_hints_skip_reused_type_body(tmp_path):
     """Reused regfile types must NOT get inlay hints on their internal lines.
 

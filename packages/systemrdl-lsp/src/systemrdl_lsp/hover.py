@@ -135,10 +135,21 @@ def _node_at_position(
         if src_ref is not None:
             ref_line = getattr(src_ref, "line", None)
             ref_filename = getattr(src_ref, "filename", None)
+            # The reused-type-body filter (line shared by multiple elaborated
+            # nodes → skip) protects against picking an arbitrary instance
+            # for a line where addresses would differ per instance. That only
+            # matters for AddressableNode (reg/regfile/addrmap) — those have
+            # an absolute_address. Fields don't, so picking any instance for
+            # a field-on-shared-line is safe (access / reset / encode are
+            # intrinsic to the type body, not the instance).
+            is_field = not isinstance(node, AddressableNode)
             if (
                 ref_line == target_line_1b
                 and ref_filename
-                and line_uses.get((str(ref_filename), ref_line), 0) <= 1
+                and (
+                    is_field
+                    or line_uses.get((str(ref_filename), ref_line), 0) <= 1
+                )
             ):
                 # Approximate "smallest containing node" by counting depth.
                 span = 1
