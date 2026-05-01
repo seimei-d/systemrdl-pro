@@ -47,6 +47,7 @@ from pygls.lsp.server import LanguageServer
 from systemrdl.messages import Severity
 
 from ._uri import _path_to_uri, _uri_to_path
+from .code_actions import _code_actions_for_range
 from .compile import (
     CachedElaboration,
     CapturingPrinter,
@@ -76,6 +77,8 @@ from .completion import (
 from .definition import (
     _comp_defs_from_cached,
     _definition_location,
+    _references_to_type,
+    _rename_locations,
     _word_at_position,
 )
 from .diagnostics import (
@@ -87,18 +90,25 @@ from .diagnostics import (
     _severity_to_lsp,
     _src_ref_to_range,
 )
+from .formatting import _document_formatting_edits, _format_text
 from .hover import (
     _format_hex,
     _hover_for_word,
     _hover_text_for_node,
     _node_at_position,
 )
+from .links import _document_links
 from .outline import (
     _code_lenses_for_addrmaps,
     _document_symbols,
     _folding_ranges_from_text,
     _inlay_hints_for_addressables,
     _workspace_symbols_for_uri,
+)
+from .semantic import (
+    TOKEN_MODIFIERS,
+    TOKEN_TYPES,
+    _semantic_tokens_for_text,
 )
 from .serialize import (
     ELABORATED_TREE_SCHEMA_VERSION,
@@ -118,7 +128,37 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-SERVER_VERSION = "0.13.0"
+SERVER_VERSION = "0.14.0"
+
+
+def _iter_rdl_files(root: pathlib.Path, exclude_dirs: set[str]):
+    """Yield every ``.rdl`` file under ``root``, skipping noisy directory names.
+
+    Used by the workspace pre-index. Errors during traversal (permission denied,
+    broken symlinks) are silently skipped — the pre-index is best-effort, not
+    a hard guarantee.
+    """
+    try:
+        for entry in root.iterdir():
+            if entry.is_dir():
+                if entry.name in exclude_dirs or entry.name.startswith("."):
+                    continue
+                yield from _iter_rdl_files(entry, exclude_dirs)
+            elif entry.is_file() and entry.suffix.lower() == ".rdl":
+                yield entry
+    except (PermissionError, OSError):
+        return
+
+
+def _is_valid_identifier(name: str) -> bool:
+    """Match SystemRDL identifier syntax: ``[A-Za-z_][A-Za-z0-9_]*``.
+
+    Used by rename to reject input that would corrupt the buffer.
+    """
+    import re as _re
+    return bool(_re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name))
+
+
 DEBOUNCE_SECONDS = 0.3
 # Eng-review safety net #3: cap a single elaborate pass at 10s wall-clock.
 # Past that we keep last-good (D7) and surface a synthetic diagnostic. A pathological
@@ -148,6 +188,7 @@ __all__ = [
     "_SimpleRef",
     "_address_conflict_diagnostics",
     "_build_range",
+    "_code_actions_for_range",
     "_code_lenses_for_addrmaps",
     "_comp_defs_from_cached",
     "_compile_text",
@@ -156,24 +197,31 @@ __all__ = [
     "_completion_items_for_types",
     "_completion_items_static",
     "_definition_location",
+    "_document_formatting_edits",
+    "_document_links",
     "_document_symbols",
     "_elaborate",
     "_expand_include_vars",
     "_field_access_token",
     "_folding_ranges_from_text",
     "_format_hex",
+    "_format_text",
     "_hex",
     "_hover_for_word",
     "_hover_text_for_node",
     "_inlay_hints_for_addressables",
+    "_iter_rdl_files",
     "_make_items",
     "_message_to_range",
     "_node_at_position",
     "_path_to_uri",
     "_peakrdl_toml_paths",
     "_publish_diagnostics",
+    "_references_to_type",
+    "_rename_locations",
     "_resolve_search_paths",
     "_safe_get_property",
+    "_semantic_tokens_for_text",
     "_serialize_addressable",
     "_serialize_field",
     "_serialize_reg",
@@ -218,6 +266,10 @@ class ServerState:
     # `\`include`d files (a fixed error in common.rdl publishes [] there next
     # compile so the stale squiggle disappears).
     diag_affected: dict[str, set[str]] = dataclasses.field(default_factory=dict)
+    # Background pre-index toggles. workspace/symbol only sees files the user
+    # has opened; pre-warming the cache fixes Ctrl+T against unfamiliar trees.
+    preindex_enabled: bool = True
+    preindex_max_files: int = 200
 
 
 # ---------------------------------------------------------------------------
@@ -377,6 +429,65 @@ def build_server() -> LanguageServer:
             return
         _apply_compile_result(uri, buffer_text, messages, roots, tmp_path)
 
+    _PREINDEX_EXCLUDE_DIRS = {
+        ".git", "node_modules", ".venv", "venv", "dist",
+        "build", "out", "__pycache__",
+    }
+
+    async def _preindex_workspace() -> None:
+        """Walk every workspace folder for ``.rdl`` files and pre-elaborate them.
+
+        ``workspace/symbol`` (Ctrl+T) only sees files the LSP has touched —
+        without pre-index, search-by-name finds nothing on first launch even
+        for files visible in the explorer. Concurrency is capped at 4 to
+        avoid pegging CPU on big workspaces; total file count capped by
+        ``state.preindex_max_files``.
+        """
+        if not state.preindex_enabled:
+            return
+        try:
+            folders = list(server.workspace.folders.values()) if server.workspace.folders else []
+        except Exception:
+            folders = []
+        if not folders:
+            return
+
+        rdl_paths: list[pathlib.Path] = []
+        for folder in folders:
+            try:
+                root = _uri_to_path(folder.uri)
+            except (ValueError, AttributeError):
+                continue
+            for path in _iter_rdl_files(root, _PREINDEX_EXCLUDE_DIRS):
+                rdl_paths.append(path)
+                if len(rdl_paths) >= state.preindex_max_files:
+                    break
+            if len(rdl_paths) >= state.preindex_max_files:
+                logger.info(
+                    "preindex hit cap %d files; remaining .rdl skipped",
+                    state.preindex_max_files,
+                )
+                break
+
+        logger.info("preindex: %d .rdl files queued", len(rdl_paths))
+        sem = asyncio.Semaphore(4)
+
+        async def warm(path: pathlib.Path) -> None:
+            async with sem:
+                uri = path.as_uri()
+                if state.cache.get(uri) is not None:
+                    return
+                try:
+                    text = await asyncio.get_running_loop().run_in_executor(
+                        None, lambda: path.read_text(encoding="utf-8", errors="replace"),
+                    )
+                except OSError:
+                    return
+                await _full_pass_async(uri, text)
+
+        await asyncio.gather(*(warm(p) for p in rdl_paths), return_exceptions=True)
+        logger.info("preindex: done (%d files)", len(rdl_paths))
+
     async def _debounced_full_pass(uri: str) -> None:
         try:
             await asyncio.sleep(DEBOUNCE_SECONDS)
@@ -401,19 +512,36 @@ def build_server() -> LanguageServer:
                     )
                 )
                 if configs and isinstance(configs[0], dict):
-                    paths = configs[0].get("includePaths") or []
+                    cfg = configs[0]
+                    paths = cfg.get("includePaths") or []
                     state.include_paths = [str(p) for p in paths if p]
-                    raw_vars = configs[0].get("includeVars") or {}
+                    raw_vars = cfg.get("includeVars") or {}
                     if isinstance(raw_vars, dict):
                         state.include_vars = {str(k): str(v) for k, v in raw_vars.items()}
-                    raw_opcodes = configs[0].get("perlSafeOpcodes") or []
+                    raw_opcodes = cfg.get("perlSafeOpcodes") or []
                     if isinstance(raw_opcodes, list):
                         state.perl_safe_opcodes = [str(op) for op in raw_opcodes if op]
+                    preindex_cfg = cfg.get("preindex") or {}
+                    if isinstance(preindex_cfg, dict):
+                        if "enabled" in preindex_cfg:
+                            state.preindex_enabled = bool(preindex_cfg["enabled"])
+                        max_files = preindex_cfg.get("maxFiles")
+                        if isinstance(max_files, int) and max_files > 0:
+                            state.preindex_max_files = max_files
                     logger.info("includePaths from initial config: %s", state.include_paths)
                     logger.info("includeVars from initial config: %s", list(state.include_vars))
                     logger.info("perlSafeOpcodes override: %s", state.perl_safe_opcodes)
+                    logger.info(
+                        "preindex enabled=%s max=%d",
+                        state.preindex_enabled, state.preindex_max_files,
+                    )
             except Exception:
                 logger.debug("could not fetch initial workspace configuration", exc_info=True)
+            # Workspace pre-index runs after config so it picks up the user's
+            # configured preindex limit (skip-on-disable + file-count cap).
+            # Even on config failure we still try with defaults — pre-warming
+            # the cache with default limits is preferable to no index.
+            asyncio.ensure_future(_preindex_workspace())
 
         asyncio.ensure_future(fetch())
 
@@ -552,6 +680,143 @@ def build_server() -> LanguageServer:
             items.extend(_completion_items_for_types(cached.roots))
         return CompletionList(is_incomplete=False, items=items)
 
+    def _file_line_reader(path: pathlib.Path, line_idx: int) -> str | None:
+        """Read line N from a workspace file, preferring the LSP buffer cache.
+
+        If the user has the file open with unsaved edits, the LSP's text-document
+        cache reflects those edits — use it so rename operates on what the user
+        actually sees. Falls back to disk for files not currently open.
+        """
+        # Try LSP buffer cache first (active edit). The cache may carry the
+        # primary URI for an in-flight compile, but other files we read from
+        # disk; that's fine because rename's scope is single-document edits
+        # plus cross-file edits to disk-resident `\\\`include`d files.
+        target_uri = path.resolve().as_uri()
+        text = _read_buffer(target_uri)
+        if text is None:
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (OSError, ValueError):
+                return None
+        lines = text.splitlines()
+        if 0 <= line_idx < len(lines):
+            return lines[line_idx]
+        return None
+
+    @server.feature("textDocument/prepareRename")
+    def _on_prepare_rename(_ls: LanguageServer, params: Any) -> Any | None:
+        """Validate that the cursor is on a renameable identifier.
+
+        We only rename top-level component type names — instance names and
+        keywords return None so VSCode shows "You cannot rename this element".
+        """
+        from lsprotocol.types import Position
+        from lsprotocol.types import Range as LSPRange
+
+        uri = params.text_document.uri
+        cached = state.cache.get(uri)
+        if cached is None or not cached.roots:
+            return None
+        word = _word_at_position(cached.text, params.position.line, params.position.character)
+        if not word:
+            return None
+        defs = _comp_defs_from_cached(cached.roots)
+        if word not in defs:
+            return None
+        # Return the cursor-line range of the word so VSCode anchors its
+        # rename input box correctly. The actual edits get computed in
+        # textDocument/rename below.
+        line = cached.text.splitlines()[params.position.line] if params.position.line < len(
+            cached.text.splitlines()
+        ) else ""
+        import re as _re
+        m = _re.search(rf"\b{_re.escape(word)}\b", line)
+        if m is None:
+            return None
+        return LSPRange(
+            start=Position(line=params.position.line, character=m.start()),
+            end=Position(line=params.position.line, character=m.end()),
+        )
+
+    @server.feature("textDocument/rename")
+    def _on_rename(_ls: LanguageServer, params: Any) -> Any | None:
+        """Compute a workspace edit that renames a type across declaration + uses."""
+        from lsprotocol.types import TextEdit, WorkspaceEdit
+
+        uri = params.text_document.uri
+        cached = state.cache.get(uri)
+        if cached is None or not cached.roots:
+            return None
+        word = _word_at_position(cached.text, params.position.line, params.position.character)
+        if not word:
+            return None
+        new_name = getattr(params, "new_name", None) or ""
+        # SystemRDL identifiers: [A-Za-z_][A-Za-z0-9_]*. Reject anything else
+        # so the user gets the standard VSCode "Can't rename" hint instead of
+        # a corrupt buffer.
+        if not new_name or not _is_valid_identifier(new_name):
+            return None
+
+        defs = _comp_defs_from_cached(cached.roots)
+        if word not in defs:
+            return None
+        if new_name in defs:
+            # Collision with another existing type — refuse rather than
+            # silently shadow.
+            return None
+
+        try:
+            original_path = _uri_to_path(uri)
+        except ValueError:
+            original_path = None
+        translate = (
+            {cached.temp_path: original_path}
+            if cached.temp_path is not None and original_path is not None
+            else None
+        )
+        locs = _rename_locations(word, cached.roots, translate, _file_line_reader)
+        if not locs:
+            return None
+
+        # Bucket edits by URI; LSP WorkspaceEdit.changes is a map[uri, TextEdit[]].
+        per_uri: dict[str, list[TextEdit]] = {}
+        for loc in locs:
+            per_uri.setdefault(loc.uri, []).append(
+                TextEdit(range=loc.range, new_text=new_name)
+            )
+        return WorkspaceEdit(changes=per_uri)
+
+    @server.feature("textDocument/references")
+    def _on_references(_ls: LanguageServer, params: Any) -> list[Location]:
+        """Find all instantiation sites of the type under the cursor.
+
+        Word-based: identifier at cursor → look up in comp_defs → walk every
+        cached elaborated tree for instances whose ``original_def`` matches.
+        Cross-file: instances in `\\`include`d files are reported with their
+        true URIs (same path-translate logic as goto-def).
+        """
+        uri = params.text_document.uri
+        cached = state.cache.get(uri)
+        if cached is None or not cached.roots:
+            return []
+        word = _word_at_position(cached.text, params.position.line, params.position.character)
+        if not word:
+            return []
+        defs = _comp_defs_from_cached(cached.roots)
+        if word not in defs:
+            return []
+        try:
+            original_path = _uri_to_path(uri)
+        except ValueError:
+            original_path = None
+        translate = (
+            {cached.temp_path: original_path}
+            if cached.temp_path is not None and original_path is not None
+            else None
+        )
+        include_decl = bool(getattr(params, "context", None) and params.context.include_declaration)
+        return _references_to_type(word, cached.roots, include_decl, translate)
+
     @server.feature("textDocument/definition")
     def _on_definition(_ls: LanguageServer, params: Any) -> list[Location] | Location | None:
         uri = params.text_document.uri
@@ -575,6 +840,96 @@ def build_server() -> LanguageServer:
             else None
         )
         return _definition_location(comp, translate)
+
+    from lsprotocol.types import (
+        TEXT_DOCUMENT_SEMANTIC_TOKENS_FULL,
+        SemanticTokens,
+        SemanticTokensLegend,
+        SemanticTokensRegistrationOptions,
+    )
+
+    @server.feature(
+        TEXT_DOCUMENT_SEMANTIC_TOKENS_FULL,
+        SemanticTokensRegistrationOptions(
+            legend=SemanticTokensLegend(
+                token_types=TOKEN_TYPES,
+                token_modifiers=TOKEN_MODIFIERS,
+            ),
+            full=True,
+        ),
+    )
+    def _on_semantic_tokens(_ls: LanguageServer, params: Any) -> SemanticTokens:
+        """Compute semantic tokens for the buffer.
+
+        Pure textual scan — works on broken files, doesn't depend on a
+        successful elaboration. The returned ``data`` is a flat int array per
+        the LSP wire format (delta-encoded by line + char).
+        """
+        uri = params.text_document.uri
+        text = _read_buffer(uri)
+        if text is None:
+            cached = state.cache.get(uri)
+            text = cached.text if cached is not None else ""
+        return SemanticTokens(data=_semantic_tokens_for_text(text))
+
+    @server.feature("textDocument/formatting")
+    def _on_formatting(_ls: LanguageServer, params: Any) -> list[Any]:
+        """Conservative whitespace formatter.
+
+        Trims trailing whitespace, expands tabs to 4 spaces, ensures a single
+        trailing newline. Skips opinionated changes (alignment, brace style)
+        so the formatter never fights user style choices.
+        """
+        uri = params.text_document.uri
+        text = _read_buffer(uri)
+        if text is None:
+            cached = state.cache.get(uri)
+            text = cached.text if cached is not None else ""
+        if not text:
+            return []
+        tab_size = 4
+        opts = getattr(params, "options", None)
+        if opts is not None:
+            ts = getattr(opts, "tab_size", None)
+            if isinstance(ts, int) and ts > 0:
+                tab_size = ts
+        return _document_formatting_edits(text, tab_size)
+
+    @server.feature("textDocument/codeAction")
+    def _on_code_action(_ls: LanguageServer, params: Any) -> list[Any]:
+        """Surface quick fixes from the lightbulb.
+
+        Currently: "Add `= 0` reset value" for field instantiations missing
+        an explicit reset. Pure textual scan — no elaboration dependency, so
+        the action shows up even on broken files where the user is mid-edit.
+        """
+        uri = params.text_document.uri
+        text = _read_buffer(uri)
+        if text is None:
+            cached = state.cache.get(uri)
+            text = cached.text if cached is not None else ""
+        if not text:
+            return []
+        return _code_actions_for_range(uri, text, params.range)
+
+    @server.feature("textDocument/documentLink")
+    def _on_document_link(_ls: LanguageServer, params: Any) -> list[Any]:
+        """Resolve `\\`include` paths into clickable documentLinks.
+
+        Independent of elaboration — works even when the file has parse errors,
+        so the user can navigate around a broken file to fix it.
+        """
+        uri = params.text_document.uri
+        text = _read_buffer(uri)
+        if not text:
+            cached = state.cache.get(uri)
+            text = cached.text if cached is not None else ""
+        try:
+            primary_path = _uri_to_path(uri)
+        except ValueError:
+            return []
+        search_paths = [p for p, _src in _resolve_search_paths(uri, state.include_paths)]
+        return _document_links(text, primary_path, search_paths, state.include_vars)
 
     @server.feature("rdl/includePaths")
     def _on_include_paths(_ls: LanguageServer, params: Any) -> dict[str, Any]:

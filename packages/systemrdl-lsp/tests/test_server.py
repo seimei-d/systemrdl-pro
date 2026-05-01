@@ -227,6 +227,105 @@ def test_definition_resolves_top_level_type(tmp_path):
         tmp.unlink(missing_ok=True)
 
 
+def test_references_finds_all_instantiation_sites(tmp_path):
+    """``my_ctrl_t`` is instantiated twice; references should yield both sites.
+
+    With ``include_declaration=True`` the type's def location is prepended.
+    """
+    from systemrdl_lsp.server import _references_to_type
+    uri = (tmp_path / "x.rdl").as_uri()
+    _msgs, roots, tmp = _compile_text(uri, TYPED_RDL)
+    try:
+        translate = {tmp: tmp_path / "x.rdl"}
+        # Without the declaration: just the two CTRL/STATUS instance lines.
+        refs = _references_to_type("my_ctrl_t", roots, False, path_translate=translate)
+        assert len(refs) == 2, f"expected 2 instance refs, got {refs}"
+        # With declaration: 1 def + 2 instances = 3.
+        with_decl = _references_to_type("my_ctrl_t", roots, True, path_translate=translate)
+        assert len(with_decl) == 3
+        # Decl is first by contract.
+        assert with_decl[0].range.start.line == 0
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def test_rename_locations_covers_def_and_uses(tmp_path):
+    """Rename of ``my_ctrl_t`` produces edits at the declaration AND each use site.
+
+    Each Location.range covers the *type-name* token (not the instance name)
+    so applying ``new_text=new_name`` results in a syntactically valid file.
+    """
+    from systemrdl_lsp.server import _rename_locations
+    rdl_path = tmp_path / "x.rdl"
+    rdl_path.write_text(TYPED_RDL, encoding="utf-8")
+    _msgs, roots, tmp = _compile_text(rdl_path.as_uri(), TYPED_RDL)
+
+    def reader(p, line_idx):
+        try:
+            return p.read_text(encoding="utf-8").splitlines()[line_idx]
+        except (OSError, IndexError):
+            return None
+
+    try:
+        translate = {tmp: rdl_path}
+        locs = _rename_locations("my_ctrl_t", roots, translate, reader)
+        # 1 declaration + 2 instances = 3 edit ranges.
+        assert len(locs) == 3, f"expected 3 rename ranges, got {locs}"
+        # Each range must cover exactly "my_ctrl_t" — verify by looking up
+        # the corresponding source span.
+        for loc in locs:
+            assert loc.range.end.character - loc.range.start.character == len("my_ctrl_t")
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def test_rename_skips_unrelated_types(tmp_path):
+    """Two distinct types in the same file: rename one, leave the other alone."""
+    from systemrdl_lsp.server import _rename_locations
+    src = textwrap.dedent("""
+        reg ctrl_t {
+            field { sw=rw; hw=r; } enable[0:0] = 0;
+        };
+        reg status_t {
+            field { sw=r; hw=w; } busy[0:0] = 0;
+        };
+        addrmap top {
+            ctrl_t CTRL @ 0;
+            status_t STAT @ 4;
+            ctrl_t CTRL2 @ 8;
+        };
+    """).strip()
+    rdl_path = tmp_path / "x.rdl"
+    rdl_path.write_text(src, encoding="utf-8")
+    _msgs, roots, tmp = _compile_text(rdl_path.as_uri(), src)
+
+    def reader(p, line_idx):
+        try:
+            return p.read_text(encoding="utf-8").splitlines()[line_idx]
+        except (OSError, IndexError):
+            return None
+
+    try:
+        translate = {tmp: rdl_path}
+        ctrl_locs = _rename_locations("ctrl_t", roots, translate, reader)
+        # 1 declaration + 2 instances (CTRL, CTRL2) = 3.
+        assert len(ctrl_locs) == 3, f"got {ctrl_locs}"
+        status_locs = _rename_locations("status_t", roots, translate, reader)
+        assert len(status_locs) == 2, f"got {status_locs}"
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def test_references_returns_empty_for_unknown(tmp_path):
+    from systemrdl_lsp.server import _references_to_type
+    uri = (tmp_path / "x.rdl").as_uri()
+    _msgs, roots, tmp = _compile_text(uri, TYPED_RDL)
+    try:
+        assert _references_to_type("nonexistent_t", roots, True, path_translate=None) == []
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 def test_definition_returns_none_for_unknown_word(tmp_path):
     uri = (tmp_path / "x.rdl").as_uri()
     _msgs, roots, tmp = _compile_text(uri, TYPED_RDL)
@@ -640,6 +739,139 @@ def test_cache_version_increments_on_each_put(tmp_path):
     v2 = cache.get(uri).version
     assert v2 == v1 + 1, f"version must increment monotonically; {v1} → {v2}"
     cache.clear()
+
+
+def test_iter_rdl_files_walks_workspace_skipping_noise(tmp_path):
+    """Pre-index walker yields .rdl files, skips .git/node_modules/etc."""
+    from systemrdl_lsp.server import _iter_rdl_files
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "a.rdl").write_text(VALID_RDL, encoding="utf-8")
+    (tmp_path / "src" / "b.rdl").write_text(VALID_RDL, encoding="utf-8")
+    (tmp_path / "node_modules").mkdir()
+    (tmp_path / "node_modules" / "noise.rdl").write_text(VALID_RDL, encoding="utf-8")
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "config.rdl").write_text(VALID_RDL, encoding="utf-8")
+    (tmp_path / "src" / "not_rdl.txt").write_text("ignore me", encoding="utf-8")
+
+    excludes = {".git", "node_modules"}
+    paths = sorted(p.name for p in _iter_rdl_files(tmp_path, excludes))
+    assert paths == ["a.rdl", "b.rdl"], f"expected only src/*.rdl; got {paths}"
+
+
+def test_format_text_trims_trailing_whitespace_and_tabs():
+    """Formatter normalises tabs to spaces, trims trailing whitespace, ensures EOF newline."""
+    from systemrdl_lsp.server import _format_text
+    src = "addrmap top {\n\treg {} CTRL @ 0;   \n};   \n\n\n"
+    out = _format_text(src, tab_size=4)
+    assert "\t" not in out
+    assert "   \n" not in out, "trailing spaces remained"
+    assert out.endswith("};\n"), f"expected single trailing newline; got {out!r}"
+    # Idempotency: running the formatter twice must be a no-op.
+    assert _format_text(out, tab_size=4) == out
+
+
+def test_format_text_no_change_returns_empty_edits():
+    """If the buffer is already canonical, no edits — VSCode shows no diff."""
+    from systemrdl_lsp.server import _document_formatting_edits, _format_text
+    canonical = _format_text("addrmap top {};\n")
+    assert _document_formatting_edits(canonical) == []
+
+
+def test_code_action_offers_add_missing_reset():
+    """A field instantiation without `= <value>` triggers the quick-fix."""
+    from lsprotocol.types import Position, Range
+    from systemrdl_lsp.server import _code_actions_for_range
+    src = "field { sw=rw; hw=r; } enable[0:0];\n"
+    rng = Range(start=Position(line=0, character=0), end=Position(line=0, character=0))
+    actions = _code_actions_for_range("file:///x.rdl", src, rng)
+    assert len(actions) == 1
+    assert "= 0" in actions[0].title
+    edits = actions[0].edit.changes["file:///x.rdl"]
+    assert len(edits) == 1
+    # Insertion is zero-width before the semicolon.
+    assert edits[0].range.start.character == edits[0].range.end.character
+    assert edits[0].new_text.strip() == "= 0"
+
+
+def test_code_action_skips_when_reset_already_present():
+    """Field with ``= 0x1`` already on the line gets no quick-fix."""
+    from lsprotocol.types import Position, Range
+    from systemrdl_lsp.server import _code_actions_for_range
+    src = "field { sw=rw; hw=r; } enable[0:0] = 0x1;\n"
+    rng = Range(start=Position(line=0, character=0), end=Position(line=0, character=0))
+    actions = _code_actions_for_range("file:///x.rdl", src, rng)
+    assert actions == []
+
+
+def test_semantic_tokens_encode_keywords_and_properties():
+    """Smoke-test the LSP semantic-tokens delta encoding.
+
+    The exact int payload is brittle to lock down; we just verify that the
+    output is well-formed (multiple of 5) and that tokenizing a known buffer
+    produces a non-empty result with sane structure.
+    """
+    from systemrdl_lsp.server import _semantic_tokens_for_text
+    src = textwrap.dedent("""
+        addrmap top {
+            reg my_t {
+                field { sw = rw; } enable[0:0] = 0x1;
+            } CTRL @ 0x100;
+        };
+    """).strip()
+    data = _semantic_tokens_for_text(src)
+    assert data, "expected non-empty token stream"
+    assert len(data) % 5 == 0, "wire format requires groups of 5 ints"
+    # The first token's deltaLine is absolute (no prior token), so it must
+    # be >= 0; sanity-check we didn't go negative anywhere.
+    for i in range(0, len(data), 5):
+        delta_line, delta_start, length, type_idx, mods = data[i:i + 5]
+        assert delta_line >= 0
+        assert length > 0
+        assert type_idx >= 0
+        assert mods == 0  # we don't emit modifiers
+
+
+def test_document_links_resolve_include_directives(tmp_path):
+    r"""Each `\include "x.rdl"` becomes a Ctrl+clickable documentLink.
+
+    The link's range covers the path string (not the keyword), so clicking
+    the bare `include` token doesn't navigate.
+    """
+    from systemrdl_lsp.server import _document_links
+    common = tmp_path / "common.rdl"
+    common.write_text(VALID_RDL, encoding="utf-8")
+    master = tmp_path / "master.rdl"
+    master_text = '`include "common.rdl"\naddrmap top {};\n'
+
+    links = _document_links(master_text, master, [], {})
+    assert len(links) == 1
+    link = links[0]
+    assert link.target == common.as_uri()
+    # Range must cover only the literal path between the quotes.
+    assert link.range.start.line == 0
+    line0 = master_text.splitlines()[0]
+    assert line0[link.range.start.character:link.range.end.character] == "common.rdl"
+
+
+def test_document_links_skip_unresolved(tmp_path):
+    """Unresolved includes don't get a link — the compiler's diagnostic surfaces the error."""
+    from systemrdl_lsp.server import _document_links
+    master = tmp_path / "x.rdl"
+    text = '`include "nonexistent.rdl"\naddrmap top {};\n'
+    assert _document_links(text, master, [], {}) == []
+
+
+def test_document_links_resolve_via_search_path(tmp_path):
+    r"""Setting/peakrdl.toml include paths satisfy `\include` resolution."""
+    from systemrdl_lsp.server import _document_links
+    libdir = tmp_path / "lib"
+    libdir.mkdir()
+    (libdir / "common.rdl").write_text(VALID_RDL, encoding="utf-8")
+    master = tmp_path / "master.rdl"
+    text = '`include "common.rdl"\naddrmap top {};\n'
+    links = _document_links(text, master, [str(libdir)], {})
+    assert len(links) == 1
+    assert links[0].target == (libdir / "common.rdl").as_uri()
 
 
 def test_resolve_search_paths_dedups_and_labels(tmp_path):
