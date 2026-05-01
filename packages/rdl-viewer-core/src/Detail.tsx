@@ -9,6 +9,12 @@ type Props = {
 };
 
 export function Detail({ reg, path, transport }: Props) {
+  // Decoder input lives at the Detail level so per-field rows can show
+  // the decoded value in their reset column when input is non-empty.
+  const [decoderInput, setDecoderInput] = useState('');
+
+  const decoded = useMemo(() => decode(reg, decoderInput), [reg, decoderInput]);
+
   if (!reg || !path) {
     return (
       <div className="rdl-detail">
@@ -20,6 +26,8 @@ export function Detail({ reg, path, transport }: Props) {
   const reveal = (source: SourceLoc | undefined) => {
     if (source && transport.reveal) transport.reveal(source);
   };
+
+  const decoderActive = decoded !== null;
 
   return (
     <div className="rdl-detail">
@@ -43,10 +51,22 @@ export function Detail({ reg, path, transport }: Props) {
         </div>
       )}
       <BitGrid reg={reg} />
-      <RegisterDecoder reg={reg} />
-      <div className="fields-title">Bit fields</div>
+      <RegisterDecoder value={decoderInput} onChange={setDecoderInput} />
+      <div className="fields-title">
+        Bit fields
+        {decoderActive && (
+          <span className="rdl-fields-mode">
+            · showing decoded values for <code>{decoderInput}</code>
+          </span>
+        )}
+      </div>
       {(reg.fields || []).map((f, i) => (
-        <FieldRow key={i} field={f} reveal={reveal} />
+        <FieldRow
+          key={i}
+          field={f}
+          reveal={reveal}
+          decoded={decoded?.[f.name]}
+        />
       ))}
       {reg.source && transport.reveal && (
         <div className="src-link" onClick={() => reveal(reg.source)}>
@@ -58,17 +78,59 @@ export function Detail({ reg, path, transport }: Props) {
   );
 }
 
+type DecodedField = { value: string; encode?: string };
+
+/**
+ * Decode a register-level hex/bin/dec value into per-field hex strings.
+ * Returns null when the input is empty or unparseable, in which case the
+ * field rows fall back to showing reset values.
+ */
+function decode(reg: Reg | null, raw: string): Record<string, DecodedField> | null {
+  if (!reg) return null;
+  const n = parseInputValue(raw);
+  if (n === null) return null;
+  const width = reg.width || 32;
+  const mask = width >= 53 ? Number.MAX_SAFE_INTEGER : (2 ** width) - 1;
+  const masked = Number(n) & mask;
+  const out: Record<string, DecodedField> = {};
+  for (const f of reg.fields || []) {
+    const fwidth = Math.max(1, f.msb - f.lsb + 1);
+    const fmask = fwidth >= 53 ? Number.MAX_SAFE_INTEGER : (2 ** fwidth) - 1;
+    const v = (masked >>> f.lsb) & fmask;
+    const digits = Math.max(1, Math.ceil(fwidth / 4));
+    const hex = '0x' + v.toString(16).padStart(digits, '0');
+    const enc = f.encode?.find(e => parseInputValue(e.value) === v)?.name;
+    out[f.name] = { value: hex, encode: enc };
+  }
+  return out;
+}
+
 /**
  * One row in the per-field breakdown. Shows the bit range, name, badges
- * (◷ counter, ⚡ intr), access pill, reset, description. If the field has
- * an `encode` enum, append a value-name table below the row.
+ * (counter/intr tags), access pill, value (decoded if active else reset),
+ * description. If the field has an `encode` enum, append a value-name
+ * table below the row.
  */
-function FieldRow({ field, reveal }: { field: Field; reveal: (s: SourceLoc | undefined) => void }) {
+function FieldRow({
+  field, reveal, decoded,
+}: {
+  field: Field;
+  reveal: (s: SourceLoc | undefined) => void;
+  decoded: DecodedField | undefined;
+}) {
   const acc = (field.access || 'na').toLowerCase();
   const blurb = field.desc
     || (field.displayName && field.displayName !== field.name ? field.displayName : '')
     || '';
   const onClick = field.source ? () => reveal(field.source) : undefined;
+  const valueCell = decoded
+    ? (
+      <span className="rdl-field-value decoded" title={`Decoded value: ${decoded.value}${decoded.encode ? ' · ' + decoded.encode : ''} (reset: ${field.reset ?? '—'})`}>
+        {decoded.value}
+        {decoded.encode && <em className="rdl-field-encode-hit"> · {decoded.encode}</em>}
+      </span>
+    )
+    : <span className="rdl-field-value" title="Reset value">{field.reset || '—'}</span>;
   return (
     <div
       className="field"
@@ -93,7 +155,7 @@ function FieldRow({ field, reveal }: { field: Field; reveal: (s: SourceLoc | und
         )}
       </span>
       <span className={'rdl-pill ' + acc}>{acc.toUpperCase()}</span>
-      <span>{field.reset || '—'}</span>
+      {valueCell}
       <span className="desc">{blurb}</span>
       {field.encode && field.encode.length > 0 && (
         <EncodeTable entries={field.encode} />
@@ -138,31 +200,16 @@ function EncodeTable({ entries }: { entries: EncodeEntry[] }) {
 }
 
 /**
- * Tier 3.3: paste / type a hex value, see field-by-field decode live.
- *
- * Pure UI — no transport calls. Uses the field bit ranges already in the
- * elaborated tree. Clamping to the register's width avoids confusing
- * overflow when the user pastes a 64-bit value into a 32-bit reg.
+ * Decoder input. Lifted out of state ownership — Detail owns the value
+ * and feeds the per-field decoded results back into each FieldRow's
+ * value column.
  */
-function RegisterDecoder({ reg }: { reg: Reg }) {
-  const [raw, setRaw] = useState('');
-  const decoded = useMemo(() => {
-    const n = parseInputValue(raw);
-    if (n === null) return null;
-    const width = reg.width || 32;
-    const mask = width >= 53 ? Number.MAX_SAFE_INTEGER : (2 ** width) - 1;
-    const masked = Number(n) & mask;
-    const out: { name: string; value: string; raw: number; encode?: string }[] = [];
-    for (const f of reg.fields || []) {
-      const fwidth = f.msb - f.lsb + 1;
-      const fmask = fwidth >= 53 ? Number.MAX_SAFE_INTEGER : (2 ** fwidth) - 1;
-      const v = (masked >>> f.lsb) & fmask;
-      const hex = '0x' + v.toString(16).padStart(Math.max(1, Math.ceil(fwidth / 4)), '0');
-      const enc = f.encode?.find(e => parseInputValue(e.value) === v)?.name;
-      out.push({ name: f.name, value: hex, raw: v, encode: enc });
-    }
-    return out;
-  }, [raw, reg]);
+function RegisterDecoder({
+  value, onChange,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+}) {
   return (
     <div className="rdl-decoder" onClick={e => e.stopPropagation()}>
       <label className="rdl-decoder-label">
@@ -171,20 +218,18 @@ function RegisterDecoder({ reg }: { reg: Reg }) {
           type="text"
           spellCheck={false}
           placeholder="0x… or 0b… or decimal"
-          value={raw}
-          onChange={e => setRaw(e.target.value)}
+          value={value}
+          onChange={e => onChange(e.target.value)}
         />
+        {value && (
+          <button
+            type="button"
+            className="rdl-decoder-clear"
+            title="Clear decoder input → fall back to reset values"
+            onClick={() => onChange('')}
+          >×</button>
+        )}
       </label>
-      {decoded && (
-        <div className="rdl-decoder-out">
-          {decoded.map((d, i) => (
-            <span key={i} className="rdl-decoder-field" title={`${d.name} = ${d.value}`}>
-              <b>{d.name}</b>=<code>{d.value}</code>
-              {d.encode && <em>·{d.encode}</em>}
-            </span>
-          ))}
-        </div>
-      )}
     </div>
   );
 }

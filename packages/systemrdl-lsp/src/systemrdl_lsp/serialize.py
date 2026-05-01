@@ -110,7 +110,12 @@ def _serialize_field(
     try:
         reset = node.get_property("reset")
         if reset is not None:
-            out["reset"] = _hex(int(reset), node.msb - node.lsb + 1)
+            # Width-tight hex: `_hex` enforces a 32-bit floor (right for
+            # register addresses), but a 1-bit field should show `0x0`,
+            # not `0x00000000`. Pad to exactly `ceil(width / 4)` digits.
+            width_bits = max(1, node.msb - node.lsb + 1)
+            digits = max(1, (width_bits + 3) // 4)
+            out["reset"] = f"0x{int(reset):0{digits}X}"
     except LookupError:
         pass
     try:

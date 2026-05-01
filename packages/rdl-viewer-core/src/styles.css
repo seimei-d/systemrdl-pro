@@ -389,7 +389,8 @@ html, body { margin: 0; padding: 0; background: var(--rdl-bg); color: var(--rdl-
   color: var(--rdl-fg);
 }
 
-/* Register binary decoder — input + live field breakdown. */
+/* Register binary decoder — input only. The decoded values appear in
+   each field row's value column (see `.rdl-field-value.decoded` below). */
 .rdl-decoder { margin: 8px 0; padding: 6px 0;
   border-bottom: 1px dashed var(--rdl-border); }
 .rdl-decoder-label { display: flex; align-items: center; gap: 8px;
@@ -402,12 +403,25 @@ html, body { margin: 0; padding: 0; background: var(--rdl-bg); color: var(--rdl-
   outline: none;
 }
 .rdl-decoder-label input:focus { border-color: var(--rdl-accent); }
-.rdl-decoder-out { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 12px;
-  font-family: var(--rdl-font-mono); font-size: 11px; }
-.rdl-decoder-field b { font-weight: 600; color: var(--rdl-fg); }
-.rdl-decoder-field code { color: var(--rdl-accent); }
-.rdl-decoder-field em { color: var(--rdl-acc-rw); font-style: normal;
-  margin-left: 4px; }
+.rdl-decoder-clear {
+  background: transparent; border: 0; color: var(--rdl-dim);
+  font-size: 14px; line-height: 1; padding: 2px 6px; cursor: pointer;
+  border-radius: 2px;
+}
+.rdl-decoder-clear:hover { color: var(--rdl-fg); background: var(--rdl-chrome); }
+
+/* Per-field value cell. Reset values are dim; decoded values use the
+   accent colour so the user instantly sees that the column switched
+   modes when the decoder input is non-empty. */
+.rdl-field-value { color: var(--rdl-fg); }
+.rdl-field-value.decoded { color: var(--rdl-accent); font-weight: 600; }
+.rdl-field-encode-hit { font-style: normal; color: var(--rdl-acc-rw);
+  font-size: 10px; font-weight: 500; }
+
+/* Mode hint next to the "Bit fields" heading when the decoder is active. */
+.rdl-fields-mode { color: var(--rdl-dim); font-weight: normal;
+  font-size: 10px; margin-left: 8px; text-transform: none; letter-spacing: 0; }
+.rdl-fields-mode code { color: var(--rdl-accent); font-family: var(--rdl-font-mono); }
 
 .rdl-detail .fields-title { font-size: 11px; color: var(--rdl-dim);
   text-transform: uppercase; letter-spacing: 0.06em;
