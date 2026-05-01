@@ -1,6 +1,6 @@
 [project]
 name = "systemrdl-lsp"
-version = "0.11.0"
+version = "0.12.0"
 description = "Language Server for SystemRDL 2.0 — diagnostics, hover, outline (powered by systemrdl-compiler)"
 readme = "README.md"
 requires-python = ">=3.10"

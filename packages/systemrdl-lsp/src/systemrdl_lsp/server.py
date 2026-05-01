@@ -117,7 +117,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-SERVER_VERSION = "0.11.0"
+SERVER_VERSION = "0.12.0"
 DEBOUNCE_SECONDS = 0.3
 # Eng-review safety net #3: cap a single elaborate pass at 10s wall-clock.
 # Past that we keep last-good (D7) and surface a synthetic diagnostic. A pathological

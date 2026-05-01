@@ -4,6 +4,51 @@ All notable changes to **SystemRDL Pro** are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [SemVer](https://semver.org/).
 
+## [0.18.0] — 2026-05-01
+
+Backlog cleanup: four TODOs closed in one batch.
+
+### Added
+
+- **`systemrdl-pro.perlSafeOpcodes` setting.** Override the Perl `Safe`
+  opcode set (defaults are conservative — bans `print` and most I/O).
+  Add `:base_io` to allow `print`-based code generation in `<% … %>`.
+- **Perl pre-flight check.** When a buffer contains `<%` markers but
+  `perl` is missing from PATH, surface a one-time warning notification
+  instead of letting the compiler's fatal diagnostic fire on every save.
+- **Push-driven Memory Map updates.** LSP now sends an
+  `rdl/elaboratedTreeChanged` notification on every successful
+  elaboration; the extension refreshes proactively without waiting for
+  `didSaveTextDocument`. Open the panel, type — tree updates live.
+
+### Changed
+
+- **Version-gated tree fetches.** `rdl/elaboratedTree` accepts
+  `sinceVersion`. If the LSP's cached version matches, the response is
+  a constant-size `{unchanged: true, version}` envelope — skip
+  serialization + transport on no-op refreshes (e.g. focus changes,
+  panel re-mount). Same-version repeat fetches reuse a cached
+  serialized dict on the LSP side.
+- **Polished caret-toggle button.** Tree expand/collapse glyph was a
+  text `<span>` with hover-only background, reading as a glyph rather
+  than an affordance. Replaced with a real `<button>` (proper a11y),
+  22×22 click target, persistent subtle background, SVG chevron at
+  10×10 / 1.6 px stroke (sharper at HiDPI than `▼/▶`).
+
+### Internal
+
+- **`server.py` refactored** from a 1900-line monolith into seven
+  themed modules (`compile`, `diagnostics`, `hover`, `completion`,
+  `definition`, `serialize`, `outline`) plus a ~470-line LSP wiring
+  shim. All 44 tests pass unchanged — the existing test surface
+  imports through `systemrdl_lsp.server` re-exports.
+
+### Docs
+
+- README: new **Perl preprocessor** section documents the `perl` PATH
+  requirement, the `<%=$i%>` no-leading-whitespace gotcha, and the new
+  opcode-override setting.
+
 ## [0.17.0] — 2026-04-30
 
 ### Changed
