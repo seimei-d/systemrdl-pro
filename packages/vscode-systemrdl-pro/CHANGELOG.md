@@ -4,6 +4,33 @@ All notable changes to **SystemRDL Pro** are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [SemVer](https://semver.org/).
 
+## [0.19.0] — 2026-05-01
+
+Three more cleanups: types are now schema-driven, cross-file diagnostics
+land in the right editor, and include-paths UX is no longer opaque.
+
+### Added
+
+- **New command `SystemRDL: Show effective include paths`.** Quick-pick
+  of every directory the LSP will search for `\` `include`d files,
+  labeled by source (`setting` / `peakrdl.toml` / `sibling`). Press Enter
+  on a row to reveal it in the OS file manager.
+- **Cross-file diagnostics.** A syntax error inside an `\` `include`d
+  file is now reported against that file's URI, not silently dropped.
+  Fixing the error clears the squiggle (clear-on-resolve cycle).
+
+### Internal
+
+- **Codegen for elaborated-tree types** (Decision 9A). `bun run codegen`
+  walks `schemas/elaborated-tree.json` and emits Python TypedDicts +
+  TypeScript types. The hand-written shadow types in `extension.ts`,
+  `viewer-core/types.ts`, etc. now re-export the generated copies.
+  Drift detection: a CI test asserts the generated file matches the
+  committed one.
+- **Include-path resolution unified.** `_resolve_search_paths(uri)`
+  returns one deduped, source-labeled list. Setting > peakrdl.toml >
+  sibling-dir on collision (first-source-wins).
+
 ## [0.18.0] — 2026-05-01
 
 Backlog cleanup: four TODOs closed in one batch.
