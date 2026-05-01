@@ -7,7 +7,7 @@ mainstream languages.
 Powered by [`systemrdl-lsp`](https://pypi.org/project/systemrdl-lsp/) +
 [`systemrdl-compiler`](https://github.com/SystemRDL/systemrdl-compiler).
 
-![SystemRDL Pro: live diagnostics, memory-map viewer, click-to-reveal](media/demo.gif)
+![SystemRDL Pro: live diagnostics, memory-map viewer, click-to-reveal](https://github.com/seimei-d/systemrdl-pro/raw/main/docs/demo.gif)
 
 > 30-second tour: live diagnostics, hover with resolved values, F12
 > goto-def, click-to-reveal, register binary decode, theme follows

@@ -4,6 +4,20 @@ All notable changes to **SystemRDL Pro** are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [SemVer](https://semver.org/).
 
+## [0.22.18] — 2026-05-01
+
+### Fixed
+
+- **Demo GIF now renders on Open VSX listing.** v0.22.16 bundled the
+  demo into the `.vsix` and referenced it with the relative path
+  `media/demo.gif`, which VSCode Marketplace rewrites to a GitHub raw
+  URL automatically — but Open VSX renders the README as-is and
+  relative paths to bundled assets don't resolve there. Switched the
+  README to point at the canonical `docs/demo.gif` via absolute GitHub
+  raw URL — works on both registries, single source of truth for the
+  demo asset, and `.vsix` size is back from 3.9 MB to 163 KB (the
+  duplicate `media/demo.gif` was dropped).
+
 ## [0.22.17] — 2026-05-01
 
 ### Changed
