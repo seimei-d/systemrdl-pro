@@ -2,7 +2,7 @@
   "name": "vscode-systemrdl-pro",
   "displayName": "SystemRDL Pro",
   "description": "Live diagnostics + interactive memory-map viewer for SystemRDL 2.0",
-  "version": "0.19.0",
+  "version": "0.20.0",
   "publisher": "seimei-d",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -128,6 +128,19 @@
           "default": [],
           "scope": "resource",
           "description": "Override the Perl `Safe` opcode set passed to the SystemRDL Perl preprocessor. Empty = compiler default (covers ~95% of macros). Add `:base_io` to allow `print`-based code generation. Example: [\":base_core\", \":base_mem\", \":base_loop\", \":base_orig\", \":base_math\", \":base_io\"]."
+        },
+        "systemrdl-pro.preindex.enabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "description": "Pre-elaborate every `.rdl` file in the workspace on startup so workspace-wide search (Ctrl+T) finds symbols without first opening the source. Disable on huge monorepos where startup cost matters more than instant search."
+        },
+        "systemrdl-pro.preindex.maxFiles": {
+          "type": "integer",
+          "default": 200,
+          "minimum": 0,
+          "scope": "window",
+          "description": "Cap on the number of `.rdl` files the pre-index walks. Beyond this, additional files are loaded lazily on first edit. Tune up for big monorepos at the cost of higher startup memory."
         },
         "systemrdl-pro.trace.server": {
           "type": "string",

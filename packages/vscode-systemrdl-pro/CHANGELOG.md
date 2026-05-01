@@ -4,6 +4,45 @@ All notable changes to **SystemRDL Pro** are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [SemVer](https://semver.org/).
 
+## [0.20.0] — 2026-05-01
+
+Seven LSP features in one release. Hardware register-map editing now has
+the table stakes most language servers offer (rename, find references,
+formatter, etc.).
+
+### Added (LSP)
+
+- **Document links** on `\` `include "..."` directives. Ctrl+click jumps
+  to the included file. Resolves through the same search-path chain the
+  compiler uses, including `$VAR` substitution and peakrdl.toml.
+- **Find references** (`Shift+F12`). Identifier under cursor →
+  every instantiation site, cross-file. Optional declaration in the result.
+- **Rename refactoring** (`F2`). Renames a top-level type
+  identifier across its declaration and every instantiation. Validates
+  the new name as a SystemRDL identifier and refuses to shadow existing
+  types.
+- **Semantic tokens** (`textDocument/semanticTokens/full`).
+  Distinguishes properties (`sw`, `hw`, `reset`) from access values
+  (`rw`, `ro`, `woclr`) at the LSP level — TextMate alone can't tell
+  them apart. Works on broken files (no elaboration dependency).
+- **Code action: "Add `= 0` reset value"**. Lightbulb on field
+  declarations missing an explicit reset. Inserts ` = 0` before the
+  semicolon.
+- **Document formatting** (`Shift+Alt+F`). Conservative: trims trailing
+  whitespace, normalises tabs to spaces (respecting editor tabSize),
+  ensures a single trailing newline. Idempotent. No opinionated
+  alignment.
+- **Workspace pre-index**. On first launch, walks every `.rdl` file in
+  the workspace and pre-elaborates it in the background (4-way
+  concurrent, capped at 200 files by default). `workspace/symbol`
+  (`Ctrl+T`) now finds symbols across files the user hasn't yet
+  opened.
+
+### Added (settings)
+
+- `systemrdl-pro.preindex.enabled` — toggle the pre-index walker.
+- `systemrdl-pro.preindex.maxFiles` — cap on files visited (default 200).
+
 ## [0.19.0] — 2026-05-01
 
 Three more cleanups: types are now schema-driven, cross-file diagnostics
