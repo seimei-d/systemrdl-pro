@@ -1,69 +1,83 @@
-/* Theme tokens — three signals, in priority order:
+/* Theme tokens.
  *
- *   1. VSCode webview body classes (`vscode-light`, `vscode-dark`,
- *      `vscode-high-contrast`, `vscode-high-contrast-light`). VSCode
- *      adds these on the body and updates them when the user changes
- *      theme — authoritative for the embedded viewer.
- *   2. `prefers-color-scheme` media query — covers the standalone CLI
- *      where there is no VSCode wrapper.
- *   3. `forced-colors: active` for Windows High Contrast Mode.
+ * Inside a VSCode webview, the host injects a deep set of `--vscode-*`
+ * CSS custom properties that update automatically whenever the user
+ * changes color theme — Solarized, Monokai, Dracula, the user's own.
+ * The viewer adopts whatever theme is active by routing each `--rdl-*`
+ * token through the matching `--vscode-*` var with a hand-tuned
+ * fallback for the standalone CLI (no VSCode = no `--vscode-*`).
  *
- * VSCode body classes are listed BEFORE the media queries so they win
- * when both apply: a user on a light OS who picks VSCode dark theme
- * gets dark, not light.
+ * Access-mode colours (`--rdl-acc-*`) have no semantic equivalent in
+ * VSCode's theme palette — they're domain-specific to register maps.
+ * They keep our muted palette and switch only via `prefers-color-scheme`
+ * (relevant for the CLI; in the webview the contrast against
+ * editor.background is what matters and our palette holds across
+ * mainstream themes).
  */
 
-/* Default = DARK. Used by the standalone CLI when the OS preference
-   is dark (or unset) and inside VSCode webviews until a body class
-   resolves. */
 :root {
   color-scheme: dark light;
-  --rdl-bg: #1e1e1e;
-  --rdl-panel: #252526;
-  --rdl-chrome: #2d2d30;
-  --rdl-border: #3c3c3c;
-  --rdl-fg: #d4d4d4;
-  --rdl-dim: #858585;
-  --rdl-selected: #213c5a;
-  --rdl-accent: #4a9eff;
-  --rdl-warning: #d7a85a;
-  --rdl-acc-ro:  #8aa6b8;
-  --rdl-acc-rw:  #6fb98f;
-  --rdl-acc-w1c: #d7a85a;
-  --rdl-acc-wo:  #7a87b8;
-  --rdl-acc-rsv: #5a3a3a;
-  --rdl-font-chrome: 'Inter', system-ui, sans-serif;
-  --rdl-font-mono: 'JetBrains Mono', 'SF Mono', Consolas, monospace;
+
+  /* Per-token fallback storage — separate vars so the prefers-color-scheme
+     media query can flip them without touching the var chain below. */
+  --rdl-fb-bg: #1e1e1e;
+  --rdl-fb-panel: #252526;
+  --rdl-fb-chrome: #2d2d30;
+  --rdl-fb-border: #3c3c3c;
+  --rdl-fb-fg: #d4d4d4;
+  --rdl-fb-dim: #858585;
+  --rdl-fb-selected: #213c5a;
+  --rdl-fb-accent: #4a9eff;
+  --rdl-fb-warning: #d7a85a;
+  --rdl-fb-acc-ro:  #8aa6b8;
+  --rdl-fb-acc-rw:  #6fb98f;
+  --rdl-fb-acc-w1c: #d7a85a;
+  --rdl-fb-acc-wo:  #7a87b8;
+  --rdl-fb-acc-rsv: #5a3a3a;
+
+  /* Effective tokens — VSCode `--vscode-*` first, fall back to the per-
+     theme palette above. The `--vscode-*` names map to the standard set
+     VSCode injects into webviews; nothing project-specific to maintain. */
+  --rdl-bg:       var(--vscode-editor-background,                var(--rdl-fb-bg));
+  --rdl-panel:    var(--vscode-sideBar-background,               var(--rdl-fb-panel));
+  --rdl-chrome:   var(--vscode-editorGroupHeader-tabsBackground, var(--rdl-fb-chrome));
+  --rdl-border:   var(--vscode-panel-border,                     var(--rdl-fb-border));
+  --rdl-fg:       var(--vscode-editor-foreground,                var(--rdl-fb-fg));
+  --rdl-dim:      var(--vscode-descriptionForeground,            var(--rdl-fb-dim));
+  --rdl-selected: var(--vscode-list-activeSelectionBackground,   var(--rdl-fb-selected));
+  --rdl-accent:   var(--vscode-textLink-foreground,              var(--rdl-fb-accent));
+  --rdl-warning:  var(--vscode-editorWarning-foreground,         var(--rdl-fb-warning));
+
+  --rdl-acc-ro:  var(--rdl-fb-acc-ro);
+  --rdl-acc-rw:  var(--rdl-fb-acc-rw);
+  --rdl-acc-w1c: var(--rdl-fb-acc-w1c);
+  --rdl-acc-wo:  var(--rdl-fb-acc-wo);
+  --rdl-acc-rsv: var(--rdl-fb-acc-rsv);
+
+  --rdl-font-chrome: var(--vscode-font-family, 'Inter', system-ui, sans-serif);
+  --rdl-font-mono:   var(--vscode-editor-font-family, 'JetBrains Mono', 'SF Mono', Consolas, monospace);
 }
 
-/* LIGHT palette — applied when the OS prefers light (browser CLI) OR
-   VSCode reports a light theme via the `vscode-light` body class. */
+/* CLI fallback — when standalone in a browser with no `--vscode-*` vars,
+   flip the fallback storage on `prefers-color-scheme: light`. */
 @media (prefers-color-scheme: light) {
-  :root { color-scheme: light; }
-  body { --rdl-bg: #ffffff; --rdl-panel: #f5f5f5; --rdl-chrome: #ececec;
-         --rdl-border: #d4d4d4; --rdl-fg: #1a1a1a; --rdl-dim: #6b6b6b;
-         --rdl-selected: #d6e7fa; --rdl-accent: #0066cc;
-         --rdl-warning: #b87a18; --rdl-acc-ro: #5a7a90; --rdl-acc-rw: #3a8a5f;
-         --rdl-acc-w1c: #b87a18; --rdl-acc-wo: #4a5a90; --rdl-acc-rsv: #8a3a3a; }
-}
-body.vscode-light, body.vscode-high-contrast-light {
-  color-scheme: light;
-  --rdl-bg: #ffffff; --rdl-panel: #f5f5f5; --rdl-chrome: #ececec;
-  --rdl-border: #d4d4d4; --rdl-fg: #1a1a1a; --rdl-dim: #6b6b6b;
-  --rdl-selected: #d6e7fa; --rdl-accent: #0066cc;
-  --rdl-warning: #b87a18; --rdl-acc-ro: #5a7a90; --rdl-acc-rw: #3a8a5f;
-  --rdl-acc-w1c: #b87a18; --rdl-acc-wo: #4a5a90; --rdl-acc-rsv: #8a3a3a;
-}
-
-/* Force DARK back when VSCode reports a dark theme — overrides the
-   prefers-color-scheme media query if the OS is light but VSCode is dark. */
-body.vscode-dark, body.vscode-high-contrast {
-  color-scheme: dark;
-  --rdl-bg: #1e1e1e; --rdl-panel: #252526; --rdl-chrome: #2d2d30;
-  --rdl-border: #3c3c3c; --rdl-fg: #d4d4d4; --rdl-dim: #858585;
-  --rdl-selected: #213c5a; --rdl-accent: #4a9eff;
-  --rdl-warning: #d7a85a; --rdl-acc-ro: #8aa6b8; --rdl-acc-rw: #6fb98f;
-  --rdl-acc-w1c: #d7a85a; --rdl-acc-wo: #7a87b8; --rdl-acc-rsv: #5a3a3a;
+  :root {
+    color-scheme: light;
+    --rdl-fb-bg: #ffffff;
+    --rdl-fb-panel: #f5f5f5;
+    --rdl-fb-chrome: #ececec;
+    --rdl-fb-border: #d4d4d4;
+    --rdl-fb-fg: #1a1a1a;
+    --rdl-fb-dim: #6b6b6b;
+    --rdl-fb-selected: #d6e7fa;
+    --rdl-fb-accent: #0066cc;
+    --rdl-fb-warning: #b87a18;
+    --rdl-fb-acc-ro:  #5a7a90;
+    --rdl-fb-acc-rw:  #3a8a5f;
+    --rdl-fb-acc-w1c: #b87a18;
+    --rdl-fb-acc-wo:  #4a5a90;
+    --rdl-fb-acc-rsv: #8a3a3a;
+  }
 }
 
 /* High-contrast theme. Activates on Windows High Contrast Mode and on
