@@ -113,13 +113,29 @@ html, body { margin: 0; padding: 0; background: var(--rdl-bg); color: var(--rdl-
 }
 .rdl-tree-action:hover { color: var(--rdl-fg); border-color: var(--rdl-accent); }
 .rdl-filter-hint { color: var(--rdl-dim); font-size: 11px; margin-top: 4px; }
-.rdl-tree-host { overflow: auto; padding: 8px 0; min-height: 0; outline: none; }
+.rdl-tree-host { overflow: auto; padding: 4px 0; min-height: 0; outline: none; }
 .rdl-tree { font-family: var(--rdl-font-mono); font-size: 13px; }
-.rdl-row { display: grid; grid-template-columns: 28px 140px 1fr 100px; gap: 12px;
-  align-items: baseline; padding: 3px 16px; cursor: pointer; user-select: none; }
-.rdl-row:hover { background: rgba(74,158,255,0.08); }
-.rdl-row.selected { background: var(--rdl-selected); border-left: 3px solid var(--rdl-accent);
-  padding-left: 13px; }
+/* Row layout — explicit column widths so the address column doesn't stretch
+   on wide panes and instance names don't get squashed on narrow ones. The
+   chevron column is 18 px (width of the SVG plus a hair of breathing room). */
+.rdl-row {
+  display: grid;
+  grid-template-columns: 18px minmax(0, auto) minmax(0, 1fr) auto;
+  column-gap: 10px;
+  align-items: center;
+  padding: 2px 12px 2px 8px;
+  min-height: 22px;
+  cursor: pointer; user-select: none;
+  position: relative;
+  border-left: 2px solid transparent;
+  transition: background 0.06s, color 0.06s;
+}
+.rdl-row:hover { background: var(--rdl-chrome); }
+.rdl-row.selected {
+  background: var(--rdl-selected);
+  border-left-color: var(--rdl-accent);
+}
+.rdl-row.selected:hover { background: var(--rdl-selected); }
 /* Discrete "scroll to top" button — a small unobtrusive chip in the corner,
    not a glowing circle. Visible on hover via subtle border + shadow lift. */
 .rdl-scroll-top {
@@ -152,47 +168,56 @@ html, body { margin: 0; padding: 0; background: var(--rdl-bg); color: var(--rdl-
 /* Real <button> for the expand/collapse affordance. Persistent subtle background
    so it reads as a button at rest, not just on hover. SVG chevron scales cleanly
    on HiDPI, unlike the ▼/▶ glyphs which were jagged at 11px. */
+/* Ghost-style chevron — no button chrome, just a click-targetable SVG that
+   inherits the row's text colour. Fades in opacity on row hover so the
+   tree doesn't look like a sea of buttons. */
 .rdl-row .caret-toggle {
-  width: 22px; height: 22px;
-  margin: -2px 0 -2px auto;
+  width: 16px; height: 16px;
   display: inline-flex; align-items: center; justify-content: center;
-  background: rgba(127,127,127,0.10);
-  border: 1px solid transparent;
-  border-radius: 3px;
-  padding: 0; cursor: pointer;
-  transition: background 0.1s, border-color 0.1s;
-  color: var(--rdl-fg);
+  background: transparent; border: 0; padding: 0;
+  cursor: pointer;
+  color: var(--rdl-dim);
+  opacity: 0.7;
+  transition: color 0.06s, opacity 0.06s;
 }
-.rdl-row .caret-toggle:hover {
-  background: rgba(74,158,255,0.22);
-  border-color: rgba(74,158,255,0.45);
-}
-.rdl-row .caret-toggle:active {
-  background: rgba(74,158,255,0.35);
-}
-.rdl-row .caret-toggle:focus-visible {
-  outline: 2px solid var(--rdl-accent); outline-offset: 1px;
-}
+.rdl-row:hover .caret-toggle { opacity: 1; color: var(--rdl-fg); }
+.rdl-row .caret-toggle:focus-visible { outline: 1px solid var(--rdl-accent); outline-offset: 1px; }
 .rdl-row .caret-toggle svg {
-  width: 10px; height: 10px;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.6;
-  stroke-linecap: round;
-  stroke-linejoin: round;
+  width: 9px; height: 9px;
+  fill: none; stroke: currentColor; stroke-width: 1.7;
+  stroke-linecap: round; stroke-linejoin: round;
 }
-.rdl-row .addr { color: var(--rdl-dim); }
-.rdl-row .name { font-weight: 600; }
-.rdl-row .access { color: var(--rdl-dim); font-size: 12px; text-align: right;
-  font-family: var(--rdl-font-chrome); }
-.rdl-row.container .name { color: var(--rdl-accent); }
-.rdl-row.container .access { font-style: italic; }
-.rdl-indent-1 { padding-left: 32px; }
-.rdl-indent-2 { padding-left: 56px; }
-.rdl-indent-3 { padding-left: 80px; }
-.rdl-indent-1.selected { padding-left: 29px; }
-.rdl-indent-2.selected { padding-left: 53px; }
-.rdl-indent-3.selected { padding-left: 77px; }
+.rdl-row .caret { display: inline-block; }  /* spacer for reg rows */
+.rdl-row .addr {
+  color: var(--rdl-dim); font-size: 11.5px;
+  white-space: nowrap;
+}
+.rdl-row .name {
+  color: var(--rdl-fg); font-weight: 500;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.rdl-row .access {
+  color: var(--rdl-dim); font-size: 10px;
+  font-family: var(--rdl-font-chrome);
+  text-transform: uppercase; letter-spacing: 0.06em;
+  text-align: right; white-space: nowrap;
+}
+/* Containers (addrmap / regfile) get a lighter typographic weight than
+   regs — register names are the primary thing the user scans for. */
+.rdl-row.container .name { color: var(--rdl-accent); font-weight: 500; }
+.rdl-row.container .access {
+  display: inline-block;
+  background: var(--rdl-chrome); color: var(--rdl-dim);
+  padding: 0 6px; border-radius: 8px;
+  font-size: 9.5px; line-height: 14px;
+  border: 1px solid var(--rdl-border);
+}
+/* Indent — 14 px per level via padding-left on top of the row's own 8 px
+   gutter. No tree-guide lines: they add visual noise without telling the
+   user anything the indentation already conveys. */
+.rdl-indent-1 { padding-left: 22px; }
+.rdl-indent-2 { padding-left: 36px; }
+.rdl-indent-3 { padding-left: 50px; }
 .rdl-pill { display: inline-block; padding: 0 6px; border-radius: 2px; color: #1a1a1a;
   font-size: 11px; line-height: 17px; font-family: var(--rdl-font-chrome); font-weight: 500;
   text-align: center; }
