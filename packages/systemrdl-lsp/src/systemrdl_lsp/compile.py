@@ -855,6 +855,15 @@ class CachedElaboration:
     # initialized on first expand request. Cleared whenever the entry is
     # replaced (next elaboration regenerates ids so old entries are stale).
     expanded: dict[str, dict[str, Any]] | None = None
+    # nodeId → RegNode lookup table built lazily on first ``expand_node``
+    # call. Without this, every first-click on a placeholder Reg ran a
+    # full DFS walk of the elaborated tree — on a 25k-register design
+    # that meant every reg detail open paid a 25k-node walk. Build once,
+    # then expand is an O(1) dict lookup. Walk order matches the spine's
+    # DFS in serialize so ids line up. Memory cost is one shallow dict
+    # entry per Reg (~few hundred KB on 25k regs); refs only — the
+    # RegNode objects already live in ``roots``.
+    node_index: dict[str, Any] | None = None
     # T2-B: SHA-256 fingerprint of the elaborated tree's viewer-facing
     # semantics. Lets ``_apply_compile_result`` skip the cache version
     # bump + ``rdl/elaboratedTreeChanged`` push when an edit produced an

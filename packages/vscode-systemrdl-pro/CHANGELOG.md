@@ -4,7 +4,29 @@ All notable changes to **SystemRDL Pro** are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [SemVer](https://semver.org/).
 
+## [0.28.2] — 2026-05-02
+
+Bumps bundled language server to **systemrdl-lsp 0.20.2**.
+
+### Fixed
+
+- **Big-file elaborate blocked small-file elaborate.** Field-reported
+  as "open stress_25k.rdl, then enum_demo.rdl — had to wait until
+  the big one rendered". The cross-process pool (T3) ran the actual
+  elaborate in parallel, but the post-compile work
+  (`_address_conflict_diagnostics` walks the tree twice;
+  `_fingerprint_roots` walks it once for SHA-256) ran synchronously
+  on the asyncio loop. On a 25k-reg design that meant several seconds
+  of pure-Python tree walking with the GIL pinned to one URI's apply,
+  blocking every other URI's `_apply_compile_result` from making
+  progress. Both walks now run via `asyncio.to_thread` so the loop
+  schedules other URIs in between — restores the cross-URI decoupling
+  that existed before T2 added fingerprinting and T4-A added the
+  conflict scan.
+
 ## [0.28.1] — 2026-05-02
+
+Bumps bundled language server to **systemrdl-lsp 0.20.1**.
 
 ### Fixed
 
@@ -18,6 +40,17 @@ project uses [SemVer](https://semver.org/).
   user clicked away and back). Mirrors the CLI's
   `refreshInFlight + refreshQueued` idiom: N→1 coalescing on arrival,
   plus one queued re-fetch after the in-flight one finishes.
+
+- **`rdl/expandNode` walked the full tree on every first click.**
+  Field-reported as "register details slow on 25k". Each placeholder
+  expand re-ran a depth-first walk of the elaborated tree to find the
+  matching `nodeId`. On a 25k-register design that meant noticeable
+  lag every time you opened a register's detail pane for the first
+  time, and concurrent expand calls serialized through the GIL.
+  Now the LSP builds a `nodeId → RegNode` index lazily on first
+  expand per cache entry; subsequent expands are O(1) dict lookups.
+  Memory cost is one ref per Reg (negligible — RegNodes already live
+  in the cached roots).
 
 ## [0.28.0] — 2026-05-02
 

@@ -149,6 +149,7 @@ from .serialize import (
     _serialize_spine,
     _src_ref_to_dict,
     _unchanged_envelope,
+    _build_node_index,
     expand_node,
 )
 
@@ -607,6 +608,8 @@ def build_server() -> LanguageServer:
         roots: list[RootNode],
         tmp_path: pathlib.Path,
         consumed_files: set[pathlib.Path],
+        precomputed_conflicts: list[CompilerMessage] | None = None,
+        precomputed_fingerprint: str | None = None,
     ) -> bool:
         """Apply elaborate output to cache + diagnostics + viewer notification.
 
@@ -614,15 +617,28 @@ def build_server() -> LanguageServer:
         consumers via reverse-dep map). ``False`` when this was a semantic
         no-op (T2-B fingerprint match) or a parse failure — neither warrants
         cascading work onto consumers.
+
+        ``precomputed_conflicts`` / ``precomputed_fingerprint`` let the
+        caller hoist the two CPU-heavy tree walks
+        (``_address_conflict_diagnostics`` and ``_fingerprint_roots``) onto
+        a worker thread so they don't block other URIs on the main asyncio
+        loop. Field-reported as "open big file then small file → small
+        file blocked until big one rendered" — the pool ran the elaborate
+        in parallel, but apply ran two full 25k-node walks synchronously
+        on the loop, GIL-pinning every other URI's apply behind it.
         """
         version_after: int | None = None
         ast_changed = False
         if roots:
-            try:
-                conflicts = _address_conflict_diagnostics(roots, tmp_path)
-                messages = list(messages) + conflicts
-            except Exception:
-                logger.debug("address-conflict scan failed", exc_info=True)
+            if precomputed_conflicts is not None:
+                conflicts = precomputed_conflicts
+            else:
+                try:
+                    conflicts = _address_conflict_diagnostics(roots, tmp_path)
+                except Exception:
+                    logger.debug("address-conflict scan failed", exc_info=True)
+                    conflicts = []
+            messages = list(messages) + conflicts
 
             # ``has_errors`` covers BOTH compile/parse errors AND post-
             # elaborate conflict diagnostics (address overlaps, alias
@@ -637,7 +653,11 @@ def build_server() -> LanguageServer:
             # parse failed" → would benefit from rewording but that's
             # extension-side).
             has_errors = any(m.severity == Severity.ERROR for m in messages)
-            new_fp = _fingerprint_roots(roots)
+            new_fp = (
+                precomputed_fingerprint
+                if precomputed_fingerprint is not None
+                else _fingerprint_roots(roots)
+            )
             old = state.cache.get(uri)
             # T2-B fingerprint short-circuit: if the elaborated tree is byte-
             # identical (semantically) to the prior one, drop the new tmp_path
@@ -1181,8 +1201,45 @@ def build_server() -> LanguageServer:
                 _emit_elaboration_finished(uri)
                 return
             t_compile_done = time.monotonic()
+            # Hoist the two heaviest post-compile walks onto a worker
+            # thread so they don't pin the asyncio loop. On a 25k-reg
+            # design these walked the tree twice (conflicts) plus once
+            # (fingerprint) synchronously in `_apply_compile_result` —
+            # that work runs after the pool worker returns and used
+            # to be the bottleneck blocking other URIs from making
+            # progress. Threads + GIL still serialize the CPU portion
+            # but the loop gets to schedule ticks for other URIs in
+            # between. The precomputed values are fed back into
+            # `_apply_compile_result` so the function's branching
+            # stays untouched and tests keep working unchanged.
+            precomputed_conflicts: list[CompilerMessage] | None = None
+            precomputed_fp: str | None = None
+            if roots:
+                def _heavy_walks() -> tuple[list[CompilerMessage], str]:
+                    try:
+                        conflicts_local = _address_conflict_diagnostics(
+                            roots, tmp_path
+                        )
+                    except Exception:
+                        logger.debug("address-conflict scan failed", exc_info=True)
+                        conflicts_local = []
+                    fp_local = _fingerprint_roots(roots)
+                    return conflicts_local, fp_local
+                try:
+                    precomputed_conflicts, precomputed_fp = await asyncio.to_thread(
+                        _heavy_walks
+                    )
+                except Exception:
+                    logger.debug("post-compile walks failed", exc_info=True)
             ast_changed = _apply_compile_result(
-                uri, buffer_text, messages, roots, tmp_path, consumed_files
+                uri,
+                buffer_text,
+                messages,
+                roots,
+                tmp_path,
+                consumed_files,
+                precomputed_conflicts=precomputed_conflicts,
+                precomputed_fingerprint=precomputed_fp,
             )
             t_apply_done = time.monotonic()
             logger.debug(
@@ -2308,8 +2365,17 @@ def build_server() -> LanguageServer:
             if cached.temp_path is not None and original_path is not None
             else None
         )
+        # Build the nodeId→RegNode index lazily on first expand for this
+        # cache entry. The walk happens once on a worker thread, then every
+        # subsequent expand on the same elaborated tree is an O(1) dict
+        # lookup. Pre-fix, every expand walked the full tree; on a 25k-reg
+        # design that meant noticeable lag on each first reg-detail open.
+        if cached.node_index is None:
+            cached.node_index = await asyncio.to_thread(
+                _build_node_index, cached.roots
+            )
         result = await asyncio.to_thread(
-            expand_node, cached.roots, node_id, translate
+            expand_node, cached.roots, node_id, translate, cached.node_index
         )
         if result is None:
             raise JsonRpcException(

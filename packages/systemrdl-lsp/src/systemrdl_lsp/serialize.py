@@ -539,23 +539,20 @@ def _serialize_spine(
     return _serialize_root(roots_input, stale, path_translate, version, lazy=True)
 
 
-def expand_node(
+def _build_node_index(
     roots_input: list[RootNode] | RootNode | None,
-    node_id: str,
-    path_translate: dict[pathlib.Path, pathlib.Path] | None = None,
-) -> dict[str, Any] | None:
-    """Find the Reg with this ``nodeId`` and return its full serialized form.
+) -> dict[str, Any]:
+    """Walk the elaborated tree once, return ``{nodeId: RegNode}``.
 
-    Walks the same depth-first order as ``_serialize_spine`` and matches
-    by visit-index — ``node_id`` must come from a spine emitted by this
-    LSP run. Returns the full Reg dict (with ``fields[]`` populated) or
-    ``None`` if the id is unknown or names a non-Reg node. The returned
-    dict carries the same ``nodeId`` for the convenience of the client
-    (which uses it as the splice key).
+    Mirrors ``_serialize_addressable``'s DFS so visit indices line up
+    with the ids the spine sent to the client. Only RegNodes go in the
+    map — containers are fully loaded in the spine, so expand_node
+    rejects them with NodeNotFound regardless.
 
-    Used to back the ``rdl/expandNode`` LSP RPC. Caller is responsible
-    for memoization (LSP keeps a per-cache-entry ``expanded`` dict so
-    repeat fetches of the same node skip this walk).
+    Built lazily by ``expand_node`` on first call per cache entry. On
+    a 25k-register design the original implementation walked the full
+    tree every expand request; one walk amortized across N clicks is
+    a strict win even at N=1.
     """
     if isinstance(roots_input, list):
         root_list = roots_input
@@ -566,7 +563,68 @@ def expand_node(
 
     from systemrdl.node import AddrmapNode, RegfileNode, RegNode
 
+    index: dict[str, Any] = {}
+    counter = [0]
+
+    def walk(node: Any) -> None:
+        my_idx = counter[0]
+        counter[0] += 1
+        if isinstance(node, RegNode):
+            index[_node_id(my_idx)] = node
+            return
+        if isinstance(node, (AddrmapNode, RegfileNode)):
+            try:
+                for c in node.children(unroll=True):
+                    walk(c)
+            except Exception:
+                logger.exception("walk error under %r", node)
+
+    for r in root_list:
+        try:
+            for top in r.children(unroll=True):
+                walk(top)
+        except Exception:
+            logger.exception("_build_node_index walk failed at root level")
+    return index
+
+
+def expand_node(
+    roots_input: list[RootNode] | RootNode | None,
+    node_id: str,
+    path_translate: dict[pathlib.Path, pathlib.Path] | None = None,
+    node_index: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Find the Reg with this ``nodeId`` and return its full serialized form.
+
+    If ``node_index`` is provided (built once and cached on the LSP's
+    ``CachedElaboration``), the lookup is O(1). Otherwise this walks
+    the full tree in the same depth-first order as ``_serialize_spine``
+    — kept as a fallback for direct callers (tests, ad-hoc tooling)
+    that don't keep a long-lived cache.
+
+    Returns the full Reg dict (with ``fields[]`` populated) or ``None``
+    if the id is unknown or names a non-Reg node. The returned dict
+    carries the same ``nodeId`` for the convenience of the client
+    (which uses it as the splice key).
+    """
     cache = _TypeCache()
+    if node_index is not None:
+        node = node_index.get(node_id)
+        if node is None:
+            return None
+        out = _serialize_reg(node, cache, path_translate, lazy=False)
+        out["nodeId"] = node_id
+        return out
+
+    if isinstance(roots_input, list):
+        root_list = roots_input
+    elif roots_input is None:
+        root_list = []
+    else:
+        root_list = [roots_input]
+
+    from systemrdl.node import AddrmapNode, RegfileNode, RegNode
+
     counter = [0]
 
     def walk(node: Any) -> dict[str, Any] | None:
@@ -581,10 +639,6 @@ def expand_node(
             return None
         if isinstance(node, (AddrmapNode, RegfileNode)):
             if my_id == node_id:
-                # Caller asked to expand a container — not supported in
-                # lazy v1 (containers are always loaded in the spine).
-                # Return None; server raises NodeNotFound to keep the
-                # client's "this id is a Reg" assumption simple.
                 return None
             try:
                 for c in node.children(unroll=True):
