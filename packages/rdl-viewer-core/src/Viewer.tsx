@@ -197,9 +197,15 @@ export function Viewer({ transport }: Props) {
     const reg = found.reg;
     if (reg.loadState !== 'placeholder' || !reg.nodeId) return;
     const nodeId = reg.nodeId;
-    if (pendingExpansions.has(nodeId)) return;
-    pendingExpansions.add(nodeId);
     const version = tree.version ?? 0;
+    // Key by `version:nodeId` (not raw nodeId): the same nodeId in a fresh
+    // elaboration is a *new* request, even though the string matches. With
+    // raw-key tracking, an in-flight expand from version v1 would block the
+    // version-v2 retry until the v1 request resolves as `outdated`, leaving
+    // the spinner up unnecessarily for the round-trip duration.
+    const trackingKey = `${version}:${nodeId}`;
+    if (pendingExpansions.has(trackingKey)) return;
+    pendingExpansions.add(trackingKey);
     transport.expandNode(version, nodeId)
       .then(populated => {
         // Functional setTree so we always splice into the *current* tree,
@@ -208,7 +214,7 @@ export function Viewer({ transport }: Props) {
         // matching placeholder is presumably still there because the new
         // elaboration would have produced the same shape with the same
         // nodeId — same DFS order). Falls through gracefully if not.
-        pendingExpansions.delete(nodeId);
+        pendingExpansions.delete(trackingKey);
         setTree(currentTree => {
           if (!currentTree) return currentTree;
           // Build a new top-level wrapper so React notices the change.
@@ -225,7 +231,7 @@ export function Viewer({ transport }: Props) {
         // or is in flight, but we still need to nudge React so useEffect
         // re-evaluates against the latest tree.version with the placeholder
         // again — otherwise we'd be stuck on the spinner.
-        pendingExpansions.delete(nodeId);
+        pendingExpansions.delete(trackingKey);
         setTree(currentTree => (currentTree ? { ...currentTree } : currentTree));
       });
   }, [found, tree, transport, pendingExpansions]);

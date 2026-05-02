@@ -478,6 +478,15 @@ def build_server() -> LanguageServer:
         except Exception:
             logger.debug("could not surface perl-missing notification", exc_info=True)
 
+    # TODO(T2): no per-URI lock here yet. _on_open and _on_save fire this
+    # immediately (only _on_change is debounced), so a rapid didOpen+didSave
+    # for the same URI launches two concurrent elaborate threads that race
+    # on `state.cache.put` → `cached.expanded` reset. Symptoms today are
+    # cosmetic (one round-trip wasted on a viewer holding the older version),
+    # not data-corrupting. Cleanest fix lands with the T2 background indexer:
+    # an asyncio.Lock per URI gating both this function and `_on_expand_node`.
+    # See PR #1 follow-up. Until then, rely on the buffer-equality short-
+    # circuit below to no-op the redundant pass when content hasn't changed.
     async def _full_pass_async(uri: str, buffer_text: str | None) -> None:
         if buffer_text is None:
             try:
@@ -1501,8 +1510,8 @@ def build_server() -> LanguageServer:
             serialize_fn,
             cached.roots,
             uri in state.stale_uris,
-            translate,
-            cached.version,
+            path_translate=translate,
+            version=cached.version,
         )
         cached.serialized = envelope
 

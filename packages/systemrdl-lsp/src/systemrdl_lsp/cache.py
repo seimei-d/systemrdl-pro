@@ -143,7 +143,15 @@ class DiskCache:
         except OSError as exc:
             logger.warning("DiskCache.put(%s): cannot mkdir: %s", key, exc)
             return
-        tmp = target.with_suffix(target.suffix + ".tmp")
+        # Per-process nonce on the staging file. Two LSP instances (e.g. user
+        # opens a second VSCode window on the same workspace) hash the same
+        # cache key and would otherwise both write to `spine.json.tmp` and
+        # race the rename. The .tmp collision is harmless on POSIX (last
+        # writer wins, os.replace is atomic) but it produces a stale-by-one
+        # cache entry for the first window. Tagging the tmp by pid makes
+        # each writer's staging area private; the final os.replace into the
+        # shared target name is still atomic.
+        tmp = target.with_suffix(target.suffix + f".{os.getpid()}.tmp")
         try:
             tmp.write_text(json.dumps(envelope), encoding="utf-8")
             os.replace(tmp, target)
