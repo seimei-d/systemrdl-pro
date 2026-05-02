@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Addrmap, ElaboratedTree, Reg, SourceLoc, Transport, TreeNode } from './types';
 import { findFirstReg, findRegByKey, isContainer, subtreeMatches, type FilterScope } from './util';
 import { buildFlatList, FlatRow, Tree } from './Tree';
@@ -212,7 +212,14 @@ export function Viewer({ transport }: Props) {
   // splice the populated reg into the tree state so Detail re-renders with
   // real fields. Per-nodeId in-flight tracking avoids stampedes when the
   // user rapidly clicks through siblings.
-  const [pendingExpansions] = useState<Set<string>>(() => new Set());
+  //
+  // T4-B H1: `useRef`, not `useState` with discarded setter. The Set is
+  // mutated in place (`.add` / `.delete`) and we never want a re-render
+  // off it — that's exactly what refs are for. The previous `useState`
+  // shape implied React-tracked state and broke under StrictMode
+  // double-invoke (the second invocation found the key already present
+  // from the first run and silently dropped the expand request).
+  const pendingExpansions = useRef<Set<string>>(new Set()).current;
   useEffect(() => {
     if (!found || !tree || !transport.expandNode) return;
     const reg = found.reg;

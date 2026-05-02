@@ -157,7 +157,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-SERVER_VERSION = "0.19.0"
+SERVER_VERSION = "0.19.1"
 
 
 def _iter_rdl_files(root: pathlib.Path, exclude_dirs: set[str]):
@@ -1473,8 +1473,15 @@ def build_server() -> LanguageServer:
         line, char = params.position.line, params.position.character
 
         # 1. Instance lookup first — gives the richest answer when it hits.
+        # T4-B H4: pass the LSP buffer-cache line reader through so
+        # _property_origin_hint avoids the synchronous disk read on the
+        # event loop. Falls back to disk inside hover.py if the reader
+        # comes up empty.
         node = _node_at_position(cached.roots, line, char)
-        markdown = _hover_text_for_node(node) if node is not None else None
+        markdown = (
+            _hover_text_for_node(node, _file_line_reader)
+            if node is not None else None
+        )
 
         # 2-3. Word-based catalogue lookup for keywords / properties / access values / type names.
         if markdown is None:
@@ -2075,7 +2082,13 @@ def build_server() -> LanguageServer:
             compiler_version = getattr(_systemrdl, "__version__", "unknown")
         except Exception:
             compiler_version = "unknown"
-        return make_key(path, mtime_ns, state.include_paths, compiler_version)
+        # T4-B H2: include_vars is part of the cache key. Same file with
+        # a different $VAR substitution map produces a different include
+        # graph and therefore a different elaborated tree.
+        return make_key(
+            path, mtime_ns, state.include_paths, compiler_version,
+            include_vars=state.include_vars,
+        )
 
     @server.feature("rdl/elaboratedTree")
     async def _on_elaborated_tree(_ls: LanguageServer, params: Any) -> dict[str, Any]:

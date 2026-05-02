@@ -58,7 +58,11 @@ def _param_default_label(expr: Any) -> str:
     return repr(expr)
 
 
-def _property_origin_hint(node: Any, prop_name: str) -> str:
+def _property_origin_hint(
+    node: Any,
+    prop_name: str,
+    line_reader: Any = None,
+) -> str:
     """Annotate a property's origin if it wasn't set on the node's own line.
 
     Distinguishes the two off-line origins:
@@ -84,21 +88,37 @@ def _property_origin_hint(node: Any, prop_name: str) -> str:
     own_line = getattr(own_ref, "line", None) if own_ref else None
     if prop_line is None or own_line is None or prop_line == own_line:
         return ""
-    # Peek at the source line to label the kind of off-line assignment.
+    # T4-B H4: prefer the LSP buffer-cache line reader over a synchronous
+    # disk read. Hover handlers run on the asyncio event loop; a slow
+    # NFS / spinning-disk read here used to block diagnostics, completion
+    # and every other LSP response for hundreds of milliseconds. The
+    # caller passes in a ``line_reader(path, line_idx)`` that consults
+    # the in-memory buffer first; we fall back to disk only when no
+    # reader is provided (legacy callers + test paths).
     label = "set"
-    try:
-        from pathlib import Path as _Path
-        filename = getattr(prop_ref, "filename", None)
-        if filename:
-            line_text = _Path(filename).read_text(encoding="utf-8", errors="replace")\
-                .splitlines()[prop_line - 1]
-            stripped = line_text.lstrip()
-            if "->" in line_text:
-                label = "dynamic"
-            elif stripped.startswith("default"):
-                label = "default"
-    except (OSError, IndexError):
-        pass
+    line_text: str | None = None
+    filename = getattr(prop_ref, "filename", None)
+    if filename:
+        if line_reader is not None:
+            try:
+                from pathlib import Path as _Path
+                line_text = line_reader(_Path(filename), prop_line - 1)
+            except Exception:
+                line_text = None
+        if line_text is None:
+            try:
+                from pathlib import Path as _Path
+                lines = _Path(filename).read_text(encoding="utf-8", errors="replace").splitlines()
+                if 0 <= prop_line - 1 < len(lines):
+                    line_text = lines[prop_line - 1]
+            except OSError:
+                line_text = None
+    if line_text is not None:
+        stripped = line_text.lstrip()
+        if "->" in line_text:
+            label = "dynamic"
+        elif stripped.startswith("default"):
+            label = "default"
     return f" _(← {label} at line {prop_line})_"
 
 
@@ -119,77 +139,48 @@ def _node_at_position(
 
     target_line_1b = line_0b + 1
 
-    # Pre-pass: count elaborated nodes per (filename, line). count > 1 means
-    # the line is reused-type body; we must not pick a single instance for it.
-    # Walk only via ``children(unroll=True)`` — that already yields FieldNodes
-    # for RegNode, so iterating fields() separately would double-count. (id()
-    # guards don't help because systemrdl-compiler returns fresh Python wrapper
-    # objects on every children()/fields() call.)
+    # T4-B H4: single-pass walk. Pre-T4-B walked the tree TWICE (once
+    # to build the line-uses Counter, once to find the matching node)
+    # AND then double-visited fields (children(unroll=True) already
+    # yields fields for RegNode, but the visit() loop also iterated
+    # node.fields() on top — inflating each field's visit count and
+    # blocking the asyncio event loop on every hover for ~2x as long
+    # as needed). One walk now: collect the Counter and remember
+    # candidates; filter at the end.
     line_uses: Counter[tuple[str, int]] = Counter()
+    candidates: list[tuple[Any, bool, int, str]] = []
 
-    def collect(node: Any) -> None:
+    def walk(node: Any) -> None:
         inst = getattr(node, "inst", None)
         src_ref = getattr(inst, "inst_src_ref", None) or getattr(inst, "def_src_ref", None)
         if src_ref is not None:
             line_1b = getattr(src_ref, "line", None)
             filename = getattr(src_ref, "filename", None)
             if line_1b is not None and filename:
-                line_uses[(str(filename), line_1b)] += 1
+                fname = str(filename)
+                line_uses[(fname, line_1b)] += 1
+                if line_1b == target_line_1b:
+                    is_field = not isinstance(node, AddressableNode)
+                    candidates.append((node, is_field, line_1b, fname))
         if isinstance(node, AddressableNode) or hasattr(node, "children"):
             try:
                 for child in node.children(unroll=True):
-                    collect(child)
+                    walk(child)
             except Exception:
                 pass
 
     root_list = roots if isinstance(roots, list) else [roots]
     for r in root_list:
-        collect(r)
+        walk(r)
 
-    best: Any = None
-    best_span: int = 10**9
-
-    def visit(node: Any) -> None:
-        nonlocal best, best_span
-        inst = getattr(node, "inst", None)
-        src_ref = getattr(inst, "inst_src_ref", None) or getattr(inst, "def_src_ref", None)
-        if src_ref is not None:
-            ref_line = getattr(src_ref, "line", None)
-            ref_filename = getattr(src_ref, "filename", None)
-            # The reused-type-body filter (line shared by multiple elaborated
-            # nodes → skip) protects against picking an arbitrary instance
-            # for a line where addresses would differ per instance. That only
-            # matters for AddressableNode (reg/regfile/addrmap) — those have
-            # an absolute_address. Fields don't, so picking any instance for
-            # a field-on-shared-line is safe (access / reset / encode are
-            # intrinsic to the type body, not the instance).
-            is_field = not isinstance(node, AddressableNode)
-            if (
-                ref_line == target_line_1b
-                and ref_filename
-                and (
-                    is_field
-                    or line_uses.get((str(ref_filename), ref_line), 0) <= 1
-                )
-            ):
-                # Approximate "smallest containing node" by counting depth.
-                span = 1
-                if span < best_span:
-                    best = node
-                    best_span = span
-        if isinstance(node, AddressableNode) or hasattr(node, "children"):
-            for child in node.children(unroll=True):
-                visit(child)
-        if hasattr(node, "fields"):
-            try:
-                for f in node.fields():
-                    visit(f)
-            except Exception:
-                pass
-
-    for r in root_list:
-        visit(r)
-    return best
+    # Pick the first viable candidate. The reused-type-body filter
+    # (line shared by multiple AddressableNodes → skip; fields are
+    # safe because their access / reset / encode is intrinsic to the
+    # type body, not the instance).
+    for node, is_field, ref_line, ref_filename in candidates:
+        if is_field or line_uses.get((ref_filename, ref_line), 0) <= 1:
+            return node
+    return None
 
 
 def _hover_for_word(word: str, roots: list[RootNode]) -> str | None:
@@ -282,7 +273,7 @@ def _hover_for_word(word: str, roots: list[RootNode]) -> str | None:
     return None
 
 
-def _hover_text_for_node(node: Any) -> str | None:
+def _hover_text_for_node(node: Any, line_reader: Any = None) -> str | None:
     from systemrdl.node import AddressableNode, FieldNode, RegNode
 
     lines: list[str] = []
@@ -301,8 +292,8 @@ def _hover_text_for_node(node: Any) -> str | None:
             reset_str = _format_hex(int(reset)) if reset is not None else "—"
         except LookupError:
             reset_str = "—"
-        access_origin = _property_origin_hint(node, "sw")
-        reset_origin = _property_origin_hint(node, "reset")
+        access_origin = _property_origin_hint(node, "sw", line_reader)
+        reset_origin = _property_origin_hint(node, "reset", line_reader)
         lines.append(f"**field** `{name}` `[{msb}:{lsb}]`")
         lines.append("")
         lines.append(f"- **access**: {access_label}{access_origin}")

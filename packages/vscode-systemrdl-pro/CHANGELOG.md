@@ -4,6 +4,97 @@ All notable changes to **SystemRDL Pro** are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [SemVer](https://semver.org/).
 
+## [0.27.1] — 2026-05-02
+
+T4-B — eleven Tier-2 hardening fixes from the post-T3 multi-agent
+code review. No new features; reliability + performance + correctness
+improvements that prevent classes of bugs from emerging.
+
+### Fixed
+
+- **H1 — `pendingExpansions` `useState` → `useRef`.** Pre-T4-B used
+  `useState<Set<string>>` with the setter discarded — the Set was
+  mutated in place. Under React 18 StrictMode the effect double-
+  invokes; the second invocation found the key already in the Set
+  from the first run and silently dropped the expand request,
+  leaving the placeholder spinner stuck in dev. Real `useRef` now.
+- **H5 — Per-panel cursor sync state.** `cursorSyncTimer` and
+  `suppressNextCursorSync` were module-globals. With two panels
+  open (multi-root, Decision 3C), a reveal in panel A would
+  suppress the next cursor sync for panel B too, and a cursor move
+  in panel A's editor would clear panel B's pending debounce.
+  Both fields now live on `PanelEntry` per panel.
+- **H6 — Restart-server subscription leak.** Each call to
+  `startServer` (initial + every `restartServer`) used to push a
+  fresh `{ dispose: () => client?.stop() }` into
+  `context.subscriptions` and register a fresh trio of
+  `client.onNotification` handlers without cleaning up prior
+  registrations. After N restarts every push notification fired
+  N×`refreshMemoryMap`. Tracked lifecycle aggregate now disposed
+  before re-creating.
+- **H7 — `clientReady` hung forever on early-return.** `startServer`
+  returned without resolving the readiness promise when Python was
+  not found or the LSP module was missing. Deserialized panels
+  awaiting `clientReady` blocked on it indefinitely, leaving the
+  viewer permanently blank with no error message even after a
+  restart fixed the underlying issue. `signalClientReady()` now
+  fires on every exit path including the catch arm of
+  `client.start()`.
+- **H8 — CSPRNG nonce.** `makeNonce()` used `Math.random()` —
+  category-error vs the CSP nonce mechanism. Switched to
+  `crypto.randomBytes(18).toString('base64url')`.
+- **H9 — Watcher + decoration disposal.** `createFileSystemWatcher`
+  was leaked by `LanguageClient.synchronize.fileEvents` on every
+  restart (one inotify/fd handle per restart). `flashDecoration`
+  was a module-load-time singleton with no disposal path. Both now
+  tracked and disposed correctly.
+
+### Fixed (in `systemrdl-lsp` 0.19.1)
+
+- **H2 — `include_vars` in disk cache key.** `make_key` hashed
+  `(abs_path, mtime, include_paths, compiler_version)` but NOT the
+  `include_vars` substitution map. Two compiles of the same file
+  with different `$IP_ROOT` values would hit the same disk-cache
+  entry and the second would receive the first's spine envelope —
+  silent cross-workspace cache poisoning. Vars now in the key
+  (sorted key=value pairs, NUL-separated).
+- **H3 — `_fingerprint_roots` type cache.** Pre-T4-B did 200k+
+  uncached `node.get_property()` calls per fingerprint on a 25k-
+  reg fixture (~1s wasted per elaborate). Mirrors `serialize.py`'s
+  `_TypeCache` pattern: keyed by `(id(original_def), prop_name)`,
+  bypassed for instance-level overrides.
+- **H4 — Hover off the event loop + single tree walk.**
+  `_property_origin_hint` did a synchronous `Path.read_text` on
+  every hover; the hover handler runs on the asyncio event loop, so
+  a slow NFS / spinning-disk read would stall diagnostics,
+  completion, and every other LSP response for hundreds of
+  milliseconds. New optional `line_reader` parameter consults the
+  LSP buffer cache first, falls back to disk only when not
+  provided. Plus `_node_at_position` collapsed from two full tree
+  walks (line-counter + best-match) to one, and the `fields()`
+  double-visit (children(unroll=True) already yields fields)
+  was removed — roughly 2× speedup on every hover.
+
+### Fixed (in `rdl-viewer` 0.1.0+)
+
+- **H10 — SIGTERM handler.** Pre-T4-B only `SIGINT` was handled.
+  Docker, systemd, plain `kill <pid>` all default to SIGTERM and
+  took the default behaviour (immediate exit, no cleanup) —
+  leaking the watcher's inotify handle and orphaning any
+  in-flight Python dump child as a zombie until the kernel
+  reaped it. Mirror SIGINT handler.
+- **H11 — `--port` / `--python` argv bounds check.** Pre-T4-B did
+  bare `Number(argv[++i])` for `--port` (forgot value →
+  `Number(undefined)=NaN` → Bun.serve assigned a random port,
+  silent confusion) and bare `argv[++i]` for `--python`
+  (`undefined` propagates into spawnSync, throws uncaught). Now
+  validates + exits with an actionable error.
+
+### Tests
+
+138 pass (no test changes — these are reliability/perf fixes
+without new behavior surface).
+
 ## [0.27.0] — 2026-05-02
 
 T4-A — six Tier-1 critical bug fixes from the post-T3 multi-agent

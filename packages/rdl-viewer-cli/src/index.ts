@@ -70,11 +70,28 @@ function parseArgs(argv: string[]): CliArgs {
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--port' || a === '-p') {
-      args.port = Number(argv[++i]);
+      // T4-B H11: bounds + numeric check. Pre-T4-B was bare
+      // `Number(argv[++i])` which silently produced NaN if the user
+      // forgot the value (`rdl-viewer file --port`) — Bun.serve then
+      // assigned a random port, leaving the caller confused. Now
+      // exit with an actionable error.
+      const val = argv[++i];
+      if (val === undefined || !/^\d+$/.test(val)) {
+        console.error(`rdl-viewer: --port requires a numeric argument (got ${val === undefined ? 'nothing' : JSON.stringify(val)})`);
+        process.exit(2);
+      }
+      args.port = Number(val);
     } else if (a === '--no-open') {
       args.open = false;
     } else if (a === '--python') {
-      args.python = argv[++i];
+      // T4-B H11: same — pre-T4-B passed `undefined` into spawnSync,
+      // throwing an uncaught synchronous TypeError.
+      const val = argv[++i];
+      if (val === undefined) {
+        console.error('rdl-viewer: --python requires a path argument');
+        process.exit(2);
+      }
+      args.python = val;
     } else if (a === '--help' || a === '-h') {
       printHelp();
       process.exit(0);
@@ -280,10 +297,19 @@ const watcher = watch(args.file, () => {
   watchTimer = setTimeout(() => refresh(), 120);
 });
 
-process.on('SIGINT', () => {
-  watcher.close();
+// T4-B H10: handle SIGTERM in addition to SIGINT. Docker, systemd,
+// `kill <pid>` (without args) — all default to SIGTERM, not SIGINT.
+// Pre-T4-B SIGTERM took the default behaviour (exit immediately
+// with no cleanup), leaking the watcher's inotify handle and
+// orphaning any in-flight Python dump child as a zombie until the
+// kernel reaped it. Mirror the SIGINT handler.
+const shutdown = (sig: string) => {
+  console.error(`rdl-viewer: received ${sig}, shutting down`);
+  try { watcher.close(); } catch { /* ignore */ }
   process.exit(0);
-});
+};
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));
 
 const server = Bun.serve({
   port: args.port,

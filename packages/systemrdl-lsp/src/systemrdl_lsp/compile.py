@@ -678,7 +678,40 @@ def _fingerprint_roots(roots: list[RootNode]) -> str:
         h.update(s.encode("utf-8", errors="replace"))
         h.update(b"\0")
 
+    # T4-B H3: type-level memo, mirroring serialize.py's `_TypeCache`
+    # pattern. `node.get_property()` walks the override → type →
+    # default chain on every call — uncached, that's 200k+ traversals
+    # on a 25k-reg fixture (one fingerprint per elaborate). Cache by
+    # `(id(original_def), prop_name)`; bypass the cache when the
+    # property is overridden on this specific instance (instance-level
+    # overrides are correct only when read directly).
+    _MISSING = object()
+    prop_cache: dict[tuple[int, str], Any] = {}
+
     def safe_prop(node: Any, name: str) -> str:
+        inst = getattr(node, "inst", None)
+        if inst is not None:
+            inst_props = getattr(inst, "properties", None)
+            def_obj = getattr(inst, "original_def", None)
+            if def_obj is not None and (
+                inst_props is None or name not in inst_props
+            ):
+                key = (id(def_obj), name)
+                cached = prop_cache.get(key, _MISSING)
+                if cached is not _MISSING:
+                    return cached
+                try:
+                    value = node.get_property(name)
+                except Exception:
+                    value = "ERR"
+                rendered = (
+                    "" if value is None
+                    else value if value == "ERR"
+                    else repr(value)
+                )
+                prop_cache[key] = rendered
+                return rendered
+        # No inst, no original_def, or per-instance override: read direct.
         try:
             value = node.get_property(name)
         except Exception:
@@ -686,8 +719,9 @@ def _fingerprint_roots(roots: list[RootNode]) -> str:
         if value is None:
             return ""
         # Enum values (AccessType, OnReadType, ...) have stable repr.
-        # Ints stringify cleanly. Expressions get whatever __repr__ yields,
-        # which is consistent across runs on the same compiler version.
+        # Ints stringify cleanly. Expressions get whatever __repr__
+        # yields, which is consistent across runs on the same compiler
+        # version.
         return repr(value)
 
     def visit(node: Any) -> None:

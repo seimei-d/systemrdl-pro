@@ -2,7 +2,7 @@
   "name": "systemrdl-pro",
   "displayName": "SystemRDL Pro",
   "description": "Live diagnostics + interactive memory-map viewer for SystemRDL 2.0",
-  "version": "0.27.0",
+  "version": "0.27.1",
   "publisher": "seimei-d",
   "license": "MIT",
   "icon": "media/icon.png",

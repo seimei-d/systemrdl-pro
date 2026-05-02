@@ -58,6 +58,7 @@ def make_key(
     mtime_ns: int,
     include_paths: list[str] | tuple[str, ...],
     compiler_version: str,
+    include_vars: dict[str, str] | None = None,
 ) -> str:
     """Compute the content-addressed cache key.
 
@@ -65,10 +66,22 @@ def make_key(
     filenames or version strings) and hashed with SHA-256. Truncated to
     the first 32 hex chars — 128 bits, far below collision probability
     for any plausible cache size.
+
+    T4-B H2: ``include_vars`` is part of the key. Two compiles of the
+    same file with different ``$IP_ROOT`` substitutions (or any other
+    ``systemrdl-pro.includeVars`` mapping) produce DIFFERENT include
+    graphs and DIFFERENT elaborated trees, so they MUST hash to
+    different keys. Pre-T4-B the disk cache happily served a cross-
+    workspace stale envelope when the only difference was the var
+    map. Backwards-compatible: ``None`` produces the empty-vars hash
+    suffix that matches the pre-T4-B key shape.
     """
     abs_str = str(pathlib.Path(abs_path).resolve()) if abs_path else ""
     inc_str = "\0".join(sorted(include_paths))
-    raw = f"{abs_str}\0{mtime_ns}\0{inc_str}\0{compiler_version}"
+    vars_str = "\0".join(
+        f"{k}={v}" for k, v in sorted((include_vars or {}).items())
+    )
+    raw = f"{abs_str}\0{mtime_ns}\0{inc_str}\0{compiler_version}\0{vars_str}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
 
 
