@@ -610,22 +610,16 @@ def build_server() -> LanguageServer:
         consumed_files: set[pathlib.Path],
         precomputed_conflicts: list[CompilerMessage] | None = None,
         precomputed_fingerprint: str | None = None,
+        precomputed_node_index: dict[str, Any] | None = None,
     ) -> bool:
         """Apply elaborate output to cache + diagnostics + viewer notification.
 
         Returns ``True`` when the AST genuinely changed (cascade-trigger
-        consumers via reverse-dep map). ``False`` when this was a semantic
-        no-op (T2-B fingerprint match) or a parse failure — neither warrants
-        cascading work onto consumers.
+        consumers via reverse-dep map). ``False`` on semantic no-op
+        (fingerprint match) or parse failure.
 
-        ``precomputed_conflicts`` / ``precomputed_fingerprint`` let the
-        caller hoist the two CPU-heavy tree walks
-        (``_address_conflict_diagnostics`` and ``_fingerprint_roots``) onto
-        a worker thread so they don't block other URIs on the main asyncio
-        loop. Field-reported as "open big file then small file → small
-        file blocked until big one rendered" — the pool ran the elaborate
-        in parallel, but apply ran two full 25k-node walks synchronously
-        on the loop, GIL-pinning every other URI's apply behind it.
+        Optional ``precomputed_*`` kwargs let callers hoist the heavy
+        post-compile tree walks off the asyncio loop.
         """
         version_after: int | None = None
         ast_changed = False
@@ -694,6 +688,8 @@ def build_server() -> LanguageServer:
                 else:
                     state.stale_uris.discard(uri)
                 cached = state.cache.get(uri)
+                if cached is not None and precomputed_node_index:
+                    cached.node_index = precomputed_node_index
                 version_after = cached.version if cached is not None else None
                 _update_include_graph(uri, consumed_files)
                 ast_changed = True
@@ -1059,11 +1055,21 @@ def build_server() -> LanguageServer:
                         asyncio.shield(fut), timeout=state.elaboration_timeout_s
                     )
                     if using_pool:
-                        messages, roots, tmp_path, consumed_files = (
-                            _decompress_compile_result(raw_result)
-                        )
+                        (
+                            messages,
+                            roots,
+                            tmp_path,
+                            consumed_files,
+                            node_index,
+                        ) = _decompress_compile_result(raw_result)
                     else:
-                        messages, roots, tmp_path, consumed_files = raw_result
+                        (
+                            messages,
+                            roots,
+                            tmp_path,
+                            consumed_files,
+                            node_index,
+                        ) = raw_result
                     break
                 except asyncio.CancelledError:
                     # LSP shutdown / pygls task-cancel arrived
@@ -1201,17 +1207,8 @@ def build_server() -> LanguageServer:
                 _emit_elaboration_finished(uri)
                 return
             t_compile_done = time.monotonic()
-            # Hoist the two heaviest post-compile walks onto a worker
-            # thread so they don't pin the asyncio loop. On a 25k-reg
-            # design these walked the tree twice (conflicts) plus once
-            # (fingerprint) synchronously in `_apply_compile_result` —
-            # that work runs after the pool worker returns and used
-            # to be the bottleneck blocking other URIs from making
-            # progress. Threads + GIL still serialize the CPU portion
-            # but the loop gets to schedule ticks for other URIs in
-            # between. The precomputed values are fed back into
-            # `_apply_compile_result` so the function's branching
-            # stays untouched and tests keep working unchanged.
+            # Run conflicts + fingerprint walks off the asyncio loop so
+            # they don't block other URIs' apply on a 25k-reg tree.
             precomputed_conflicts: list[CompilerMessage] | None = None
             precomputed_fp: str | None = None
             if roots:
@@ -1240,6 +1237,7 @@ def build_server() -> LanguageServer:
                 consumed_files,
                 precomputed_conflicts=precomputed_conflicts,
                 precomputed_fingerprint=precomputed_fp,
+                precomputed_node_index=node_index,
             )
             t_apply_done = time.monotonic()
             logger.debug(
@@ -2260,13 +2258,9 @@ def build_server() -> LanguageServer:
                     # error, webview shows nothing wrong".
                     disk_envelope["stale"] = uri in state.stale_uris
                     cached.serialized = disk_envelope
-                    # Disk hit skips the spine-build, which is also where
-                    # we now populate the expand-index for free. Build
-                    # it here on a thread so the first click after a
-                    # window reload doesn't pay the slow O(N) walk.
-                    # Fire-and-forget — the click handler will lazy-build
-                    # too if it races ahead, so this is purely an
-                    # optimization, not a correctness requirement.
+                    # Disk hit skips the spine build path that populates
+                    # the expand-index. Build it in the background so
+                    # first-click expand stays O(1).
                     if cached.node_index is None:
                         async def _bg_build_index(c: Any = cached) -> None:
                             try:
@@ -2292,18 +2286,10 @@ def build_server() -> LanguageServer:
             if cached.temp_path is not None and original_path is not None
             else None
         )
-        # Pick spine vs full based on the client's advertised capability and
-        # run in a thread so the event loop stays responsive during the
-        # ~1s (spine) or ~6s (full) wall-clock at 25k regs.
-        # Build the expand-index alongside the spine on the same DFS pass
-        # — zero extra walk cost. By the time the viewer renders and the
-        # user can click a placeholder reg, ``cached.node_index`` is
-        # already populated, so ``_on_expand_node`` is an O(1) dict
-        # lookup. Pre-fix, the index was lazy-built on first click via
-        # _build_node_index in to_thread; on a 25k-reg design that ran
-        # for hundreds of ms holding the GIL, blocking concurrent
-        # expand requests on other URIs (field-reported as "click on
-        # small file's reg waits for big file's first click").
+        # Spine vs full per client capability. Threaded so the loop stays
+        # responsive during the ~1s/~6s walk on 25k regs. Build the
+        # expand-index on the same DFS pass when the cache doesn't have
+        # one yet (zero extra walk cost; pool worker normally fills it).
         serialize_fn = _serialize_spine if state.lazy_supported else _serialize_root
         index_out: dict[str, Any] | None = (
             {} if state.lazy_supported and cached.node_index is None else None
@@ -2401,11 +2387,7 @@ def build_server() -> LanguageServer:
             if cached.temp_path is not None and original_path is not None
             else None
         )
-        # Build the nodeId→RegNode index lazily on first expand for this
-        # cache entry. The walk happens once on a worker thread, then every
-        # subsequent expand on the same elaborated tree is an O(1) dict
-        # lookup. Pre-fix, every expand walked the full tree; on a 25k-reg
-        # design that meant noticeable lag on each first reg-detail open.
+        # Fallback build — pool worker / spine path normally fills this.
         if cached.node_index is None:
             cached.node_index = await asyncio.to_thread(
                 _build_node_index, cached.roots

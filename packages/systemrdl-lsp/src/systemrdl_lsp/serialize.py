@@ -403,11 +403,6 @@ def _serialize_addressable(
         out = _serialize_reg(node, cache, path_translate, lazy=lazy)
         if my_id is not None:
             out["nodeId"] = my_id
-            # Populate the expand-index in lock-step with id assignment
-            # so callers (the LSP) can hand the dict to ``expand_node``
-            # for O(1) lookup. Built during the same DFS as the spine
-            # — zero extra walk cost. Without this, the first click on
-            # any reg paid an O(N) tree walk to find the matching id.
             if out_index is not None:
                 out_index[my_id] = node
         return out
@@ -544,16 +539,10 @@ def _serialize_spine(
     """Lazy-mode envelope: spine + placeholders. See ``_serialize_root``.
 
     Wrapper kept as a separate function so callers express intent at the
-    callsite (``_serialize_spine(...)`` vs ``_serialize_root(..., lazy=True)``)
-    and so the LSP server can reach for one or the other based on the
-    client's advertised capability without sprinkling kwargs.
+    callsite (``_serialize_spine(...)`` vs ``_serialize_root(..., lazy=True)``).
 
-    ``out_index``: when provided, the same DFS that builds the spine
-    populates a ``{nodeId: RegNode}`` map. Hand it to ``expand_node``
-    later for O(1) lookup. Avoids the slow first-click penalty on big
-    designs (lazy-build via ``_build_node_index`` ran in to_thread but
-    still pinned the GIL for ~hundreds of ms on 25k regs, making
-    concurrent expand requests on other URIs queue behind it).
+    When ``out_index`` is provided, the same DFS populates a
+    ``{nodeId: RegNode}`` map for later O(1) ``expand_node`` lookup.
     """
     return _serialize_root(
         roots_input, stale, path_translate, version,
@@ -568,13 +557,7 @@ def _build_node_index(
 
     Mirrors ``_serialize_addressable``'s DFS so visit indices line up
     with the ids the spine sent to the client. Only RegNodes go in the
-    map — containers are fully loaded in the spine, so expand_node
-    rejects them with NodeNotFound regardless.
-
-    Built lazily by ``expand_node`` on first call per cache entry. On
-    a 25k-register design the original implementation walked the full
-    tree every expand request; one walk amortized across N clicks is
-    a strict win even at N=1.
+    map — containers are always fully loaded in the spine.
     """
     if isinstance(roots_input, list):
         root_list = roots_input

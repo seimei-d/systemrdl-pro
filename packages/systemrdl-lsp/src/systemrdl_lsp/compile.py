@@ -375,8 +375,15 @@ def _compile_text(
     incl_search_paths: list[str] | None = None,
     include_vars: dict[str, str] | None = None,
     perl_safe_opcodes: list[str] | None = None,
-) -> tuple[list[CompilerMessage], list[RootNode], pathlib.Path, set[pathlib.Path]]:
-    """Compile in-memory buffer text. Returns (messages, roots, temp_path, consumed_files).
+) -> tuple[
+    list[CompilerMessage],
+    list[RootNode],
+    pathlib.Path,
+    set[pathlib.Path],
+    dict[str, Any],
+]:
+    """Compile in-memory buffer text. Returns
+    ``(messages, roots, temp_path, consumed_files, node_index)``.
 
     ``roots`` is a list of RootNode instances — one per top-level ``addrmap``
     *definition* in the file (Decision 3C). ``compiler.elaborate()`` with no
@@ -463,7 +470,15 @@ def _compile_text(
         for sev, msg_text, src_ref in printer.captured
     ]
     consumed = _harvest_consumed_files(roots, printer.captured, tmp_path)
-    return messages, roots, tmp_path, consumed
+    # Index built here (in pool worker when threaded) so it ships with
+    # the compile result — by the time the viewer can click, expand is
+    # an O(1) lookup with no GIL contention against other URIs.
+    # Pickle's memo keeps refs aligned across process boundaries.
+    node_index: dict[str, Any] = {}
+    if roots:
+        from .serialize import _build_node_index
+        node_index = _build_node_index(roots)
+    return messages, roots, tmp_path, consumed, node_index
 
 
 # ---------------------------------------------------------------------------
@@ -522,7 +537,13 @@ def _compile_text_compressed(
 
 def _decompress_compile_result(
     blob: bytes,
-) -> tuple[list[CompilerMessage], list[RootNode], pathlib.Path, set[pathlib.Path]]:
+) -> tuple[
+    list[CompilerMessage],
+    list[RootNode],
+    pathlib.Path,
+    set[pathlib.Path],
+    dict[str, Any],
+]:
     """Reverse of ``_compile_text_compressed``. Called in the parent
     process to materialize the subprocess's elaborate result."""
     return pickle.loads(zlib.decompress(blob))
@@ -811,7 +832,7 @@ def _elaborate(path: pathlib.Path) -> list[tuple[Severity, str, Any]]:
         return printer.captured
 
     text = path.read_text(encoding="utf-8")
-    messages, _roots, tmp_path, _consumed = _compile_text(path.as_uri(), text)
+    messages, _roots, tmp_path, _consumed, _node_index = _compile_text(path.as_uri(), text)
     tmp_path.unlink(missing_ok=True)  # legacy path doesn't cache, safe to drop now
     out: list[tuple[Severity, str, Any]] = []
     for m in messages:
@@ -855,14 +876,8 @@ class CachedElaboration:
     # initialized on first expand request. Cleared whenever the entry is
     # replaced (next elaboration regenerates ids so old entries are stale).
     expanded: dict[str, dict[str, Any]] | None = None
-    # nodeId → RegNode lookup table built lazily on first ``expand_node``
-    # call. Without this, every first-click on a placeholder Reg ran a
-    # full DFS walk of the elaborated tree — on a 25k-register design
-    # that meant every reg detail open paid a 25k-node walk. Build once,
-    # then expand is an O(1) dict lookup. Walk order matches the spine's
-    # DFS in serialize so ids line up. Memory cost is one shallow dict
-    # entry per Reg (~few hundred KB on 25k regs); refs only — the
-    # RegNode objects already live in ``roots``.
+    # nodeId → RegNode lookup table for O(1) expand. Walk order matches
+    # the spine's DFS so ids line up. Refs only — RegNodes live in roots.
     node_index: dict[str, Any] | None = None
     # T2-B: SHA-256 fingerprint of the elaborated tree's viewer-facing
     # semantics. Lets ``_apply_compile_result`` skip the cache version

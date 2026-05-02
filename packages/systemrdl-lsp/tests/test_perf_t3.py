@@ -76,7 +76,7 @@ def test_compressed_round_trip_locally(tmp_path):
     rdl.write_text(SAMPLE_RDL)
     blob = _compile_text_compressed(rdl.as_uri(), SAMPLE_RDL)
     assert isinstance(blob, bytes)
-    msgs, roots, tmp, consumed = _decompress_compile_result(blob)
+    msgs, roots, tmp, consumed, _node_index = _decompress_compile_result(blob)
     try:
         assert isinstance(msgs, list)
         assert len(roots) == 1
@@ -97,7 +97,7 @@ def test_compression_actually_shrinks(tmp_path):
     rdl = tmp_path / "a.rdl"
     rdl.write_text(SAMPLE_RDL)
     blob = _compile_text_compressed(rdl.as_uri(), SAMPLE_RDL)
-    msgs, roots, tmp, consumed = _decompress_compile_result(blob)
+    msgs, roots, tmp, consumed, _node_index = _decompress_compile_result(blob)
     try:
         raw = pickle.dumps((msgs, roots, tmp, consumed), protocol=5)
         # zlib L=1 typically gets at least 2x on this fixture; allow
@@ -126,10 +126,10 @@ def test_subprocess_round_trip_via_pool(real_pool, tmp_path):
     # Subprocess
     fut = real_pool.submit(_compile_text_compressed, rdl.as_uri(), SAMPLE_RDL)
     blob = fut.result(timeout=60)
-    msgs_p, roots_p, tmp_p, consumed_p = _decompress_compile_result(blob)
+    msgs_p, roots_p, tmp_p, consumed_p, _node_index = _decompress_compile_result(blob)
 
     # Local
-    _msgs_l, roots_l, tmp_l, _consumed_l = _compile_text(rdl.as_uri(), SAMPLE_RDL)
+    _msgs_l, roots_l, tmp_l, _consumed_l, _node_index = _compile_text(rdl.as_uri(), SAMPLE_RDL)
 
     try:
         assert _fingerprint_roots(roots_p) == _fingerprint_roots(roots_l), (
@@ -289,7 +289,7 @@ def _elaborate_and_report_rss(uri: str, text: str) -> tuple[int, int]:
         sys.path.insert(0, str(sys_path_prefix))
     from systemrdl_lsp.compile import _compile_text
 
-    _msgs, roots, tmp_path, _consumed = _compile_text(uri, text)
+    _msgs, roots, tmp_path, _consumed, _node_index = _compile_text(uri, text)
     rss = _worker_rss_kb()
     tmp_path.unlink(missing_ok=True)
     return len(roots), rss

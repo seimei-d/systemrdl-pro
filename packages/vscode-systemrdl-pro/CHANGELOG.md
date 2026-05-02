@@ -4,6 +4,24 @@ All notable changes to **SystemRDL Pro** are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [SemVer](https://semver.org/).
 
+## [0.28.5] — 2026-05-02
+
+Bumps bundled language server to **systemrdl-lsp 0.20.4**.
+
+### Fixed
+
+- **Cross-URI expand still serialized through the GIL.** Click on a
+  reg in `stress_25k.rdl`, then click on a reg in `sample.rdl` —
+  sample's reg appeared only after stress's resolved. Cause: the
+  `nodeId → RegNode` index was built lazily on first click via
+  `to_thread`, which on a 25k-reg design held the GIL for ~hundreds
+  of ms and starved concurrent expand requests. The index is now
+  built **inside the compile pool worker** and shipped back with the
+  compile result (zlib+pickle preserves shared refs). By the time
+  the viewer can render and click, the index is already on the cache
+  — no on-demand build, no GIL contention. Also strips noisy historical
+  comments left over from the recent perf passes.
+
 ## [0.28.4] — 2026-05-02
 
 ### Fixed

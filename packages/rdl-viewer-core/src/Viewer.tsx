@@ -86,16 +86,8 @@ export function Viewer({ transport }: Props) {
     [root, filter, filterScope, collapsed],
   );
 
-  // Build a key → {reg, path} index once per root. Drives both the
-  // auto-select effect and the `found` lookup below. Pre-fix every
-  // click ran two `findRegByKey` DFS walks (one in this effect, one
-  // in `found`'s useMemo) plus the flatRows rebuild after splice;
-  // on a 25k-reg design that meant noticeable lag from "click reg"
-  // to "Detail panel updated", which the user perceived as slow
-  // expand. With the index, `found` is an O(1) Map.get and the
-  // auto-select effect is also constant-time. Index build is itself
-  // O(N) but only re-runs when the tree identity flips
-  // (re-elaboration or splice), not on every interaction.
+  // key → {reg, path} index built once per root for O(1) selection
+  // lookup. Without this, every click re-walked the whole tree.
   const regIndex = useMemo(() => {
     const m = new Map<string, { reg: Reg; path: string[] }>();
     if (!root) return m;
@@ -237,21 +229,11 @@ export function Viewer({ transport }: Props) {
     setCtxMenu({ x: ev.clientX, y: ev.clientY, items });
   }, [onCopy, transport]);
 
-  // Out-of-band map of populated regs, keyed by `version:nodeId`. Pre-fix
-  // an expand response was spliced INTO the tree state, which forced
-  // `flatRows` and `regIndex` to rebuild (each O(N) in tree size). On a
-  // 25k-reg design that meant a few hundred ms of pure-JS work between
-  // "click reg" and "Detail panel updated", which the user perceived
-  // as the LSP being slow even after the LSP-side expand became O(1).
-  // Now: store the populated reg out-of-band, override `found.reg` with
-  // it, and leave the tree (and therefore flatRows + regIndex) alone.
-  // Cache scoped by version so a fresh elaboration invalidates all
-  // entries cleanly without a manual purge.
+  // Populated regs from `transport.expandNode`, keyed by `version:nodeId`.
+  // Stored out-of-band so we don't splice into the tree state — splicing
+  // would force `flatRows` and `regIndex` to rebuild on every click.
   const [expandedRegs, setExpandedRegs] = useState<Map<string, Reg>>(() => new Map());
 
-  // O(1) lookup via the per-root regIndex. Pre-fix this was a full
-  // O(N) DFS walk on every selection change — three of them per click
-  // on a 25k-reg design (see regIndex comment).
   const found = useMemo(() => {
     const base = selectedKey ? regIndex.get(selectedKey) ?? null : null;
     if (!base) return null;
@@ -266,18 +248,10 @@ export function Viewer({ transport }: Props) {
     return base;
   }, [regIndex, selectedKey, expandedRegs, tree?.version]);
 
-  // T1.7: lazy expansion of placeholder regs. When the user selects a reg
-  // whose `loadState === 'placeholder'`, fire `transport.expandNode` and
-  // record the populated reg in `expandedRegs` so `found` overrides the
-  // placeholder on next render. Per-key in-flight tracking avoids
-  // stampedes when the user rapidly clicks through siblings.
-  //
-  // `useRef`, not `useState` with discarded setter. The Set is
-  // mutated in place (`.add` / `.delete`) and we never want a re-render
-  // off it — that's exactly what refs are for. The previous `useState`
-  // shape implied React-tracked state and broke under StrictMode
-  // double-invoke (the second invocation found the key already present
-  // from the first run and silently dropped the expand request).
+  // useRef (not useState) for the in-flight set: we mutate in place
+  // and never want it to drive re-renders. useState here broke under
+  // StrictMode's double-invoke — the second pass saw the key already
+  // present and silently dropped the expand request.
   const pendingExpansions = useRef<Set<string>>(new Set()).current;
   useEffect(() => {
     if (!found || !tree || !transport.expandNode) return;
@@ -285,8 +259,7 @@ export function Viewer({ transport }: Props) {
     if (reg.loadState !== 'placeholder' || !reg.nodeId) return;
     const nodeId = reg.nodeId;
     const version = tree.version ?? 0;
-    // Key by `version:nodeId` (not raw nodeId): the same nodeId in a fresh
-    // elaboration is a *new* request, even though the string matches.
+    // version:nodeId — same nodeId across elaborations is a fresh request.
     const trackingKey = `${version}:${nodeId}`;
     if (pendingExpansions.has(trackingKey)) return;
     if (expandedRegs.has(trackingKey)) return;
@@ -295,9 +268,7 @@ export function Viewer({ transport }: Props) {
       .then(populated => {
         pendingExpansions.delete(trackingKey);
         setExpandedRegs(prev => {
-          // Drop entries for stale versions to bound memory; only the
-          // current version's entries are reachable through `found`'s
-          // override path anyway.
+          // Keep only current-version entries; older ones are unreachable.
           const next = new Map<string, Reg>();
           const prefix = `${version}:`;
           for (const [k, v] of prev) {
@@ -308,11 +279,8 @@ export function Viewer({ transport }: Props) {
         });
       })
       .catch(() => {
-        // Swallow errors — placeholder stays visible. The common case here
-        // is a soft `outdated` from the server (race against a fresh
-        // elaboration). The new tree from onTreeUpdate has already arrived
-        // or is in flight; nudging React via setExpandedRegs(new Map(prev))
-        // re-runs this effect against the latest tree.version.
+        // Swallow `outdated` and other errors — placeholder stays visible.
+        // Nudge React so this effect re-runs against the new tree.version.
         pendingExpansions.delete(trackingKey);
         setExpandedRegs(prev => new Map(prev));
       });
