@@ -381,9 +381,10 @@ def _compile_text(
     pathlib.Path,
     set[pathlib.Path],
     dict[str, Any],
+    dict[str, Any] | None,
 ]:
     """Compile in-memory buffer text. Returns
-    ``(messages, roots, temp_path, consumed_files, node_index)``.
+    ``(messages, roots, temp_path, consumed_files, node_index, spine_envelope)``.
 
     ``roots`` is a list of RootNode instances — one per top-level ``addrmap``
     *definition* in the file (Decision 3C). ``compiler.elaborate()`` with no
@@ -470,15 +471,24 @@ def _compile_text(
         for sev, msg_text, src_ref in printer.captured
     ]
     consumed = _harvest_consumed_files(roots, printer.captured, tmp_path)
-    # Index built here (in pool worker when threaded) so it ships with
-    # the compile result — by the time the viewer can click, expand is
-    # an O(1) lookup with no GIL contention against other URIs.
-    # Pickle's memo keeps refs aligned across process boundaries.
+    # Build the index AND pre-serialize the spine envelope here. In the
+    # pool path this all happens in the worker process — no GIL contention
+    # with the main process, so other URIs stay unblocked while a 25k-reg
+    # design churns through serialization. Pickle's memo keeps shared
+    # refs aligned across the process boundary. Spine envelope's version
+    # field is a placeholder (0); main process patches it to the real
+    # cache version after cache.put.
     node_index: dict[str, Any] = {}
+    spine_envelope: dict[str, Any] | None = None
     if roots:
-        from .serialize import _build_node_index
+        from .serialize import _build_node_index, _serialize_spine
         node_index = _build_node_index(roots)
-    return messages, roots, tmp_path, consumed, node_index
+        spine_envelope = _serialize_spine(
+            roots, stale=False,
+            path_translate={tmp_path: original_path},
+            version=0,
+        )
+    return messages, roots, tmp_path, consumed, node_index, spine_envelope
 
 
 # ---------------------------------------------------------------------------
@@ -543,6 +553,7 @@ def _decompress_compile_result(
     pathlib.Path,
     set[pathlib.Path],
     dict[str, Any],
+    dict[str, Any] | None,
 ]:
     """Reverse of ``_compile_text_compressed``. Called in the parent
     process to materialize the subprocess's elaborate result."""
@@ -689,15 +700,18 @@ _FIELD_FP_PROPS = (
     "name", "desc",
     # Enum encoding — viewer renders the value table.
     "encode",
+    # Presence — flipping ispresent must invalidate the cached spine.
+    "ispresent",
 )
 _REG_FP_PROPS = (
     "regwidth", "accesswidth", "shared",
-    # Documentation surface — viewer renders these.
     "name", "desc",
+    "ispresent",
 )
 _CONTAINER_FP_PROPS = (
     # Addrmap / Regfile / Mem — viewer shows these in the tree row.
     "name", "desc", "bridge",
+    "ispresent",
 )
 
 
@@ -832,7 +846,7 @@ def _elaborate(path: pathlib.Path) -> list[tuple[Severity, str, Any]]:
         return printer.captured
 
     text = path.read_text(encoding="utf-8")
-    messages, _roots, tmp_path, _consumed, _node_index = _compile_text(path.as_uri(), text)
+    messages, _roots, tmp_path, _consumed, _node_index, _spine = _compile_text(path.as_uri(), text)
     tmp_path.unlink(missing_ok=True)  # legacy path doesn't cache, safe to drop now
     out: list[tuple[Severity, str, Any]] = []
     for m in messages:
@@ -919,6 +933,8 @@ class ElaborationCache:
         text: str,
         temp_path: pathlib.Path | None = None,
         ast_fingerprint: str | None = None,
+        node_index: dict[str, Any] | None = None,
+        serialized: dict[str, Any] | None = None,
     ) -> None:
         old = self._entries.get(uri)
         old_version = 0
@@ -934,6 +950,8 @@ class ElaborationCache:
             version=old_version + 1,
             ast_fingerprint=ast_fingerprint,
             text_canonical=_canonicalize_for_skip(text),
+            node_index=node_index,
+            serialized=serialized,
         )
 
     def clear(self) -> None:

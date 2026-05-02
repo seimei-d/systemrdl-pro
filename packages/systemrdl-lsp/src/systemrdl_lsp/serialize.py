@@ -361,9 +361,14 @@ def _serialize_reg(
         out["accessSummary"] = "/".join(dict.fromkeys(accesses))  # ordered unique
     if have_all_resets:
         out["reset"] = _hex(reg_reset, width_bits)
-    desc = _cached_prop(node, "desc", cache)
-    if desc:
-        out["desc"] = str(desc)
+    # Skip desc on lazy spine — only Detail panel renders it and Detail
+    # gets the full reg via expand_node anyway. desc strings can run to
+    # hundreds of bytes per reg; on a 25k-reg design that's MB of
+    # redundant payload that JS event loop parses synchronously.
+    if not lazy:
+        desc = _cached_prop(node, "desc", cache)
+        if desc:
+            out["desc"] = str(desc)
     inst_src = getattr(inst, "inst_src_ref", None) if inst is not None else None
     src = _src_ref_to_dict(inst_src, path_translate) if inst_src is not None \
         else _cached_def_src_ref(node, cache, path_translate)
@@ -439,9 +444,10 @@ def _serialize_addressable(
         display_name = _cached_prop(node, "name", cache)
         if display_name:
             out["displayName"] = str(display_name)
-        desc = _cached_prop(node, "desc", cache)
-        if desc:
-            out["desc"] = str(desc)
+        if not lazy:
+            desc = _cached_prop(node, "desc", cache)
+            if desc:
+                out["desc"] = str(desc)
         inst_src = getattr(inst, "inst_src_ref", None) if inst is not None else None
         src = _src_ref_to_dict(inst_src, path_translate) if inst_src is not None \
             else _cached_def_src_ref(node, cache, path_translate)

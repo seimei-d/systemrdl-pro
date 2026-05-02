@@ -158,7 +158,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-SERVER_VERSION = "0.20.0"
+from systemrdl_lsp import __version__ as SERVER_VERSION  # noqa: E402  pulled from package __init__
 
 
 def _iter_rdl_files(root: pathlib.Path, exclude_dirs: set[str]):
@@ -611,6 +611,7 @@ def build_server() -> LanguageServer:
         precomputed_conflicts: list[CompilerMessage] | None = None,
         precomputed_fingerprint: str | None = None,
         precomputed_node_index: dict[str, Any] | None = None,
+        precomputed_spine: dict[str, Any] | None = None,
     ) -> bool:
         """Apply elaborate output to cache + diagnostics + viewer notification.
 
@@ -682,14 +683,28 @@ def build_server() -> LanguageServer:
                 # Cache takes ownership of the temp file (it backs lazy
                 # src_ref reads for hover/documentSymbol). Old entry's
                 # temp file is unlinked there.
-                state.cache.put(uri, roots, buffer_text, tmp_path, ast_fingerprint=new_fp)
+                # Patch placeholder fields the pool worker couldn't know.
+                # Compute target version inline so we can stuff index + spine
+                # into the entry atomically through cache.put — without this,
+                # an expand request landing between cache.put and the field
+                # assignment sees node_index=None and triggers the slow
+                # fallback walk on the main process loop.
+                old = state.cache.get(uri)
+                target_version = (old.version if old else 0) + 1
+                if precomputed_spine is not None:
+                    precomputed_spine["version"] = target_version
+                    precomputed_spine["stale"] = has_errors
+                state.cache.put(
+                    uri, roots, buffer_text, tmp_path,
+                    ast_fingerprint=new_fp,
+                    node_index=precomputed_node_index or None,
+                    serialized=precomputed_spine,
+                )
                 if has_errors:
                     state.stale_uris.add(uri)
                 else:
                     state.stale_uris.discard(uri)
                 cached = state.cache.get(uri)
-                if cached is not None and precomputed_node_index:
-                    cached.node_index = precomputed_node_index
                 version_after = cached.version if cached is not None else None
                 _update_include_graph(uri, consumed_files)
                 ast_changed = True
@@ -1055,13 +1070,24 @@ def build_server() -> LanguageServer:
                         asyncio.shield(fut), timeout=state.elaboration_timeout_s
                     )
                     if using_pool:
+                        # Hoist zlib+pickle.loads off the main asyncio
+                        # loop. On a 25k-reg blob (~6 MB compressed) the
+                        # decode is ~2 s of pure-Python work; running it
+                        # synchronously here pinned the GIL and made
+                        # every other in-flight LSP request wait —
+                        # observed in field traces as multi-second expand
+                        # latency on small files concurrent with a big
+                        # file's compile completion.
                         (
                             messages,
                             roots,
                             tmp_path,
                             consumed_files,
                             node_index,
-                        ) = _decompress_compile_result(raw_result)
+                            spine_envelope,
+                        ) = await asyncio.to_thread(
+                            _decompress_compile_result, raw_result
+                        )
                     else:
                         (
                             messages,
@@ -1069,6 +1095,7 @@ def build_server() -> LanguageServer:
                             tmp_path,
                             consumed_files,
                             node_index,
+                            spine_envelope,
                         ) = raw_result
                     break
                 except asyncio.CancelledError:
@@ -1228,6 +1255,7 @@ def build_server() -> LanguageServer:
                     )
                 except Exception:
                     logger.debug("post-compile walks failed", exc_info=True)
+            t_apply_start = time.monotonic()
             ast_changed = _apply_compile_result(
                 uri,
                 buffer_text,
@@ -1238,13 +1266,14 @@ def build_server() -> LanguageServer:
                 precomputed_conflicts=precomputed_conflicts,
                 precomputed_fingerprint=precomputed_fp,
                 precomputed_node_index=node_index,
+                precomputed_spine=spine_envelope,
             )
             t_apply_done = time.monotonic()
             logger.debug(
                 "_full_pass_async %s: compile=%.3fs apply=%.3fs ast_changed=%s",
                 uri,
                 t_compile_done - t_submit,
-                t_apply_done - t_compile_done,
+                t_apply_done - t_apply_start,
                 ast_changed,
             )
             # T3-G: count successful subprocess elaborates and recycle
@@ -1569,21 +1598,30 @@ def build_server() -> LanguageServer:
             return None
         return Hover(contents=MarkupContent(kind=MarkupKind.Markdown, value=markdown))
 
+    # NOTE: these handlers used to be sync `def`. Pygls calls sync handlers
+    # directly on the asyncio event loop, blocking it for the full handler
+    # duration. On a 25k-reg design that meant `documentSymbol`, `foldingRange`,
+    # `inlayHint`, `codeLens`, and `workspace/symbol` each held the loop
+    # for several seconds — and any concurrent request (including expand)
+    # waited that whole time. Field-reported as "click reg in features
+    # waits 8+ seconds because LSP is busy walking stress's tree". Async
+    # wrappers + asyncio.to_thread offload the CPU walk so the loop stays
+    # responsive.
     @server.feature("textDocument/documentSymbol")
-    def _on_document_symbol(_ls: LanguageServer, params: Any) -> list[Any]:
+    async def _on_document_symbol(_ls: LanguageServer, params: Any) -> list[Any]:
         cached = state.cache.get(params.text_document.uri)
         if cached is None or not cached.roots:
             return []
-        return _document_symbols(cached.roots)
+        return await asyncio.to_thread(_document_symbols, cached.roots)
 
     @server.feature("textDocument/foldingRange")
-    def _on_folding(_ls: LanguageServer, params: Any) -> list[FoldingRange]:
+    async def _on_folding(_ls: LanguageServer, params: Any) -> list[FoldingRange]:
         cached = state.cache.get(params.text_document.uri)
         text = cached.text if cached is not None else _read_buffer(params.text_document.uri) or ""
-        return _folding_ranges_from_text(text)
+        return await asyncio.to_thread(_folding_ranges_from_text, text)
 
     @server.feature("textDocument/inlayHint")
-    def _on_inlay_hint(_ls: LanguageServer, params: Any) -> list[InlayHint]:
+    async def _on_inlay_hint(_ls: LanguageServer, params: Any) -> list[InlayHint]:
         cached = state.cache.get(params.text_document.uri)
         if cached is None or not cached.roots:
             return []
@@ -1592,24 +1630,29 @@ def build_server() -> LanguageServer:
         except ValueError:
             return []
         path = cached.temp_path or target_path
-        return _inlay_hints_for_addressables(cached.roots, path, cached.text)
+        return await asyncio.to_thread(
+            _inlay_hints_for_addressables, cached.roots, path, cached.text,
+        )
 
     @server.feature("textDocument/codeLens")
-    def _on_code_lens(_ls: LanguageServer, params: Any) -> list[CodeLens]:
+    async def _on_code_lens(_ls: LanguageServer, params: Any) -> list[CodeLens]:
         cached = state.cache.get(params.text_document.uri)
         if cached is None or not cached.roots:
             return []
         path = cached.temp_path or _uri_to_path(params.text_document.uri)
-        return _code_lenses_for_addrmaps(cached.roots, path)
+        return await asyncio.to_thread(_code_lenses_for_addrmaps, cached.roots, path)
 
     @server.feature("workspace/symbol")
-    def _on_workspace_symbol(_ls: LanguageServer, params: Any) -> list[SymbolInformation]:
+    async def _on_workspace_symbol(_ls: LanguageServer, params: Any) -> list[SymbolInformation]:
         query = getattr(params, "query", "") or ""
-        out: list[SymbolInformation] = []
-        for uri, entry in state.cache._entries.items():
-            if entry.roots:
-                out.extend(_workspace_symbols_for_uri(uri, entry.roots, query))
-        return out
+        entries = list(state.cache._entries.items())
+        def collect() -> list[SymbolInformation]:
+            out: list[SymbolInformation] = []
+            for uri, entry in entries:
+                if entry.roots:
+                    out.extend(_workspace_symbols_for_uri(uri, entry.roots, query))
+            return out
+        return await asyncio.to_thread(collect)
 
     @server.feature("textDocument/completion")
     def _on_completion(_ls: LanguageServer, params: Any) -> Any:
@@ -2015,7 +2058,7 @@ def build_server() -> LanguageServer:
             token_modifiers=TOKEN_MODIFIERS,
         ),
     )
-    def _on_semantic_tokens(_ls: LanguageServer, params: Any) -> SemanticTokens:
+    async def _on_semantic_tokens(_ls: LanguageServer, params: Any) -> SemanticTokens:
         """Compute semantic tokens for the buffer.
 
         ``params: Any`` (not ``SemanticTokensParams``) is deliberate — pygls
@@ -2025,6 +2068,10 @@ def build_server() -> LanguageServer:
         producing ``TypeError: missing 1 required positional argument``
         on every keystroke (visible as editor-wide lag because VSCode
         retries the failing request constantly).
+
+        Async + to_thread because the tokenizer walks the entire buffer
+        text; on an 880KB file that pinned the asyncio loop for ~hundreds
+        of ms, blocking concurrent requests like rdl/expandNode.
         """
         try:
             uri: str | None = None
@@ -2040,7 +2087,7 @@ def build_server() -> LanguageServer:
             if text is None:
                 cached = state.cache.get(uri)
                 text = cached.text if cached is not None else ""
-            data = _semantic_tokens_for_text(text)
+            data = await asyncio.to_thread(_semantic_tokens_for_text, text)
             if len(data) % 5 != 0:
                 logger.error(
                     "semanticTokens/full: encoder produced %d ints (not a multiple of 5)",

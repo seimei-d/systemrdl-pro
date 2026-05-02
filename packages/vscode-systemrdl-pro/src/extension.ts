@@ -647,10 +647,6 @@ async function handleWebviewMessage(msg: WebviewMessage, panelUri: string): Prom
     const label = msg.label || 'value';
     vscode.window.setStatusBarMessage(`Copied ${label}: ${msg.text}`, 2_000);
   } else if (msg.type === 'expandNode') {
-    // T1.6: viewer asked to flesh out a placeholder reg's fields[]. Forward
-    // to the LSP using the panel's URI (implicit — webview doesn't track it),
-    // post the result back to the webview, and splice it into entry.lastTree
-    // so subsequent sinceVersion checks stay coherent.
     if (!client) return;
     const entry = memoryMapPanels.get(panelUri);
     if (!entry) return;
@@ -685,9 +681,6 @@ async function handleWebviewMessage(msg: WebviewMessage, panelUri: string): Prom
         nodeId: msg.nodeId,
         reg,
       });
-      if (entry.lastTree) {
-        spliceExpandedNode(entry.lastTree, msg.nodeId, reg);
-      }
     } catch (err) {
       outputChannel?.warn(`rdl/expandNode failed for ${msg.nodeId}: ${err}`);
       safePostTo(entry, {
@@ -700,28 +693,6 @@ async function handleWebviewMessage(msg: WebviewMessage, panelUri: string): Prom
   }
 }
 
-/** Walk an ElaboratedTree and replace the matching placeholder reg with
- * the expanded full reg dict. Mutates `tree` in place. T1.6: keeps
- * `entry.lastTree` consistent with what the webview now displays so the
- * next sinceVersion check on the same version returns `unchanged` correctly.
- */
-function spliceExpandedNode(tree: ElaboratedTree, nodeId: string, expanded: unknown): void {
-  type Walkable = { nodeId?: string; children?: unknown[]; fields?: unknown[]; loadState?: string; kind?: string };
-  const stack: Walkable[] = [...((tree.roots as Walkable[]) ?? [])];
-  while (stack.length > 0) {
-    const node = stack.pop()!;
-    if (node.kind === 'reg' && node.nodeId === nodeId && node.loadState === 'placeholder') {
-      Object.assign(node, expanded);
-      // expand_node response intentionally omits loadState — we must clear
-      // the placeholder marker explicitly, otherwise next sinceVersion check
-      // ships the still-marked node back to the webview and the viewer
-      // re-fires expand in a loop.
-      node.loadState = 'loaded';
-      return;
-    }
-    if (Array.isArray(node.children)) stack.push(...(node.children as Walkable[]));
-  }
-}
 
 // lazy-create the decoration on first activate() so we can
 // push it to context.subscriptions for proper disposal. Pre-T4-B this
