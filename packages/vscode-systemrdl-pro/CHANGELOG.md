@@ -4,6 +4,65 @@ All notable changes to **SystemRDL Pro** are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [SemVer](https://semver.org/).
 
+## [0.27.0] — 2026-05-02
+
+T4-A — six Tier-1 critical bug fixes from the post-T3 multi-agent
+code review (`docs/code-review-2026-05-02.md`, local-only). Each one
+was a real bug nobody had reported yet but every one would surface
+eventually.
+
+### Fixed
+
+- **C1 — Decoder showed `0x0` for fields above bit 31 of 64-bit
+  registers.** JavaScript `>>>` is a 32-bit shift; a 64-bit reg with
+  a field at `lsb >= 32` silently truncated to zero regardless of
+  input. Decoder now routes >32-bit registers through `BigInt`
+  arithmetic; ≤32-bit registers stay on the cheaper `Number` path.
+- **C2 — Lazy expand left placeholder spinner stuck on screen.**
+  `spliceExpandedReg` mutated the parent's `children` array in place
+  and only spread the top-level `tree` envelope, so `useMemo([root])`
+  callers (`buildFlatList` → `flatRows`) didn't recompute and the
+  tree kept rendering the placeholder row even though the reg's data
+  was already in memory. Splice now returns a fresh tree with every
+  container on the root → reg path cloned (immutable update path).
+- **C3 — `expandNode` race lost responses on rapid clicks.**
+  `expandResolvers` was keyed on `nodeId` only — a second click for
+  the same node (or a v2 elaborate landing while v1's expand was in
+  flight) overwrote the resolver, leaking the prior promise so the
+  spinner never cleared. Resolvers now keyed by `version+":"+nodeId`,
+  and rapid duplicate clicks short-circuit to the existing in-flight
+  promise instead of posting a second LSP request and overwriting
+  the resolver.
+- **C4 — `getTree()` rejection silently hung the viewer.** The
+  `.catch(() => {})` swallowed every failure mode (LSP startup
+  failure, transport timeout). The viewer now renders an error pane
+  with the message + a Retry button; live tree updates clear the
+  error automatically when the transport recovers.
+
+### Fixed (in `systemrdl-lsp` 0.19.0)
+
+- **C5 — Standalone CLI binary served HTTP 500 on every static
+  asset.** `VIEWER_CORE_DIST` was hardcoded to a path relative to
+  the source tree; after `bun build` produced `dist/rdl-viewer.js`
+  the path no longer resolved. Build now copies viewer assets into
+  `dist/viewer/` next to the binary, and `VIEWER_CORE_DIST` prefers
+  that location with the dev-source path as fallback.
+- **C6 — LSP shutdown / cancellation leaked tmp files and stuck the
+  "Re-elaborating" spinner.** `_full_pass_async` sent
+  `rdl/elaborationStarted` then awaited the shielded subprocess
+  future; `CancelledError` propagated out without sending `Finished`
+  (spinner stuck) and without registering a tmp-file cleanup
+  callback (subprocess kept running, wrote tmp, no-one unlinked it).
+  New explicit `except CancelledError` catches the case, registers
+  a done-callback that unlinks the tmp when the late result arrives,
+  emits `Finished`, then re-raises so the cancellation still
+  propagates to whatever requested it.
+
+### Tests
+
+138 pass (137 baseline + 1 new in `tests/test_perf_t3.py` covering
+the cancellation path).
+
 ## [0.26.4] — 2026-05-02
 
 ### Fixed (in `systemrdl-lsp` 0.18.4)

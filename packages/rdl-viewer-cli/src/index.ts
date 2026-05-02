@@ -31,11 +31,31 @@ import { existsSync, readFileSync, watch } from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 
-// Resolve the @systemrdl-pro/viewer-core build output. In dev (running from
-// packages/rdl-viewer-cli/src/index.ts) this is two directories up; once we
-// publish the CLI as a standalone binary the build step will copy the assets
-// next to the bundled JS and this path will need to change.
-const VIEWER_CORE_DIST = path.resolve(import.meta.dir, '../../rdl-viewer-core/dist');
+// Resolve the @systemrdl-pro/viewer-core build output.
+//
+// Two layouts must work:
+//
+//   1. Dev — `bun run start` from `packages/rdl-viewer-cli/src/index.ts`.
+//      `import.meta.dir` is `…/packages/rdl-viewer-cli/src`. The viewer
+//      assets live two directories up at
+//      `…/packages/rdl-viewer-core/dist`.
+//
+//   2. Built binary — `dist/rdl-viewer.js` produced by `bun build`. The
+//      `copy-assets` build step puts the viewer assets at
+//      `dist/viewer/` next to the binary, so `import.meta.dir` is
+//      `…/packages/rdl-viewer-cli/dist` and we look in
+//      `…/packages/rdl-viewer-cli/dist/viewer`.
+//
+// We try the bundled-next-to-binary path first, fall back to the dev
+// path. Pre-T4-A C5 only the dev path was attempted, which silently
+// served HTTP 500 on every `/viewer.js` request from a published
+// binary because the relative path didn't resolve to a real directory.
+const VIEWER_CORE_DIST = (() => {
+  const bundled = path.resolve(import.meta.dir, 'viewer');
+  if (existsSync(bundled)) return bundled;
+  const dev = path.resolve(import.meta.dir, '../../rdl-viewer-core/dist');
+  return dev;
+})();
 
 type CliArgs = {
   file: string;

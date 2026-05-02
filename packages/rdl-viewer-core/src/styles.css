@@ -452,6 +452,11 @@ html, body { margin: 0; padding: 0; background: var(--rdl-bg); color: var(--rdl-
 .rdl-empty p { margin: 4px 0; color: var(--rdl-dim); font-size: 13px; }
 .rdl-empty code { font-family: var(--rdl-font-mono); background: var(--rdl-panel);
   padding: 1px 5px; border-radius: 2px; }
+.rdl-load-error p strong { color: var(--rdl-warning); }
+.rdl-retry-btn { margin-top: 12px; padding: 4px 14px; font: inherit;
+  background: var(--rdl-panel); color: var(--rdl-fg); border: 1px solid var(--rdl-border);
+  border-radius: 3px; cursor: pointer; }
+.rdl-retry-btn:hover { background: var(--rdl-chrome); border-color: var(--rdl-accent); }
 
 .rdl-ctx-menu { position: fixed; z-index: 1000; background: var(--rdl-panel);
   border: 1px solid var(--rdl-border); border-radius: 4px; min-width: 180px;

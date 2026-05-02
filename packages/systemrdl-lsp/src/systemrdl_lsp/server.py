@@ -157,7 +157,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-SERVER_VERSION = "0.18.4"
+SERVER_VERSION = "0.19.0"
 
 
 def _iter_rdl_files(root: pathlib.Path, exclude_dirs: set[str]):
@@ -873,14 +873,18 @@ def build_server() -> LanguageServer:
 
             _check_perl_pre_flight(buffer_text)
 
-            # Tell the client elaboration is starting so it can paint a
-            # "re-elaborating" indicator while keeping the existing tree
-            # interactive. Paired with rdl/elaborationFinished in the finally
-            # block below so the indicator clears on every termination path
-            # (success, timeout, exception). Best-effort: a missed notification
-            # only means a slightly stale UI, never broken state.
+            # T4-A C6: ``started_notified`` + try/finally below guarantee
+            # ``rdl/elaborationFinished`` fires on EVERY exit path —
+            # including ``CancelledError`` from LSP shutdown or a rapid
+            # restart. Pre-T4-A cancellation propagated up
+            # unconditionally and the viewer's "re-elaborating" spinner
+            # stayed visible until window reload, plus the subprocess
+            # tmp file was leaked because no done-callback was attached
+            # in the cancel path.
+            started_notified = False
             try:
                 server.protocol.notify("rdl/elaborationStarted", {"uri": uri})
+                started_notified = True
             except Exception:
                 logger.debug("could not send elaborationStarted", exc_info=True)
 
@@ -896,6 +900,49 @@ def build_server() -> LanguageServer:
             # done-callback cleans up the orphan tmp file when the
             # late result eventually arrives.
             t_submit = time.monotonic()
+            # T4-A C6: track the latest pool future at this scope so the
+            # outer cancellation handler can register a tmp-cleanup
+            # callback on it. Reassigned by ``_submit_compile`` on
+            # every BrokenProcessPool retry.
+            pool_fut: Any = None
+            ast_changed = False
+
+            def _register_late_cleanup(pf: Any) -> None:
+                """Attach a done-callback that unlinks the subprocess's
+                tmp file when the (still in-flight) future eventually
+                finishes. Used for the cancellation path AND the
+                timeout path — both leave the subprocess running past
+                the point where the parent stopped waiting, with a
+                tmp file that has no other owner. ``add_done_callback``
+                fires immediately if ``pf`` is already done, so this
+                also covers the rare race where cancellation and
+                completion arrive in the same tick.
+                """
+                if pf is None:
+                    return
+                def _cleanup(f: Any) -> None:
+                    try:
+                        result = f.result()
+                    except BaseException:
+                        return
+                    if isinstance(result, (bytes, bytearray)):
+                        try:
+                            decoded = _decompress_compile_result(result)
+                        except Exception:
+                            return
+                        late_tmp = decoded[2] if len(decoded) >= 3 else None
+                    else:
+                        late_tmp = result[2] if len(result) >= 3 else None
+                    if late_tmp is None:
+                        return
+                    try:
+                        late_tmp.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                try:
+                    pf.add_done_callback(_cleanup)
+                except Exception:
+                    logger.debug("could not attach late-cleanup callback", exc_info=True)
 
             def _submit_compile() -> tuple[bool, asyncio.Future, Any]:
                 """Submit one elaborate attempt; return
@@ -980,6 +1027,21 @@ def build_server() -> LanguageServer:
                     else:
                         messages, roots, tmp_path, consumed_files = raw_result
                     break
+                except asyncio.CancelledError:
+                    # T4-A C6: LSP shutdown / pygls task-cancel arrived
+                    # mid-elaborate. The shielded subprocess is still
+                    # running and will eventually emit its tmp file —
+                    # register a callback so the tmp gets unlinked
+                    # when it does. Also pair the elaborationStarted
+                    # notification with Finished so the viewer's
+                    # spinner clears (the next session reload would
+                    # otherwise inherit a stale spinner state from
+                    # the persisted webview). Re-raise so the
+                    # cancellation propagates to whatever requested it.
+                    _register_late_cleanup(pool_fut)
+                    if started_notified:
+                        _emit_elaboration_finished(uri)
+                    raise
                 except broken_pool_excs as exc:
                     if recovery_attempted or not using_pool:
                         logger.exception(

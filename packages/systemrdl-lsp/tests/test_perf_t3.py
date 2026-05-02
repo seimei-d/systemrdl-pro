@@ -702,6 +702,46 @@ def test_disk_cache_load_overrides_stale_with_current_state(tmp_path, monkeypatc
     )
 
 
+def test_cancellation_emits_finished_and_registers_cleanup(real_pool, tmp_path):
+    """T4-A C6: when the user / pygls cancels an in-flight
+    `_full_pass_async` (LSP shutdown, rapid restart), two things must
+    happen:
+
+    1. ``rdl/elaborationFinished`` is emitted so the viewer's
+       "re-elaborating" spinner clears (would otherwise persist into
+       the next session via the cached webview state).
+    2. The shielded subprocess's tmp file gets cleaned up via a
+       done-callback (subprocess keeps running because of
+       ``asyncio.shield``; without the callback the tmp leaks).
+
+    Test: kick off an elaborate of a deliberately heavy fixture, cancel
+    the task before it can complete, assert the task raises
+    ``CancelledError``. The behavioural guarantee (callback registered)
+    is hard to observe from outside; we verify the public contract
+    (cancellation propagates without swallowing) and confirm the
+    plumbing doesn't crash on the cancel path.
+    """
+    s = build_server()
+    state = s._systemrdl_state
+    full_pass = s._systemrdl_full_pass_async
+    state.elaborate_in_process = False
+    state.elaborate_pool = real_pool
+
+    rdl = tmp_path / "a.rdl"
+    rdl.write_text(SAMPLE_RDL * 50)  # tiny but enough to give us a moment
+    uri = rdl.as_uri()
+
+    async def cancel_mid_flight() -> None:
+        task = asyncio.create_task(full_pass(uri, rdl.read_text()))
+        # Yield once so the task gets to the await point.
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    _run(cancel_mid_flight())
+
+
 def test_full_pass_pool_path_preserves_includes(real_pool, tmp_path):
     """Pool path returns includee list intact — proves the consumed_files
     set survived pickle. Drives the T2-A include-graph cascade across

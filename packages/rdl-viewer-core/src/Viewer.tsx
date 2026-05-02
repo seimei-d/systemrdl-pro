@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import type { ElaboratedTree, Reg, SourceLoc, Transport, TreeNode } from './types';
+import type { Addrmap, ElaboratedTree, Reg, SourceLoc, Transport, TreeNode } from './types';
 import { findFirstReg, findRegByKey, isContainer, subtreeMatches, type FilterScope } from './util';
 import { buildFlatList, FlatRow, Tree } from './Tree';
 import { Detail } from './Detail';
@@ -17,14 +17,35 @@ export function Viewer({ transport }: Props) {
   const [ctxMenu, setCtxMenu] = useState<CtxMenuState>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [isElaborating, setIsElaborating] = useState(false);
+  // T4-A C4: surface getTree() rejections to the user. Pre-T4-A this was
+  // ``.catch(() => {})``, so any LSP startup failure or transport
+  // hiccup left the viewer rendering "Loading…" forever with zero
+  // signal. Now the rejection is captured and rendered as an error
+  // banner with a retry handle. Fixed in 0.26.5+.
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [retryCounter, setRetryCounter] = useState(0);
 
   // Initial fetch + live updates.
   useEffect(() => {
     let mounted = true;
-    transport.getTree().then(t => { if (mounted) setTree(t); }).catch(() => {});
-    const off = transport.onTreeUpdate(t => { if (mounted) setTree(t); });
+    setLoadError(null);
+    transport.getTree()
+      .then(t => { if (mounted) setTree(t); })
+      .catch(err => {
+        if (!mounted) return;
+        const msg = err instanceof Error ? err.message : String(err);
+        setLoadError(msg || 'unknown error');
+      });
+    const off = transport.onTreeUpdate(t => {
+      if (!mounted) return;
+      setTree(t);
+      // A live update means the transport is healthy again — clear
+      // any prior load error banner so the recovered tree renders
+      // without leftover noise.
+      setLoadError(null);
+    });
     return () => { mounted = false; off(); };
-  }, [transport]);
+  }, [transport, retryCounter]);
 
   // Re-elaborate indicator. The host signals start/finish of a full pass; the
   // banner stays up while we wait so the user knows a fresh tree is on the
@@ -217,11 +238,13 @@ export function Viewer({ transport }: Props) {
         pendingExpansions.delete(trackingKey);
         setTree(currentTree => {
           if (!currentTree) return currentTree;
-          // Build a new top-level wrapper so React notices the change.
-          // Mutate nested nodes in place — they're not part of React state
-          // identity, only the outer envelope is.
-          spliceExpandedReg(currentTree, nodeId, populated);
-          return { ...currentTree };
+          // T4-A C2: spliceExpandedReg returns a fully-cloned tree along
+          // the root → reg path. The new tree object is what flips
+          // React state identity; downstream useMemos keyed on `root`
+          // (buildFlatList → flatRows, etc.) now see a fresh reference
+          // and recompute, fixing the "expand stays as placeholder
+          // even after server returned data" stuck-spinner case.
+          return spliceExpandedReg(currentTree, nodeId, populated);
         });
       })
       .catch(() => {
@@ -244,6 +267,26 @@ export function Viewer({ transport }: Props) {
   // addrmap" and we let the existing message render.
   const stillElaboratingFirstPass =
     !tree || (tree.version === 0 && (tree.roots ?? []).length === 0);
+  // T4-A C4: error trumps loading — if getTree rejected, surface the
+  // error with a retry button instead of an indefinite spinner. Retry
+  // bumps ``retryCounter`` which re-runs the fetch effect.
+  if (loadError && !tree) {
+    return (
+      <div className="rdl-viewer">
+        <div className="rdl-empty rdl-load-error" role="alert">
+          <p><strong>⚠ Could not load elaborated tree</strong></p>
+          <p style={{ opacity: 0.85, fontSize: '0.9em' }}>{loadError}</p>
+          <button
+            type="button"
+            className="rdl-retry-btn"
+            onClick={() => { setLoadError(null); setRetryCounter(n => n + 1); }}
+          >
+            Retry
+          </button>
+        </div>
+      </div>
+    );
+  }
   if (stillElaboratingFirstPass) {
     return (
       <div className="rdl-viewer">
@@ -368,40 +411,69 @@ function filterScopePlaceholder(scope: FilterScope): string {
 }
 
 /**
- * T1.7: walk a tree and replace the placeholder Reg with the populated one
- * returned by `transport.expandNode`. Replaces the reference inside the
- * parent's `children` array (rather than `Object.assign`-ing in place) so
- * downstream `useMemo`s keyed on the reg reference recompute. Mutating in
- * place was leaving the Decoder panel showing stale results after a register
- * switch, because Detail's `decoded = useMemo(() => decode(reg, …), [reg])`
- * was bailing out on a referentially-equal reg whose fields had silently
- * grown under it.
+ * T1.7 / T4-A C2: walk a tree and replace the placeholder Reg with the
+ * populated one returned by `transport.expandNode`. Returns a NEW tree
+ * with every container on the root → reg path freshly cloned, so that
+ * `useMemo`s keyed on the root reference (`buildFlatList` → `flatRows`)
+ * actually recompute.
+ *
+ * Pre-T4-A this function mutated `parent.children[i]` in place and
+ * relied on a shallow `{ ...currentTree }` spread to flip top-level
+ * identity. That was enough to make `Detail`'s `useMemo([reg])`
+ * recompute (the reg itself was a fresh object), but the containers
+ * between root and reg kept their identity — so `flatRows`,
+ * `filterMatchCount`, and any other downstream memo on `root` would
+ * silently bail out, leaving the rendered tree showing the placeholder
+ * row even though the reg's data was already in memory.
+ *
+ * The fix is the standard immutable update path: whenever we descend
+ * into a container on the way to the target, replace its `children`
+ * with a new array; whenever we fail to find the target in a subtree,
+ * return the original container reference unchanged so unrelated
+ * subtrees keep their memoization.
  */
-function spliceExpandedReg(tree: ElaboratedTree, nodeId: string, populated: Reg): void {
+function spliceExpandedReg(
+  tree: ElaboratedTree,
+  nodeId: string,
+  populated: Reg,
+): ElaboratedTree {
   type Walkable = TreeNode & { children?: TreeNode[] };
-  const stack: Walkable[] = [...((tree.roots ?? []) as Walkable[])];
-  while (stack.length > 0) {
-    const node = stack.pop()!;
-    const kids = ('children' in node && Array.isArray(node.children))
-      ? node.children
-      : null;
-    if (kids) {
-      for (let i = 0; i < kids.length; i++) {
-        const child = kids[i] as TreeNode;
-        if (
-          child.kind === 'reg'
-          && child.nodeId === nodeId
-          && child.loadState === 'placeholder'
-        ) {
-          // Server omits loadState on expand responses — clear the placeholder
-          // marker explicitly so the next render path treats this as loaded.
-          kids[i] = { ...populated, loadState: 'loaded' } as TreeNode;
-          return;
-        }
+  let foundAny = false;
+
+  function visit(node: Walkable): Walkable {
+    const kids = node.children;
+    if (!Array.isArray(kids)) return node;
+    let mutated = false;
+    const newKids = new Array<TreeNode>(kids.length);
+    for (let i = 0; i < kids.length; i++) {
+      const child = kids[i];
+      if (
+        child.kind === 'reg'
+        && child.nodeId === nodeId
+        && child.loadState === 'placeholder'
+      ) {
+        // Server omits `loadState` on expand responses — clear the
+        // placeholder marker explicitly.
+        newKids[i] = { ...populated, loadState: 'loaded' } as TreeNode;
+        mutated = true;
+        foundAny = true;
+      } else {
+        const next = visit(child as Walkable);
+        if (next !== child) mutated = true;
+        newKids[i] = next as TreeNode;
       }
-      stack.push(...(kids as Walkable[]));
     }
+    return mutated ? ({ ...node, children: newKids } as Walkable) : node;
   }
+
+  const oldRoots = (tree.roots ?? []) as Walkable[];
+  const newRoots = oldRoots.map(r => visit(r));
+  if (!foundAny) return tree;
+  // tree.roots is typed as `Addrmap[]` in the schema. The walk preserves
+  // the Walkable shape (only mutates `children`) so each newRoots[i] is
+  // structurally still an Addrmap even though we route through the
+  // looser TreeNode union internally. Cast back at the boundary.
+  return { ...tree, roots: newRoots as unknown as Addrmap[] };
 }
 
 /**

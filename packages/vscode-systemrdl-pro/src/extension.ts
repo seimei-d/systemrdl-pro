@@ -549,14 +549,25 @@ async function handleWebviewMessage(msg: WebviewMessage, panelUri: string): Prom
       // to the error channel so the viewer clears in-flight tracking and
       // retries on the next onTreeUpdate (which will carry a fresh version).
       if (reg && typeof reg === 'object' && (reg as { outdated?: boolean }).outdated) {
+        // T4-A C3: echo the version back so the webview can route the
+        // result to the right `${version}:${nodeId}` resolver key. The
+        // pre-T4-A wire shape (no version field) keyed only on
+        // ``nodeId`` and silently overwrote prior resolvers when the
+        // user double-clicked or when a v2 elaborate landed mid-flight.
         safePostTo(entry, {
           type: 'expandNodeError',
+          version: msg.version,
           nodeId: msg.nodeId,
           message: 'outdated',
         });
         return;
       }
-      safePostTo(entry, { type: 'expandNodeResult', nodeId: msg.nodeId, reg });
+      safePostTo(entry, {
+        type: 'expandNodeResult',
+        version: msg.version,
+        nodeId: msg.nodeId,
+        reg,
+      });
       if (entry.lastTree) {
         spliceExpandedNode(entry.lastTree, msg.nodeId, reg);
       }
@@ -564,6 +575,7 @@ async function handleWebviewMessage(msg: WebviewMessage, panelUri: string): Prom
       outputChannel?.warn(`rdl/expandNode failed for ${msg.nodeId}: ${err}`);
       safePostTo(entry, {
         type: 'expandNodeError',
+        version: msg.version,
         nodeId: msg.nodeId,
         message: String(err),
       });
@@ -859,13 +871,16 @@ function renderViewerHtml(
     const elaboratingListeners = new Set();
     let pendingTree = null;
     let elaboratingState = false;
-    // T1.7 wiring: per-nodeId resolvers for the lazy expandNode round-trip.
-    // Webview posts {type:'expandNode', version, nodeId}; host LSP-forwards
-    // and posts back {type:'expandNodeResult', nodeId, reg} or {type:'expandNodeError'}.
-    // We promise-resolve the matching pending request so transport.expandNode
-    // returns the populated Reg the viewer can splice into its tree state.
+    // T4-A C3: per-(version,nodeId) resolvers for the lazy expandNode
+    // round-trip. Pre-T4-A keyed on nodeId only — rapid clicks and
+    // cross-version races overwrote pending resolvers and leaked
+    // promises (spinner stuck forever). Now keyed by version+":"+nodeId
+    // so v1 results don't resolve v2 promises, and rapid duplicate
+    // clicks for the same key short-circuit to the existing in-flight
+    // promise instead of overwriting its resolver.
     const expandResolvers = new Map();
     const expandRejectors = new Map();
+    const expandPending   = new Map();
 
     window.addEventListener('message', (e) => {
       const m = e.data;
@@ -878,14 +893,18 @@ function renderViewerHtml(
         elaboratingState = !!m.state;
         elaboratingListeners.forEach(cb => cb(elaboratingState));
       } else if (m && m.type === 'expandNodeResult') {
-        const r = expandResolvers.get(m.nodeId);
-        expandResolvers.delete(m.nodeId);
-        expandRejectors.delete(m.nodeId);
+        const key = (m.version != null ? m.version : '?') + ':' + m.nodeId;
+        const r = expandResolvers.get(key);
+        expandResolvers.delete(key);
+        expandRejectors.delete(key);
+        expandPending.delete(key);
         if (r) r(m.reg);
       } else if (m && m.type === 'expandNodeError') {
-        const j = expandRejectors.get(m.nodeId);
-        expandResolvers.delete(m.nodeId);
-        expandRejectors.delete(m.nodeId);
+        const key = (m.version != null ? m.version : '?') + ':' + m.nodeId;
+        const j = expandRejectors.get(key);
+        expandResolvers.delete(key);
+        expandRejectors.delete(key);
+        expandPending.delete(key);
         if (j) j(new Error(m.message || 'expandNode failed'));
       }
     });
@@ -913,11 +932,19 @@ function renderViewerHtml(
       reveal(source) { vscode.postMessage({ type: 'reveal', source }); },
       copy(text, label) { vscode.postMessage({ type: 'copy', text, label }); },
       expandNode(version, nodeId) {
-        return new Promise((resolve, reject) => {
-          expandResolvers.set(nodeId, resolve);
-          expandRejectors.set(nodeId, reject);
-          vscode.postMessage({ type: 'expandNode', version, nodeId });
+        const key = version + ':' + nodeId;
+        // Dedup in-flight requests for the same (version,nodeId): rapid
+        // double-clicks must NOT post two LSP requests and overwrite
+        // the resolver of the first.
+        const existing = expandPending.get(key);
+        if (existing) return existing;
+        const p = new Promise((resolve, reject) => {
+          expandResolvers.set(key, resolve);
+          expandRejectors.set(key, reject);
         });
+        expandPending.set(key, p);
+        vscode.postMessage({ type: 'expandNode', version, nodeId });
+        return p;
       },
     };
 
