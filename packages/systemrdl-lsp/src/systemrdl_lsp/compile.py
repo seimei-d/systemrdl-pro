@@ -389,8 +389,15 @@ class CachedElaboration:
     version: int = 0
     # Serialized JSON dict, lazily populated on first ``rdl/elaboratedTree``
     # request and re-used for every subsequent same-version request. Cleared
-    # whenever the entry is replaced.
+    # whenever the entry is replaced. May be either a full envelope (legacy
+    # client) or a spine envelope (lazy-mode client) — the server picks one
+    # consistently per session based on client capability.
     serialized: dict[str, Any] | None = None
+    # T1.5: per-node memoization for ``rdl/expandNode`` responses. Keyed by
+    # ``nodeId`` (the base-36 string clients get from the spine). Lazily
+    # initialized on first expand request. Cleared whenever the entry is
+    # replaced (next elaboration regenerates ids so old entries are stale).
+    expanded: dict[str, dict[str, Any]] | None = None
 
 
 class ElaborationCache:

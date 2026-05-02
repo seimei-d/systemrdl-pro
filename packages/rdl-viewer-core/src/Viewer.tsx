@@ -16,6 +16,7 @@ export function Viewer({ transport }: Props) {
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
   const [ctxMenu, setCtxMenu] = useState<CtxMenuState>(null);
   const [toast, setToast] = useState<string | null>(null);
+  const [isElaborating, setIsElaborating] = useState(false);
 
   // Initial fetch + live updates.
   useEffect(() => {
@@ -23,6 +24,14 @@ export function Viewer({ transport }: Props) {
     transport.getTree().then(t => { if (mounted) setTree(t); }).catch(() => {});
     const off = transport.onTreeUpdate(t => { if (mounted) setTree(t); });
     return () => { mounted = false; off(); };
+  }, [transport]);
+
+  // Re-elaborate indicator. The host signals start/finish of a full pass; the
+  // banner stays up while we wait so the user knows a fresh tree is on the
+  // way (the existing tree remains interactive — only visual feedback).
+  useEffect(() => {
+    if (!transport.onElaborating) return;
+    return transport.onElaborating(setIsElaborating);
   }, [transport]);
 
   // Optional editor cursor sync.
@@ -177,7 +186,65 @@ export function Viewer({ transport }: Props) {
 
   const found = root && selectedKey ? findRegByKey(root, selectedKey) : null;
 
-  if (!tree) {
+  // T1.7: lazy expansion of placeholder regs. When the user selects a reg
+  // whose `loadState === 'placeholder'`, fire `transport.expandNode` and
+  // splice the populated reg into the tree state so Detail re-renders with
+  // real fields. Per-nodeId in-flight tracking avoids stampedes when the
+  // user rapidly clicks through siblings.
+  const [pendingExpansions] = useState<Set<string>>(() => new Set());
+  useEffect(() => {
+    if (!found || !tree || !transport.expandNode) return;
+    const reg = found.reg;
+    if (reg.loadState !== 'placeholder' || !reg.nodeId) return;
+    const nodeId = reg.nodeId;
+    const version = tree.version ?? 0;
+    // Key by `version:nodeId` (not raw nodeId): the same nodeId in a fresh
+    // elaboration is a *new* request, even though the string matches. With
+    // raw-key tracking, an in-flight expand from version v1 would block the
+    // version-v2 retry until the v1 request resolves as `outdated`, leaving
+    // the spinner up unnecessarily for the round-trip duration.
+    const trackingKey = `${version}:${nodeId}`;
+    if (pendingExpansions.has(trackingKey)) return;
+    pendingExpansions.add(trackingKey);
+    transport.expandNode(version, nodeId)
+      .then(populated => {
+        // Functional setTree so we always splice into the *current* tree,
+        // not the closure-captured one. If `onTreeUpdate` replaced the tree
+        // while expand was in flight, we splice into the new tree (the
+        // matching placeholder is presumably still there because the new
+        // elaboration would have produced the same shape with the same
+        // nodeId — same DFS order). Falls through gracefully if not.
+        pendingExpansions.delete(trackingKey);
+        setTree(currentTree => {
+          if (!currentTree) return currentTree;
+          // Build a new top-level wrapper so React notices the change.
+          // Mutate nested nodes in place — they're not part of React state
+          // identity, only the outer envelope is.
+          spliceExpandedReg(currentTree, nodeId, populated);
+          return { ...currentTree };
+        });
+      })
+      .catch(() => {
+        // Swallow errors — placeholder stays visible. The common case here
+        // is a soft `outdated` from the server (race against a fresh
+        // elaboration). The new tree from onTreeUpdate has already arrived
+        // or is in flight, but we still need to nudge React so useEffect
+        // re-evaluates against the latest tree.version with the placeholder
+        // again — otherwise we'd be stuck on the spinner.
+        pendingExpansions.delete(trackingKey);
+        setTree(currentTree => (currentTree ? { ...currentTree } : currentTree));
+      });
+  }, [found, tree, transport, pendingExpansions]);
+
+  // Empty + version=0 = LSP responded before initial elaborate finished (server
+  // returns a stub envelope when its cache is still empty). Don't paint the
+  // "no top-level addrmap" pane in that window — it's misleading and resolves
+  // automatically once `rdl/elaboratedTreeChanged` triggers a refresh. After
+  // version >= 1 the empty-roots state actually means "library file with no
+  // addrmap" and we let the existing message render.
+  const stillElaboratingFirstPass =
+    !tree || (tree.version === 0 && (tree.roots ?? []).length === 0);
+  if (stillElaboratingFirstPass) {
     return (
       <div className="rdl-viewer">
         <div className="rdl-empty"><p>Loading…</p></div>
@@ -191,6 +258,12 @@ export function Viewer({ transport }: Props) {
         <div className="rdl-stale-bar">
           <span>⚠</span>
           <span>Showing last good elaboration · current parse failed</span>
+        </div>
+      )}
+      {isElaborating && (
+        <div className="rdl-elaborating-bar" role="status" aria-live="polite">
+          <span className="rdl-elaborating-spinner" aria-hidden="true" />
+          <span>Re-elaborating in background — current tree stays interactive</span>
         </div>
       )}
       <div className="rdl-tabs" role="tablist">
@@ -291,6 +364,43 @@ function filterScopePlaceholder(scope: FilterScope): string {
     case 'address': return 'Filter by address (e.g. 0x10, 0010)…';
     case 'field':   return 'Filter by field name…';
     default:        return 'Filter (matches name, address, or field name)…';
+  }
+}
+
+/**
+ * T1.7: walk a tree and replace the placeholder Reg with the populated one
+ * returned by `transport.expandNode`. Replaces the reference inside the
+ * parent's `children` array (rather than `Object.assign`-ing in place) so
+ * downstream `useMemo`s keyed on the reg reference recompute. Mutating in
+ * place was leaving the Decoder panel showing stale results after a register
+ * switch, because Detail's `decoded = useMemo(() => decode(reg, …), [reg])`
+ * was bailing out on a referentially-equal reg whose fields had silently
+ * grown under it.
+ */
+function spliceExpandedReg(tree: ElaboratedTree, nodeId: string, populated: Reg): void {
+  type Walkable = TreeNode & { children?: TreeNode[] };
+  const stack: Walkable[] = [...((tree.roots ?? []) as Walkable[])];
+  while (stack.length > 0) {
+    const node = stack.pop()!;
+    const kids = ('children' in node && Array.isArray(node.children))
+      ? node.children
+      : null;
+    if (kids) {
+      for (let i = 0; i < kids.length; i++) {
+        const child = kids[i] as TreeNode;
+        if (
+          child.kind === 'reg'
+          && child.nodeId === nodeId
+          && child.loadState === 'placeholder'
+        ) {
+          // Server omits loadState on expand responses — clear the placeholder
+          // marker explicitly so the next render path treats this as loaded.
+          kids[i] = { ...populated, loadState: 'loaded' } as TreeNode;
+          return;
+        }
+      }
+      stack.push(...(kids as Walkable[]));
+    }
   }
 }
 

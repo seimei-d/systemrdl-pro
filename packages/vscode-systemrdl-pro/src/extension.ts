@@ -232,6 +232,21 @@ async function startServer(context: vscode.ExtensionContext): Promise<void> {
     clientOptions,
   );
 
+  // T1.6: register a StaticFeature that injects experimental.systemrdlLazyTree
+  // into the InitializeParams. Server reads this in INITIALIZED and switches
+  // its rdl/elaboratedTree responses to spine envelopes (placeholder regs +
+  // on-demand expandNode). Old servers see an unknown experimental key and
+  // ignore it; we still get a full tree from them. Forward-compat both ways.
+  client.registerFeature({
+    fillClientCapabilities: (capabilities: { experimental?: Record<string, unknown> }) => {
+      const exp = (capabilities.experimental ??= {});
+      exp.systemrdlLazyTree = true;
+    },
+    initialize: () => {},
+    getState: () => ({ kind: 'static' as const }),
+    clear: () => {},
+  });
+
   context.subscriptions.push({ dispose: () => client?.stop() });
 
   try {
@@ -254,6 +269,24 @@ async function startServer(context: vscode.ExtensionContext): Promise<void> {
       refreshMemoryMap(params.uri).catch(err =>
         outputChannel?.warn(`refresh on push failed: ${err}`),
       );
+    });
+
+    // Re-elaborate started/finished — drives the viewer's "re-elaborating"
+    // banner so the user knows the LSP is working on a fresh tree while the
+    // existing one stays interactive. Fired only when the LSP actually runs
+    // a full pass (the buffer-equality skip in _full_pass_async never fires
+    // these), so the banner doesn't blink on no-op didChanges.
+    client.onNotification('rdl/elaborationStarted', (params: { uri: string }) => {
+      if (!params || typeof params.uri !== 'string') return;
+      const entry = memoryMapPanels.get(params.uri);
+      if (!entry) return;
+      safePostTo(entry, { type: 'elaborating', state: true });
+    });
+    client.onNotification('rdl/elaborationFinished', (params: { uri: string }) => {
+      if (!params || typeof params.uri !== 'string') return;
+      const entry = memoryMapPanels.get(params.uri);
+      if (!entry) return;
+      safePostTo(entry, { type: 'elaborating', state: false });
     });
   } catch (err) {
     outputChannel?.error(`Failed to start LSP: ${err}`);
@@ -463,8 +496,18 @@ function attachMemoryMapPanel(
 
 /** Post to a specific panel; no-ops gracefully if the panel was disposed. */
 function safePostTo(entry: PanelEntry, message: unknown): void {
+  // postMessage returns a Thenable<boolean> that REJECTS when the webview
+  // has been disposed (panel.dispose() — e.g. user closed the Memory Map
+  // tab). The synchronous try/catch only catches errors thrown immediately,
+  // not promise rejections, so a closed-panel post used to surface as
+  // unhandled "Error: Webview is disposed" in the host log. We attach a
+  // .then handler to swallow it explicitly — this is the normal race when
+  // a late LSP notification arrives just after the user closes the panel.
   try {
-    entry.panel.webview.postMessage(message);
+    Promise.resolve(entry.panel.webview.postMessage(message)).then(
+      undefined,
+      () => {},
+    );
   } catch (err) {
     outputChannel?.warn(`webview.postMessage failed: ${err}`);
   }
@@ -476,15 +519,78 @@ function safePostTo(entry: PanelEntry, message: unknown): void {
 
 type WebviewMessage =
   | { type: 'reveal'; source: SourceLoc }
-  | { type: 'copy'; text: string; label?: string };
+  | { type: 'copy'; text: string; label?: string }
+  | { type: 'expandNode'; version: number; nodeId: string };
 
-async function handleWebviewMessage(msg: WebviewMessage, _panelUri: string): Promise<void> {
+async function handleWebviewMessage(msg: WebviewMessage, panelUri: string): Promise<void> {
   if (msg.type === 'reveal') {
     await revealLocation(msg.source);
   } else if (msg.type === 'copy') {
     await vscode.env.clipboard.writeText(msg.text);
     const label = msg.label || 'value';
     vscode.window.setStatusBarMessage(`Copied ${label}: ${msg.text}`, 2_000);
+  } else if (msg.type === 'expandNode') {
+    // T1.6: viewer asked to flesh out a placeholder reg's fields[]. Forward
+    // to the LSP using the panel's URI (implicit — webview doesn't track it),
+    // post the result back to the webview, and splice it into entry.lastTree
+    // so subsequent sinceVersion checks stay coherent.
+    if (!client) return;
+    const entry = memoryMapPanels.get(panelUri);
+    if (!entry) return;
+    try {
+      const reg = await client.sendRequest<unknown>('rdl/expandNode', {
+        uri: panelUri,
+        version: msg.version,
+        nodeId: msg.nodeId,
+      });
+      // Server returns a soft `{outdated: true}` sentinel when the version
+      // ask is stale — that's a normal race (new tree was elaborated between
+      // the viewer reading tree.version and the request landing). Route it
+      // to the error channel so the viewer clears in-flight tracking and
+      // retries on the next onTreeUpdate (which will carry a fresh version).
+      if (reg && typeof reg === 'object' && (reg as { outdated?: boolean }).outdated) {
+        safePostTo(entry, {
+          type: 'expandNodeError',
+          nodeId: msg.nodeId,
+          message: 'outdated',
+        });
+        return;
+      }
+      safePostTo(entry, { type: 'expandNodeResult', nodeId: msg.nodeId, reg });
+      if (entry.lastTree) {
+        spliceExpandedNode(entry.lastTree, msg.nodeId, reg);
+      }
+    } catch (err) {
+      outputChannel?.warn(`rdl/expandNode failed for ${msg.nodeId}: ${err}`);
+      safePostTo(entry, {
+        type: 'expandNodeError',
+        nodeId: msg.nodeId,
+        message: String(err),
+      });
+    }
+  }
+}
+
+/** Walk an ElaboratedTree and replace the matching placeholder reg with
+ * the expanded full reg dict. Mutates `tree` in place. T1.6: keeps
+ * `entry.lastTree` consistent with what the webview now displays so the
+ * next sinceVersion check on the same version returns `unchanged` correctly.
+ */
+function spliceExpandedNode(tree: ElaboratedTree, nodeId: string, expanded: unknown): void {
+  type Walkable = { nodeId?: string; children?: unknown[]; fields?: unknown[]; loadState?: string; kind?: string };
+  const stack: Walkable[] = [...((tree.roots as Walkable[]) ?? [])];
+  while (stack.length > 0) {
+    const node = stack.pop()!;
+    if (node.kind === 'reg' && node.nodeId === nodeId && node.loadState === 'placeholder') {
+      Object.assign(node, expanded);
+      // expand_node response intentionally omits loadState — we must clear
+      // the placeholder marker explicitly, otherwise next sinceVersion check
+      // ships the still-marked node back to the webview and the viewer
+      // re-fires expand in a loop.
+      node.loadState = 'loaded';
+      return;
+    }
+    if (Array.isArray(node.children)) stack.push(...(node.children as Walkable[]));
   }
 }
 
@@ -750,7 +856,16 @@ function renderViewerHtml(
     vscode.setState({ uri: ${JSON.stringify(panelUri)} });
     const updaters = new Set();
     const cursorListeners = new Set();
+    const elaboratingListeners = new Set();
     let pendingTree = null;
+    let elaboratingState = false;
+    // T1.7 wiring: per-nodeId resolvers for the lazy expandNode round-trip.
+    // Webview posts {type:'expandNode', version, nodeId}; host LSP-forwards
+    // and posts back {type:'expandNodeResult', nodeId, reg} or {type:'expandNodeError'}.
+    // We promise-resolve the matching pending request so transport.expandNode
+    // returns the populated Reg the viewer can splice into its tree state.
+    const expandResolvers = new Map();
+    const expandRejectors = new Map();
 
     window.addEventListener('message', (e) => {
       const m = e.data;
@@ -759,6 +874,19 @@ function renderViewerHtml(
         updaters.forEach(cb => cb(m.tree));
       } else if (m && m.type === 'cursor') {
         cursorListeners.forEach(cb => cb(m.line));
+      } else if (m && m.type === 'elaborating') {
+        elaboratingState = !!m.state;
+        elaboratingListeners.forEach(cb => cb(elaboratingState));
+      } else if (m && m.type === 'expandNodeResult') {
+        const r = expandResolvers.get(m.nodeId);
+        expandResolvers.delete(m.nodeId);
+        expandRejectors.delete(m.nodeId);
+        if (r) r(m.reg);
+      } else if (m && m.type === 'expandNodeError') {
+        const j = expandRejectors.get(m.nodeId);
+        expandResolvers.delete(m.nodeId);
+        expandRejectors.delete(m.nodeId);
+        if (j) j(new Error(m.message || 'expandNode failed'));
       }
     });
 
@@ -775,8 +903,22 @@ function renderViewerHtml(
       },
       onTreeUpdate(cb) { updaters.add(cb); return () => updaters.delete(cb); },
       onCursorMove(cb) { cursorListeners.add(cb); return () => cursorListeners.delete(cb); },
+      onElaborating(cb) {
+        elaboratingListeners.add(cb);
+        // Replay the latest known state so listeners that subscribe after the
+        // first started/finished message still see the correct banner.
+        cb(elaboratingState);
+        return () => elaboratingListeners.delete(cb);
+      },
       reveal(source) { vscode.postMessage({ type: 'reveal', source }); },
       copy(text, label) { vscode.postMessage({ type: 'copy', text, label }); },
+      expandNode(version, nodeId) {
+        return new Promise((resolve, reject) => {
+          expandResolvers.set(nodeId, resolve);
+          expandRejectors.set(nodeId, reject);
+          vscode.postMessage({ type: 'expandNode', version, nodeId });
+        });
+      },
     };
 
     RdlViewer.mount(document.getElementById('app-root'), transport);

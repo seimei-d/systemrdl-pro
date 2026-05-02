@@ -4,6 +4,118 @@ All notable changes to **SystemRDL Pro** are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [SemVer](https://semver.org/).
 
+## [0.24.0] — 2026-05-02
+
+### Added
+
+- **Re-elaborate progress indicator.** When you edit a large `.rdl`
+  file (~10s elaborate at 25k registers), the Memory Map now shows a
+  "Re-elaborating in background" banner instead of leaving you guessing.
+  The previous tree stays interactive throughout — the banner clears
+  when the fresh tree arrives. Driven by new `rdl/elaborationStarted`
+  / `rdl/elaborationFinished` LSP notifications.
+- **Default `elaborationTimeoutMs` raised from 10s to 60s.** 25k-register
+  designs need ~10s to elaborate cold, with no headroom under the old
+  cap. The 60s default covers aggregated multi-subsystem designs out of
+  the box; smaller IPs still finish in well under a second.
+
+### Fixed
+
+- **Decoder panel now updates after switching registers.** The lazy-tree
+  splice was mutating the placeholder reg in place, so React's
+  `useMemo([reg, decoderInput])` saw a referentially-equal `reg` and
+  reused stale decoded values from the previous register. Splice now
+  replaces the reg in its parent's `children` array, giving downstream
+  memos a real ref change.
+- **Soft handling of `expandNode` version-mismatch races.** When the LSP
+  re-elaborates while a placeholder expand is in flight (common at 25k:
+  edit → 10s elaborate → click in old tree), the server now returns a
+  `{outdated: true}` sentinel instead of raising `JsonRpcException`,
+  and the viewer transparently retries against the new `tree.version`.
+  Eliminates the noisy `[ERROR] VersionMismatch` traceback.
+- **Skip re-elaborate when buffer is byte-identical to last pass.** VSCode
+  fires duplicate `didOpen` on workspace restore, and various editor
+  extensions touch the buffer without producing a real diff. Previously
+  every event triggered a full elaborate; on a 25k file this would pin
+  the GIL and stall opens of small files. Now we short-circuit on a
+  string equality check.
+- **LSP custom notifications now actually fire.** Pre-existing
+  `rdl/elaboratedTreeChanged` (and the new `rdl/elaboration{Started,
+  Finished}`) were calling `server.send_notification(...)` — a method
+  that doesn't exist on `pygls.lsp.server.LanguageServer` in pygls 2.x.
+  The call raised `AttributeError`, swallowed by an outer `try/except`,
+  so the notification silently never reached the client. Switched to
+  the supported `server.protocol.notify(...)` API. Side effects beyond
+  the new banner: edits to `.rdl` files now refresh the Memory Map
+  automatically (renames, reset-value tweaks, etc.) without needing
+  to switch tabs to force a refresh.
+- **No more `Error: Webview is disposed` in the host log.** When a late
+  LSP notification (expand result, tree update) arrives just after the
+  user closed a Memory Map tab, `panel.webview.postMessage` returns a
+  Thenable that rejects with that error. We now swallow it explicitly
+  via `.then(undefined, () => {})` since it's a normal close-race.
+- **Loading state during initial elaborate.** Opening a `.rdl` file
+  used to flash the "No top-level addrmap found" pane for ~10s on a
+  25k design while the LSP was still working on the first elaborate.
+  The viewer now shows "Loading…" until the LSP reports a real version
+  (`>= 1`); after that the addrmap-less pane only shows for files that
+  truly contain no addrmap.
+- **On-disk spine cache actually used on cold start.** The
+  version-equality guard before reading from `~/.cache/systemrdl-pro/`
+  was rejecting every disk hit because `version` is a per-process
+  monotonic counter that resets to 1 on each LSP boot — the disk
+  envelope's recorded counter was almost never equal. The cache key
+  is content-addressed (sha256 of abs path + mtime + include paths +
+  compiler version), so a hit *is* authoritative; we now rewrite the
+  envelope's `version` field to the current process's counter on read
+  instead of gating on equality. Window reload of a 25k file is now
+  the documented "skip parse + elaborate + serialize" path.
+- **`pendingExpansions` keyed by `version:nodeId`.** The viewer's
+  in-flight expand tracking was using the raw `nodeId` string, so
+  when a fresh elaboration produced a new tree with the same DFS
+  shape (same nodeIds), an in-flight v1 request blocked the v2
+  retry until the v1 resolved as `outdated`. Result: the spinner
+  stayed up for an extra round-trip. Version-prefixed keys remove
+  the cross-tree blocking.
+- **Per-process nonce on `DiskCache` `.tmp` filenames.** Two LSP
+  instances on the same workspace (second VSCode window) hashed the
+  same key and both staged to `spine.json.tmp`, racing the final
+  `os.replace`. The .tmp is now per-pid; the rename target is still
+  the shared name so the cache stays content-addressed.
+- **Orphan `.rdl` tmp files no longer leak on elaboration timeouts.**
+  The `_drop_late_result` callback was using `except Exception`,
+  swallowing `CancelledError` on shutdown without unlinking the late
+  tmp. Long-lived LSP sessions hitting frequent 60s timeouts on
+  large designs would slowly fill `/tmp`. Fixed with `BaseException`
+  catch and a separate unlink try-block.
+
+## [0.23.0] — 2026-05-01
+
+### Added
+
+- **Lazy memory-map viewer (LSP perf overhaul T1).** For aggregated
+  multi-subsystem designs in the 10-25k+ register range, the viewer
+  now receives a "spine" envelope (addrmaps + regfiles + reg shells
+  with empty fields) and fetches per-register field detail on demand
+  via a new `rdl/expandNode` RPC. Spine is 17-18x smaller and 4-5x
+  faster to build than the legacy full tree. The LSP elaboratedTree
+  handler is now async and runs serialization in a thread pool, so
+  diagnostics / hover / completion no longer freeze while the viewer
+  is loading.
+- **On-disk spine cache** at `~/.cache/systemrdl-pro/<key>/spine.json`.
+  Keyed by absolute path + mtime + include paths + compiler version.
+  Window reload of an unchanged file skips parse + elaborate +
+  serialize entirely.
+- **Lazy capability negotiation.** Old extensions / non-VSCode LSP
+  clients keep getting full trees; only clients that advertise
+  `experimental.systemrdlLazyTree` see the new spine + expand flow.
+
+### Internal
+
+- Schema bumped to v0.2.0 (`Reg.loadState`, `Reg.nodeId`, envelope
+  `lazy` flag — all optional / additive).
+- See `feat/lsp-perf` branch for the 7-commit history.
+
 ## [0.22.18] — 2026-05-01
 
 ### Fixed

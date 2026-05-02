@@ -56,6 +56,7 @@ from pygls.lsp.server import LanguageServer
 from systemrdl.messages import Severity
 
 from ._uri import _path_to_uri, _uri_to_path
+from .cache import DiskCache, make_key
 from .code_actions import _code_actions_for_range
 from .compile import (
     CachedElaboration,
@@ -132,8 +133,10 @@ from .serialize import (
     _serialize_field,
     _serialize_reg,
     _serialize_root,
+    _serialize_spine,
     _src_ref_to_dict,
     _unchanged_envelope,
+    expand_node,
 )
 
 if TYPE_CHECKING:
@@ -141,7 +144,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-SERVER_VERSION = "0.15.0"
+SERVER_VERSION = "0.16.0"
 
 
 def _iter_rdl_files(root: pathlib.Path, exclude_dirs: set[str]):
@@ -255,11 +258,11 @@ def _is_valid_identifier(name: str) -> bool:
 
 
 DEBOUNCE_SECONDS = 0.3
-# Eng-review safety net #3: cap a single elaborate pass at 10s wall-clock by default.
+# Eng-review safety net #3: cap a single elaborate pass at 60s wall-clock by default.
 # Past that we keep last-good (D7) and surface a synthetic diagnostic. A pathological
 # Perl-style include cycle in a third-party RDL pack should NOT freeze the editor.
 # Override per-workspace via systemrdl-pro.elaborationTimeoutMs (state.elaboration_timeout_s).
-ELABORATION_TIMEOUT_SECONDS = 10.0
+ELABORATION_TIMEOUT_SECONDS = 60.0
 ELABORATION_TIMEOUT_SECONDS_MIN = 1.0
 ELABORATION_TIMEOUT_SECONDS_MAX = 300.0
 
@@ -375,6 +378,15 @@ class ServerState:
     # surfaces this so big chip designs (multi-subsystem aggregates in the 10-25k+ register
     # range) can lift the 10s cap when their elaboration legitimately takes longer.
     elaboration_timeout_s: float = ELABORATION_TIMEOUT_SECONDS
+    # T1.4: lazy-tree capability gate. Set in INITIALIZED handler from
+    # client.capabilities.experimental.systemrdlLazyTree. When True the LSP
+    # serves spine envelopes (Reg.loadState='placeholder') and answers
+    # rdl/expandNode requests; when False it serves full trees as before.
+    lazy_supported: bool = False
+    # T1.4: on-disk cache for spine envelopes. Survives window reload; second
+    # window in a multi-root workspace shares the cache via content key.
+    # Constructed lazily by the build_server() helper so tests can swap it.
+    disk_cache: DiskCache = dataclasses.field(default_factory=DiskCache)
 
 
 # ---------------------------------------------------------------------------
@@ -430,7 +442,7 @@ def build_server() -> LanguageServer:
         # used to wait for didSaveTextDocument before pulling a fresh tree).
         if version_after is not None:
             try:
-                server.send_notification(
+                server.protocol.notify(
                     "rdl/elaboratedTreeChanged",
                     {"uri": uri, "version": version_after},
                 )
@@ -466,6 +478,15 @@ def build_server() -> LanguageServer:
         except Exception:
             logger.debug("could not surface perl-missing notification", exc_info=True)
 
+    # TODO(T2): no per-URI lock here yet. _on_open and _on_save fire this
+    # immediately (only _on_change is debounced), so a rapid didOpen+didSave
+    # for the same URI launches two concurrent elaborate threads that race
+    # on `state.cache.put` → `cached.expanded` reset. Symptoms today are
+    # cosmetic (one round-trip wasted on a viewer holding the older version),
+    # not data-corrupting. Cleanest fix lands with the T2 background indexer:
+    # an asyncio.Lock per URI gating both this function and `_on_expand_node`.
+    # See PR #1 follow-up. Until then, rely on the buffer-equality short-
+    # circuit below to no-op the redundant pass when content hasn't changed.
     async def _full_pass_async(uri: str, buffer_text: str | None) -> None:
         if buffer_text is None:
             try:
@@ -473,7 +494,33 @@ def build_server() -> LanguageServer:
             except (OSError, ValueError):
                 return
 
+        # Short-circuit: if the buffer text is byte-identical to the last
+        # successful elaboration we already have a fresh tree for this URI.
+        # This eliminates the GIL-pinning re-runs that pile up when VSCode
+        # fires duplicate didOpens on workspace restore, when format-on-save
+        # or trim-trailing-whitespace touches the buffer without producing a
+        # real diff, and when small files get queued behind a 25k re-elaborate
+        # for no reason. Costs one string equality check; saves seconds.
+        prior = state.cache.get(uri)
+        if (
+            prior is not None
+            and prior.text == buffer_text
+            and uri not in state.stale_uris
+        ):
+            return
+
         _check_perl_pre_flight(buffer_text)
+
+        # Tell the client elaboration is starting so it can paint a
+        # "re-elaborating" indicator while keeping the existing tree
+        # interactive. Paired with rdl/elaborationFinished in the finally
+        # block below so the indicator clears on every termination path
+        # (success, timeout, exception). Best-effort: a missed notification
+        # only means a slightly stale UI, never broken state.
+        try:
+            server.protocol.notify("rdl/elaborationStarted", {"uri": uri})
+        except Exception:
+            logger.debug("could not send elaborationStarted", exc_info=True)
 
         loop = asyncio.get_running_loop()
         # Run the synchronous compiler off the event loop so a pathological elaborate
@@ -500,10 +547,19 @@ def build_server() -> LanguageServer:
             )
 
             def _drop_late_result(f: asyncio.Future) -> None:
+                # The compile_text future may raise (compile error → no tmp
+                # produced) or be cancelled. We need to unlink the late tmp
+                # only when it actually exists. `except BaseException` instead
+                # of `except Exception` catches CancelledError on shutdown
+                # and any KeyboardInterrupt; the unlink is a fire-and-forget
+                # cleanup that must never escape this callback.
                 try:
                     _msgs, _root, late_tmp = f.result()
+                except BaseException:
+                    return
+                try:
                     late_tmp.unlink(missing_ok=True)
-                except Exception:
+                except OSError:
                     pass
 
             fut.add_done_callback(_drop_late_result)
@@ -512,6 +568,7 @@ def build_server() -> LanguageServer:
             try:
                 target_path = _uri_to_path(uri)
             except ValueError:
+                _emit_elaboration_finished(uri)
                 return
             timeout_msg = CompilerMessage(
                 severity=Severity.ERROR,
@@ -530,11 +587,26 @@ def build_server() -> LanguageServer:
             state.diag_affected[uri] = _publish_diagnostics(
                 server, uri, [timeout_msg], previously_affected
             )
+            _emit_elaboration_finished(uri)
             return
         except Exception:
             logger.exception("unexpected error during async full-pass for %s", uri)
+            _emit_elaboration_finished(uri)
             return
         _apply_compile_result(uri, buffer_text, messages, roots, tmp_path)
+        _emit_elaboration_finished(uri)
+
+    def _emit_elaboration_finished(uri: str) -> None:
+        """Notify clients that an in-flight elaborate completed (any outcome).
+
+        Paired with rdl/elaborationStarted in :func:`_full_pass_async` so the
+        viewer can clear its "re-elaborating" indicator regardless of whether
+        the pass succeeded, timed out, or threw. Best-effort.
+        """
+        try:
+            server.protocol.notify("rdl/elaborationFinished", {"uri": uri})
+        except Exception:
+            logger.debug("could not send elaborationFinished", exc_info=True)
 
     _PREINDEX_EXCLUDE_DIRS = {
         ".git", "node_modules", ".venv", "venv", "dist",
@@ -610,6 +682,19 @@ def build_server() -> LanguageServer:
 
     @server.feature(INITIALIZED)
     def _on_initialized(_ls: LanguageServer, _params: InitializedParams) -> None:
+        # T1.4: detect lazy-tree client capability before answering any
+        # rdl/elaboratedTree request. The capability lives under
+        # `experimental.systemrdlLazyTree` per the design doc; clients that
+        # don't set it get the v0.1-shaped full tree (backward compat).
+        try:
+            caps = server.client_capabilities
+            exp = getattr(caps, "experimental", None)
+            if isinstance(exp, dict):
+                state.lazy_supported = bool(exp.get("systemrdlLazyTree", False))
+        except Exception:
+            logger.debug("could not read client capabilities", exc_info=True)
+        logger.info("lazy tree supported by client: %s", state.lazy_supported)
+
         async def fetch() -> None:
             try:
                 from lsprotocol.types import (
@@ -1317,20 +1402,59 @@ def build_server() -> LanguageServer:
             "paths": [{"path": p, "source": src} for p, src in resolved],
         }
 
+    def _disk_cache_key(uri: str) -> str | None:
+        """Compute the on-disk cache key for ``uri``.
+
+        Returns ``None`` if the URI doesn't correspond to a real file (in
+        which case we just skip the disk cache entirely — the in-memory
+        cache still works). Folds the systemrdl-compiler version so a
+        compiler upgrade auto-invalidates every cached envelope.
+        """
+        try:
+            path = _uri_to_path(uri)
+        except ValueError:
+            return None
+        try:
+            mtime_ns = path.stat().st_mtime_ns
+        except OSError:
+            return None
+        try:
+            import systemrdl as _systemrdl
+            compiler_version = getattr(_systemrdl, "__version__", "unknown")
+        except Exception:
+            compiler_version = "unknown"
+        return make_key(path, mtime_ns, state.include_paths, compiler_version)
+
     @server.feature("rdl/elaboratedTree")
-    def _on_elaborated_tree(_ls: LanguageServer, params: Any) -> dict[str, Any]:
+    async def _on_elaborated_tree(_ls: LanguageServer, params: Any) -> dict[str, Any]:
         """Custom JSON-RPC: viewer fetches the latest elaborated tree for a URI.
 
-        TODO-1 contract:
+        T1.4: now ``async`` and runs the (potentially multi-second) serialize
+        in ``asyncio.to_thread`` so the LSP event loop is never blocked.
+        Big designs no longer freeze hover / completion / diagnostics while
+        the spine is being built.
+
+        T1.4: when the client advertised ``experimental.systemrdlLazyTree``
+        capability the server returns a spine envelope (``Reg.loadState =
+        'placeholder'``, fields fetched on demand via ``rdl/expandNode``).
+        Old clients keep getting the full tree.
+
+        T1.4: spine envelopes are also persisted to ``DiskCache`` so a
+        VSCode window reload skips parse + elaborate + serialize for an
+        unchanged file. Cache key folds in mtime + include paths +
+        compiler version. Disk cache is only consulted for the lazy path
+        because spine envelopes are small (~10 MB even for 25k regs)
+        while full envelopes can hit 200 MB and aren't worth caching.
+
+        TODO-1 contract preserved:
 
         - Request may include ``sinceVersion: int``. If it matches the LSP's
           cached version, the response is a tiny ``{unchanged: true, version}``
           envelope and the client keeps its previously-rendered tree intact.
-        - First request (no ``sinceVersion`` or stale value) returns the full
-          serialized tree, cached on the LSP side keyed by ``(uri, version)`` so
-          repeat fetches at the same version don't re-serialize.
+        - First request (no ``sinceVersion`` or stale value) returns the
+          serialized tree, cached on the LSP side keyed by ``(uri, version)``.
 
-        Schema: ``schemas/elaborated-tree.json`` v0.1.0. Returns the cached
+        Schema: ``schemas/elaborated-tree.json`` v0.2.0. Returns the cached
         last-good tree when the current parse has failed (design D7).
         """
         uri = None
@@ -1359,11 +1483,30 @@ def build_server() -> LanguageServer:
         if since_version is not None and since_version == cached.version:
             return _unchanged_envelope(cached.version)
 
-        # Reuse the previously-serialized JSON when version hasn't advanced —
-        # multiple fetches at the same version (e.g. tab focus changes,
-        # re-mount) cost a dict reference rather than a full tree walk.
+        # In-memory fast path: same-version re-fetch returns the memoized dict.
         if cached.serialized is not None:
             return cached.serialized
+
+        # Disk cache fast path (lazy mode only — see docstring above).
+        if state.lazy_supported:
+            disk_key = _disk_cache_key(uri)
+            if disk_key is not None:
+                disk_envelope = await asyncio.to_thread(state.disk_cache.get, disk_key)
+                # The cache is content-addressed (sha256 of abs path + mtime +
+                # include paths + compiler version). A hit means the envelope's
+                # *content* is byte-equivalent to what a fresh serialize would
+                # produce — that's the whole point of the key. The envelope's
+                # `version` field is a per-process monotonic counter for the
+                # client's sinceVersion gating; the disk copy carries whatever
+                # counter the previous LSP run had, which is rarely == the
+                # current run's counter. Rewrite the field to the current
+                # in-memory version so client sinceVersion checks stay
+                # coherent, then return. Without this rewrite the disk cache
+                # was effectively dead — every cold start re-serialized.
+                if isinstance(disk_envelope, dict):
+                    disk_envelope["version"] = cached.version
+                    cached.serialized = disk_envelope
+                    return disk_envelope
 
         try:
             original_path = _uri_to_path(uri)
@@ -1374,13 +1517,108 @@ def build_server() -> LanguageServer:
             if cached.temp_path is not None and original_path is not None
             else None
         )
-        envelope = _serialize_root(
+        # Pick spine vs full based on the client's advertised capability and
+        # run in a thread so the event loop stays responsive during the
+        # ~1s (spine) or ~6s (full) wall-clock at 25k regs.
+        serialize_fn = _serialize_spine if state.lazy_supported else _serialize_root
+        envelope = await asyncio.to_thread(
+            serialize_fn,
             cached.roots,
-            stale=uri in state.stale_uris,
+            uri in state.stale_uris,
             path_translate=translate,
             version=cached.version,
         )
         cached.serialized = envelope
+
+        # Persist spine to disk (best-effort, fire-and-forget) for window-reload
+        # speed. Full trees are too big to be worth caching to disk.
+        if state.lazy_supported:
+            disk_key = _disk_cache_key(uri)
+            if disk_key is not None:
+                # Don't await — disk write is independent of the response.
+                asyncio.create_task(
+                    asyncio.to_thread(state.disk_cache.put, disk_key, envelope)
+                )
         return envelope
+
+    @server.feature("rdl/expandNode")
+    async def _on_expand_node(_ls: LanguageServer, params: Any) -> dict[str, Any]:
+        """Custom JSON-RPC: lazy-mode client requests details for a placeholder Reg.
+
+        T1.5. Request: ``{uri, version, nodeId}``. Response: a single ``Reg``
+        dict with ``fields[]`` populated and ``loadState`` absent. The
+        ``nodeId`` is the opaque base-36 string the client got from the
+        spine; it's only valid within the (uri, version) pair the spine
+        was emitted for.
+
+        Errors raised as JSON-RPC error responses:
+        - -32001 ``NodeNotFound`` — nodeId doesn't name any reg (or names
+          a container, which can't be expanded — containers are always
+          fully present in the spine).
+        - -32002 ``VersionMismatch`` — version doesn't match the LSP's
+          current cached version. Client should re-fetch the spine.
+        """
+        from pygls.exceptions import JsonRpcException
+
+        uri = None
+        version: int | None = None
+        node_id: str | None = None
+        if isinstance(params, dict):
+            uri = params.get("uri") or params.get("textDocument", {}).get("uri")
+            v = params.get("version")
+            if isinstance(v, int):
+                version = v
+            n = params.get("nodeId")
+            if isinstance(n, str):
+                node_id = n
+        else:
+            uri = getattr(params, "uri", None)
+            v = getattr(params, "version", None)
+            if isinstance(v, int):
+                version = v
+            n = getattr(params, "nodeId", None)
+            if isinstance(n, str):
+                node_id = n
+
+        if not uri or version is None or not node_id:
+            raise JsonRpcException(
+                code=-32602, message="invalid expandNode params"
+            )
+        cached = state.cache.get(uri)
+        if cached is None:
+            # Soft signal — viewer asked before first elaboration landed (or
+            # after the cache was evicted). Returning a sentinel keeps this
+            # off the JSON-RPC error channel: pygls auto-logs unhandled
+            # JsonRpcException as [ERROR] with a traceback, and a normal race
+            # shouldn't look like a server fault. The viewer's onTreeUpdate
+            # will deliver a fresh tree and useEffect will retry.
+            return {"outdated": True, "currentVersion": None}
+        if cached.version != version:
+            return {"outdated": True, "currentVersion": cached.version}
+
+        # Memoize per node so repeat fetches of the same reg cost a dict ref.
+        if cached.expanded is None:
+            cached.expanded = {}
+        if node_id in cached.expanded:
+            return cached.expanded[node_id]
+
+        try:
+            original_path = _uri_to_path(uri)
+        except ValueError:
+            original_path = None
+        translate = (
+            {cached.temp_path: original_path}
+            if cached.temp_path is not None and original_path is not None
+            else None
+        )
+        result = await asyncio.to_thread(
+            expand_node, cached.roots, node_id, translate
+        )
+        if result is None:
+            raise JsonRpcException(
+                code=-32001, message=f"NodeNotFound (nodeId={node_id})"
+            )
+        cached.expanded[node_id] = result
+        return result
 
     return server

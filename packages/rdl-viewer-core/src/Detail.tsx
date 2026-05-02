@@ -50,24 +50,36 @@ export function Detail({ reg, path, transport }: Props) {
           {' '}({Math.ceil(reg.width / reg.accessWidth)}× {reg.accessWidth}-bit)
         </div>
       )}
-      <BitGrid reg={reg} />
-      <RegisterDecoder value={decoderInput} onChange={setDecoderInput} />
-      <div className="fields-title">
-        Bit fields
-        {decoderActive && (
-          <span className="rdl-fields-mode">
-            · showing decoded values for <code>{decoderInput}</code>
-          </span>
-        )}
-      </div>
-      {(reg.fields || []).map((f, i) => (
-        <FieldRow
-          key={i}
-          field={f}
-          reveal={reveal}
-          decoded={decoded?.[f.name]}
-        />
-      ))}
+      {reg.loadState === 'placeholder' ? (
+        // T1.7: spine-only spawn — fields[] hasn't been fetched yet. The
+        // Viewer's useEffect kicks off transport.expandNode in parallel with
+        // this render; once it returns, the tree is spliced and Detail
+        // re-renders with real fields.
+        <div className="rdl-loading" role="status" aria-live="polite">
+          Loading register details…
+        </div>
+      ) : (
+        <>
+          <BitGrid reg={reg} />
+          <RegisterDecoder value={decoderInput} onChange={setDecoderInput} />
+          <div className="fields-title">
+            Bit fields
+            {decoderActive && (
+              <span className="rdl-fields-mode">
+                · showing decoded values for <code>{decoderInput}</code>
+              </span>
+            )}
+          </div>
+          {(reg.fields || []).map((f, i) => (
+            <FieldRow
+              key={i}
+              field={f}
+              reveal={reveal}
+              decoded={decoded?.[f.name]}
+            />
+          ))}
+        </>
+      )}
       {reg.source && transport.reveal && (
         <div className="src-link" onClick={() => reveal(reg.source)}>
           → {((reg.source.uri || '').split('/').pop() || reg.source.uri)}:

@@ -2,15 +2,15 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/seimei-d/systemrdl-pro/schemas/elaborated-tree.json",
   "title": "SystemRDL Elaborated Tree",
-  "description": "Source of truth for the elaborated SystemRDL register-map tree pushed from systemrdl-lsp to the viewer (Decision 9A: codegen in both directions). v0.1 — minimal shape for Week 1; expanded in Week 4 for live viewer.",
+  "description": "Source of truth for the elaborated SystemRDL register-map tree pushed from systemrdl-lsp to the viewer (Decision 9A: codegen in both directions). v0.2 adds lazy-load support: clients that advertise `experimental.systemrdlLazyTree` capability receive a spine envelope (Reg with empty fields[] + loadState='placeholder' + nodeId) and fetch detail via `rdl/expandNode`. Old clients keep getting full trees.",
   "type": "object",
   "required": ["schemaVersion", "roots"],
   "additionalProperties": false,
   "properties": {
     "schemaVersion": {
       "type": "string",
-      "const": "0.1.0",
-      "description": "Locked at 0.1.0 for the Week 1 walking skeleton. Bump when the shape changes."
+      "const": "0.2.0",
+      "description": "v0.2 added nodeId / loadState / lazy. Bump when the shape changes."
     },
     "version": {
       "type": "integer",
@@ -20,6 +20,11 @@
     "unchanged": {
       "type": "boolean",
       "description": "When true, the response carries no roots — the client's `sinceVersion` matches the cached tree. Always paired with `version`."
+    },
+    "lazy": {
+      "type": "boolean",
+      "default": false,
+      "description": "When true, Reg nodes may have loadState='placeholder' (and empty fields[]) and the client must call `rdl/expandNode` with the node's `nodeId` to populate them. Servers only set this when the client advertised `experimental.systemrdlLazyTree` capability during initialize. Clients ignorant of this field will see `loadState='loaded'` (or omitted) on every node and full fields arrays — full backward compatibility."
     },
     "elaboratedAt": {
       "type": "string",
@@ -47,6 +52,7 @@
         "name": { "type": "string", "description": "Inst name (not type name)." },
         "type": { "type": "string", "description": "Type name (e.g., 'cpu_top_t')." },
         "displayName": { "type": "string", "description": "Human-readable name from the SystemRDL `name` property — distinct from the identifier name." },
+        "nodeId": { "$ref": "#/$defs/NodeId" },
         "address": { "$ref": "#/$defs/HexU64" },
         "size": { "$ref": "#/$defs/HexU64" },
         "desc": { "type": "string" },
@@ -76,6 +82,7 @@
         "name": { "type": "string" },
         "type": { "type": "string" },
         "displayName": { "type": "string" },
+        "nodeId": { "$ref": "#/$defs/NodeId" },
         "address": { "$ref": "#/$defs/HexU64" },
         "size": { "$ref": "#/$defs/HexU64" },
         "desc": { "type": "string" },
@@ -100,6 +107,13 @@
         "name": { "type": "string" },
         "type": { "type": "string" },
         "displayName": { "type": "string" },
+        "nodeId": { "$ref": "#/$defs/NodeId" },
+        "loadState": {
+          "type": "string",
+          "enum": ["loaded", "placeholder"],
+          "default": "loaded",
+          "description": "When 'placeholder' (lazy mode only), `fields[]` is empty and the client must call `rdl/expandNode` with this reg's `nodeId` to populate it. Omitted or 'loaded' = `fields[]` carries the real data. Only ever 'placeholder' on responses where the envelope has `lazy: true`."
+        },
         "address": { "$ref": "#/$defs/HexU64" },
         "width": { "type": "integer", "enum": [8, 16, 32, 64] },
         "accessWidth": {
@@ -171,6 +185,11 @@
       "type": "string",
       "pattern": "^0x[0-9a-fA-F_]+$",
       "description": "Hex literal with optional underscores for readability, e.g. '0x0000_0010'."
+    },
+    "NodeId": {
+      "type": "string",
+      "pattern": "^[0-9a-z]+$",
+      "description": "Stable opaque id assigned depth-first during a single elaboration pass. Format: lowercase base-36 of the visit index. Stable within a (uri, version) pair — clients pass it back to `rdl/expandNode`. Re-elaboration regenerates ids; mismatch on expandNode triggers VersionMismatch (-32002)."
     },
     "SourceLoc": {
       "type": "object",

@@ -667,12 +667,13 @@ def test_document_symbols_carry_addresses(tmp_path):
 def test_elaboration_timeout_constant_is_reasonable():
     """Sanity-check the wall-clock cap on a single elaborate pass.
 
-    Eng review locked 10s as the ceiling: longer than any real-world map
-    elaborates, short enough that a runaway (Perl preprocessor recursion,
-    pathological include) doesn't freeze the editor. Anchoring this in a
-    test prevents accidental drift to multi-minute timeouts.
+    Default sits at 60s — long enough to absorb aggregated multi-subsystem
+    designs (~25k regs), short enough that a runaway (Perl preprocessor
+    recursion, pathological include) doesn't freeze the editor for minutes.
+    Anchoring this in a test prevents accidental drift to multi-minute
+    timeouts.
     """
-    assert 1.0 <= server_mod.ELABORATION_TIMEOUT_SECONDS <= 30.0
+    assert 1.0 <= server_mod.ELABORATION_TIMEOUT_SECONDS <= 90.0
 
 
 def test_timeout_path_preserves_last_good_cache(tmp_path):
@@ -1183,3 +1184,96 @@ def test_compile_text_accepts_perl_safe_opcodes(tmp_path):
         assert len(roots) == 1
     finally:
         tmp.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# T1.4 / T1.5 — lazy spine serialize + rdl/expandNode (no real LSP harness;
+# unit-level tests of the helpers used by the handlers, since pygls feature
+# handlers are awkward to drive in a sync test)
+# ---------------------------------------------------------------------------
+
+
+def test_lazy_spine_round_trips_through_expand_node(tmp_path):
+    """Spine has all regs as placeholders; expand_node returns full reg."""
+    import textwrap
+
+    from systemrdl import RDLCompiler
+    from systemrdl_lsp.serialize import (
+        ELABORATED_TREE_SCHEMA_VERSION,
+        _serialize_root,
+        _serialize_spine,
+        expand_node,
+    )
+
+    rdl = tmp_path / "lazy.rdl"
+    rdl.write_text(
+        textwrap.dedent("""
+            addrmap top {
+                reg {
+                    field { sw=rw; hw=r; } f0[0:0] = 0;
+                    field { sw=rw; hw=r; } f1[1:1] = 0;
+                } R0 @ 0x0;
+            };
+        """)
+    )
+    c = RDLCompiler()
+    c.compile_file(str(rdl))
+    roots = [c.elaborate(top_def_name=None)]
+
+    spine = _serialize_spine(roots, stale=False, version=42)
+    assert spine["schemaVersion"] == ELABORATED_TREE_SCHEMA_VERSION
+    assert spine["lazy"] is True
+    assert spine["version"] == 42
+    addrmap = spine["roots"][0]
+    assert "nodeId" in addrmap
+    reg = addrmap["children"][0]
+    assert reg["kind"] == "reg"
+    assert reg["loadState"] == "placeholder"
+    assert reg["fields"] == []
+    assert reg["accessSummary"]  # spine still computes the cheap rollups
+    nid = reg["nodeId"]
+
+    full_reg = expand_node(roots, nid)
+    assert full_reg is not None
+    assert full_reg["nodeId"] == nid
+    assert "loadState" not in full_reg
+    assert len(full_reg["fields"]) == 2
+    # Cross-check: spine + expand together === full _serialize_root
+    full_envelope = _serialize_root(roots, stale=False)
+    full_reg_via_full = full_envelope["roots"][0]["children"][0]
+    assert {k: v for k, v in full_reg.items() if k != "nodeId"} == full_reg_via_full
+
+
+def test_expand_node_returns_none_for_unknown_id(tmp_path):
+    from systemrdl import RDLCompiler
+    from systemrdl_lsp.serialize import expand_node
+
+    rdl = tmp_path / "tiny.rdl"
+    rdl.write_text(
+        "addrmap top {\n"
+        "    reg { field { sw=rw; hw=r; } f[0:0] = 0; } R0 @ 0x0;\n"
+        "};\n"
+    )
+    c = RDLCompiler()
+    c.compile_file(str(rdl))
+    roots = [c.elaborate(top_def_name=None)]
+    assert expand_node(roots, "zzz999") is None
+
+
+def test_expand_node_returns_none_for_container_id(tmp_path):
+    """Containers can't be 'expanded' — they're always loaded in the spine."""
+    from systemrdl import RDLCompiler
+    from systemrdl_lsp.serialize import _serialize_spine, expand_node
+
+    rdl = tmp_path / "tiny.rdl"
+    rdl.write_text(
+        "addrmap top {\n"
+        "    reg { field { sw=rw; hw=r; } f[0:0] = 0; } R0 @ 0x0;\n"
+        "};\n"
+    )
+    c = RDLCompiler()
+    c.compile_file(str(rdl))
+    roots = [c.elaborate(top_def_name=None)]
+    spine = _serialize_spine(roots, stale=False, version=1)
+    addrmap_id = spine["roots"][0]["nodeId"]
+    assert expand_node(roots, addrmap_id) is None
