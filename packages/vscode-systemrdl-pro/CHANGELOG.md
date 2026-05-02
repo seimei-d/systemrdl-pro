@@ -4,6 +4,49 @@ All notable changes to **SystemRDL Pro** are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [SemVer](https://semver.org/).
 
+## [0.26.1] — 2026-05-02
+
+Patch on top of 0.26.0. Three field-reported gaps in T3 + a leak
+mitigation that turned out to be production-critical.
+
+### Fixed (in `systemrdl-lsp` 0.18.1)
+
+- **"Showing last good" stale indicator now appears on broken RDL
+  again.** Editing a file into a parse error used to leave the
+  viewer rendering the prior (non-stale) tree with no visible signal
+  that the LSP had seen the breakage. Root cause: the parse-failure
+  branch added the URI to `state.stale_uris` but never invalidated
+  the cached spine envelope or pushed `rdl/elaboratedTreeChanged`,
+  so the client kept its outdated render. Fix: on stale transition
+  (`False → True`) we bump `cached.version`, drop
+  `cached.serialized`, and notify. Same fix applied on the elaborate
+  timeout path. Regression test pinned in `test_perf_t3.py`.
+- **Pool worker recycling (T3-G).** The PoC's standalone memory
+  spike test surfaced a real upstream leak in `systemrdl-compiler`
+  — about 5 MB per elaborate of a 40-reg fixture, never released.
+  Without intervention the worker process would slowly grow until
+  it OOM-killed itself in a long editing session on a big design.
+  Mitigation: after `pool_max_elaborates` (default 50) successful
+  subprocess elaborates, the pool is torn down and respawned. RSS
+  comes back to baseline; recycle itself is ~150 ms (worker spawn
+  + import warm-up), barely visible during a typing pause.
+- **`BrokenProcessPool` recovery (T3-E).** A subprocess that
+  segfaults on a pathological RDL or gets killed by the OOM reaper
+  used to poison every subsequent elaborate until the user manually
+  restarted the LSP. The exception fires at two points (submit-time
+  if the pool already noticed, await-time if the worker died
+  in-flight) — both are now caught, the dead pool is torn down, a
+  fresh one is spawned, and the elaborate is retried once. If the
+  retry also fails the original exception surfaces normally.
+
+### Tests
+
+- 4 new T3 tests covering crash recovery, recycle threshold, the
+  stale-bar regression, and the upstream memory leak (documents
+  current behaviour at ~250 MB growth across 50 elaborates;
+  ceiling at 500 MB so a doubling regression gets caught).
+- Suite goes 129 → 133.
+
 ## [0.26.0] — 2026-05-02
 
 T3 perf release. Closes the cross-URI blocking gap that was the only

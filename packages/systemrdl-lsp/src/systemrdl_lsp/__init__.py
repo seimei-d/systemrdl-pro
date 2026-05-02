@@ -1,3 +1,3 @@
 """systemrdl-lsp — Language Server for SystemRDL 2.0."""
 
-__version__ = "0.18.0"
+__version__ = "0.18.1"
