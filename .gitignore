@@ -38,3 +38,7 @@ bun.lockb
 examples/stress_*k.rdl
 examples/stress_*_multi.rdl
 examples/stress_*_multi/
+
+# Local-only: agent-generated review snapshots, not for upstream
+docs/code-review-*.md
+docs/triage-*.md
