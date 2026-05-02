@@ -70,6 +70,6 @@ jobs:
           schema = json.load(open("schemas/elaborated-tree.json"))
           assert schema.get("$schema", "").startswith("https://json-schema.org/")
           assert schema["title"] == "SystemRDL Elaborated Tree"
-          assert schema["properties"]["schemaVersion"]["const"] == "0.1.0"
+          assert schema["properties"]["schemaVersion"]["const"] == "0.2.0"
           print("schema OK")
           PY
