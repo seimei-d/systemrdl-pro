@@ -4,6 +4,39 @@ All notable changes to **SystemRDL Pro** are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [SemVer](https://semver.org/).
 
+## [0.26.2] — 2026-05-02
+
+Two stale-bar correctness gaps caught in field testing of 0.26.1.
+
+### Fixed (in `systemrdl-lsp` 0.18.2)
+
+- **Stale-bar no longer sticks on a recovered file.** Editing a file
+  invalid → fixing it back to a byte-identical AST left the
+  "Showing last good" indicator visible because the fingerprint-skip
+  path discarded `state.stale_uris` but didn't bump the cache
+  version or invalidate `cached.serialized`. The viewer kept
+  rendering the envelope it fetched while the parse was failing.
+  Fix: stale True → False transition in the fingerprint-skip path
+  bumps version + clears serialized + notifies. Symmetric with the
+  False → True fix from 0.26.1.
+- **Cascade-failure now surfaces the stale-bar on every consumer.**
+  Editing a library file (e.g. `types.rdl`) into a parse error
+  cascade-re-elaborates every open consumer. Each consumer's
+  elaborate fails too — but the cascade trigger used to overload
+  `state.stale_uris` to bypass the buffer-equality short-circuit,
+  so by the time `_apply_compile_result` ran the False → True
+  transition detector saw `was_stale = True` and skipped the
+  notification. Consumers kept their last good render with no
+  stale indicator.
+
+  Fix: cascade now uses a separate `state.force_re_elaborate` set
+  for the bypass. `state.stale_uris` is reserved for actual stale
+  state, so the transition detector sees an honest False before
+  this elaborate marks it True. Plus: the parse-failure branch now
+  also sets `ast_changed = True` so the cascade actually fires when
+  a library file breaks (without it, only the file the user typed
+  in showed stale, the consumers stayed silent).
+
 ## [0.26.1] — 2026-05-02
 
 Patch on top of 0.26.0. Three field-reported gaps in T3 + a leak
