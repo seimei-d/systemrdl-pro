@@ -21,10 +21,14 @@ configuration through every callback.
 from __future__ import annotations
 
 import asyncio
+import atexit
 import dataclasses
 import logging
+import multiprocessing as mp
 import pathlib
 import time
+from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from typing import TYPE_CHECKING, Any
 
 from lsprotocol.types import (
@@ -68,12 +72,16 @@ from .compile import (
     ElaborationCache,
     _canonicalize_for_skip,
     _compile_text,
+    _compile_text_compressed,
+    _decompress_compile_result,
     _elaborate,
     _expand_include_vars,
     _fingerprint_roots,
     _peakrdl_toml_paths,
     _perl_available,
     _perl_in_source,
+    _pool_warmup_noop,
+    _pool_worker_init,
     _resolve_search_paths,
     _SimpleRef,
 )
@@ -149,7 +157,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-SERVER_VERSION = "0.17.0"
+SERVER_VERSION = "0.18.4"
 
 
 def _iter_rdl_files(root: pathlib.Path, exclude_dirs: set[str]):
@@ -381,6 +389,16 @@ class ServerState:
     # URIs whose latest parse attempt failed but for which we still have a last-good
     # cache entry. The viewer renders a stale-bar when a URI is in this set (D7).
     stale_uris: set[str] = dataclasses.field(default_factory=set)
+    # URIs that need to skip the buffer-equality / canonicalize-skip
+    # short-circuits on the next elaborate (typically because a cascade
+    # trigger needs to re-elaborate the file even though its own buffer
+    # didn't change — an includee changed). Cleared the moment the
+    # bypass actually fires. Separate from ``stale_uris`` so the stale-
+    # transition logic in ``_apply_compile_result`` can detect a
+    # genuine False → True (or T → F) move; if cascade overloaded
+    # stale_uris like it used to, ``was_stale`` would always be True
+    # on the cascade path and the viewer would miss the new failure.
+    force_re_elaborate: set[str] = dataclasses.field(default_factory=set)
     # Forwarded to RDLCompiler(perl_safe_opcodes=...). Empty list keeps the
     # compiler's safe default. Power users adding `:base_io` for `print`-based
     # codegen go through this setting.
@@ -414,6 +432,38 @@ class ServerState:
     # window in a multi-root workspace shares the cache via content key.
     # Constructed lazily by the build_server() helper so tests can swap it.
     disk_cache: DiskCache = dataclasses.field(default_factory=DiskCache)
+    # T3: ProcessPoolExecutor for cross-URI parallel elaborate. ``None``
+    # means in-thread (legacy/fallback). Initialized on INITIALIZED based
+    # on systemrdl-pro.elaborateInProcess; defaults to subprocess mode.
+    # Workers pre-warm via _pool_warmup_noop so the first real elaborate
+    # doesn't pay spawn + import cost on the user's typing latency.
+    elaborate_pool: Any = None  # ProcessPoolExecutor when active
+    # systemrdl-pro.elaborateInProcess setting. False (default) = use
+    # the subprocess pool. True = run in the asyncio default
+    # ThreadPoolExecutor as before T3 — kept as an escape hatch in
+    # case a future systemrdl-compiler upgrade breaks RootNode pickle
+    # compatibility, or for diagnosing pool-related issues in the field.
+    elaborate_in_process: bool = False
+    # Pool size cap. 2 covers the documented pain (small file behind
+    # one big elaborate). Bumping higher is fine but each worker holds
+    # ~150 MB resident at idle plus the in-flight tree, so 2-4 is the
+    # sweet spot for a developer machine. Surfaced as a setting if a
+    # future user reports needing more.
+    elaborate_pool_workers: int = 2
+    # T3-G: worker recycle threshold. Mitigates the upstream
+    # systemrdl-compiler memory leak (~5 MB per elaborate of a
+    # 40-reg fixture, observed in test_memory_growth_bounded). After
+    # this many successful subprocess elaborates we tear down the
+    # pool and spawn a fresh one — RSS comes back to baseline. 50
+    # gives a few minutes of editing on big designs before the
+    # next recycle, recycling itself is ~150 ms (worker spawn +
+    # _pool_worker_init), barely visible during a typing pause.
+    pool_max_elaborates: int = 50
+    # Counts successful subprocess elaborates since the current pool
+    # was spawned. Reset to 0 in ``_ensure_elaborate_pool``. When it
+    # hits ``pool_max_elaborates`` the elaborate-finished bookkeeping
+    # schedules a recycle and resets the counter.
+    pool_elaborate_count: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -433,6 +483,55 @@ def build_server() -> LanguageServer:
         except Exception:
             return None
         return doc.source
+
+    def _ensure_elaborate_pool() -> None:
+        """Lazy-init the ProcessPoolExecutor + pre-warm workers (T3).
+
+        Workers spawn on first submit; we want spawn cost out of the
+        first user-typing latency, so we kick a no-op per worker so
+        each spawns + runs ``_pool_worker_init`` (imports
+        systemrdl + systemrdl_lsp.compile + serialize). The warmup
+        futures are intentionally not awaited — they complete in the
+        background while the user is still configuring the editor.
+        """
+        if state.elaborate_in_process or state.elaborate_pool is not None:
+            return
+        try:
+            ctx = mp.get_context("spawn")
+            state.elaborate_pool = ProcessPoolExecutor(
+                max_workers=state.elaborate_pool_workers,
+                mp_context=ctx,
+                initializer=_pool_worker_init,
+            )
+            for _ in range(state.elaborate_pool_workers):
+                state.elaborate_pool.submit(_pool_warmup_noop)
+            state.pool_elaborate_count = 0
+            logger.info(
+                "T3 elaborate pool: %d workers, spawn ctx, pre-warming "
+                "(recycle every %d elaborates)",
+                state.elaborate_pool_workers, state.pool_max_elaborates,
+            )
+        except Exception:
+            logger.exception(
+                "T3 elaborate pool init failed; falling back to in-thread"
+            )
+            state.elaborate_in_process = True
+
+    def _shutdown_elaborate_pool() -> None:
+        pool = state.elaborate_pool
+        if pool is None:
+            return
+        state.elaborate_pool = None
+        try:
+            pool.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            logger.debug("elaborate pool shutdown raised", exc_info=True)
+
+    # Best-effort cleanup if the LSP exits without an explicit shutdown
+    # notification — VSCode kills the process abruptly on window close
+    # and pygls' shutdown hook does not always fire. Without this, the
+    # spawned worker processes can stick around as orphans.
+    atexit.register(_shutdown_elaborate_pool)
 
     def _update_include_graph(uri: str, consumed_files: set[pathlib.Path]) -> None:
         """Refresh forward + reverse include maps for ``uri`` (T2-A).
@@ -484,14 +583,27 @@ def build_server() -> LanguageServer:
             except Exception:
                 logger.debug("address-conflict scan failed", exc_info=True)
 
+            # ``has_errors`` covers BOTH compile/parse errors AND post-
+            # elaborate conflict diagnostics (address overlaps, alias
+            # collisions, …). The compiler can elaborate a tree
+            # successfully and still emit semantic ERROR severity for
+            # things like duplicate addresses. The viewer needs to know:
+            # field-reported as "alias и main с одинаковым адресом —  # noqa: RUF003
+            # в Problems error, в webview ничего". We re-use the
+            # ``stale_uris`` set + envelope ``stale`` flag for this
+            # signal; the bar text on the viewer side already reads
+            # broadly enough ("Showing last good elaboration · current
+            # parse failed" → would benefit from rewording but that's
+            # extension-side).
+            has_errors = any(m.severity == Severity.ERROR for m in messages)
+            new_fp = _fingerprint_roots(roots)
+            old = state.cache.get(uri)
             # T2-B fingerprint short-circuit: if the elaborated tree is byte-
             # identical (semantically) to the prior one, drop the new tmp_path
             # (we keep the prior entry's tmp_path so lazy SourceRefs keep
             # working) and skip the cache.put + notification. Diagnostics
             # still publish because they may differ across runs (e.g.,
             # severity tweaked by config) without an AST diff.
-            new_fp = _fingerprint_roots(roots)
-            old = state.cache.get(uri)
             if (
                 old is not None
                 and old.ast_fingerprint is not None
@@ -502,14 +614,34 @@ def build_server() -> LanguageServer:
                 old.text = buffer_text
                 old.text_canonical = _canonicalize_for_skip(buffer_text)
                 old.elaborated_at = time.time()
-                state.stale_uris.discard(uri)
+                # Symmetric stale transition (handles both T → F and F
+                # → T). The latter fires when the user introduces an
+                # address conflict in a buffer that otherwise produces
+                # the same fingerprint as before — the AST is the same
+                # but the diagnostics changed. Either direction needs
+                # a version bump + serialized invalidation so the
+                # client re-fetches and the viewer's stale-bar
+                # reflects current state.
+                was_stale = uri in state.stale_uris
+                if has_errors:
+                    state.stale_uris.add(uri)
+                else:
+                    state.stale_uris.discard(uri)
+                is_stale = uri in state.stale_uris
+                if was_stale != is_stale:
+                    old.version += 1
+                    old.serialized = None
+                    version_after = old.version
                 _update_include_graph(uri, consumed_files)
             else:
                 # Cache takes ownership of the temp file (it backs lazy
                 # src_ref reads for hover/documentSymbol). Old entry's
                 # temp file is unlinked there.
                 state.cache.put(uri, roots, buffer_text, tmp_path, ast_fingerprint=new_fp)
-                state.stale_uris.discard(uri)
+                if has_errors:
+                    state.stale_uris.add(uri)
+                else:
+                    state.stale_uris.discard(uri)
                 cached = state.cache.get(uri)
                 version_after = cached.version if cached is not None else None
                 _update_include_graph(uri, consumed_files)
@@ -532,8 +664,34 @@ def build_server() -> LanguageServer:
             tmp_path.unlink(missing_ok=True)
             had_error = any(m.severity == Severity.ERROR for m in messages)
             if had_error:
-                if state.cache.get(uri) is not None:
+                # Tell open consumers to re-elaborate. They'll likely
+                # fail too (broken includee → broken consumer parse),
+                # which surfaces the stale-bar on every dependent
+                # tab — without this, only the file the user typed
+                # in shows stale, the consumers stay rendering their
+                # last good tree with no visible warning.
+                ast_changed = True
+                prior_cached = state.cache.get(uri)
+                if prior_cached is not None:
+                    was_stale = uri in state.stale_uris
                     state.stale_uris.add(uri)
+                    if not was_stale:
+                        # Stale state just transitioned False → True.
+                        # Without doing anything else, the viewer would
+                        # never know: cached.serialized still holds the
+                        # last (non-stale) envelope, version hasn't
+                        # bumped, so no rdl/elaboratedTreeChanged push
+                        # fires and the client's sinceVersion check
+                        # would short-circuit even if it asked. Bump
+                        # version + clear cached serialization so the
+                        # next fetch builds a fresh envelope with
+                        # ``stale=True`` and the "Showing last good"
+                        # banner appears. This was reported in the
+                        # field after T2 ship — broken RDL no longer
+                        # surfaced the stale icon.
+                        prior_cached.version += 1
+                        prior_cached.serialized = None
+                        version_after = prior_cached.version
             else:
                 # Library file: refresh the includee graph from this
                 # buffer's perspective (it may itself include other
@@ -637,7 +795,13 @@ def build_server() -> LanguageServer:
             dep_text = _read_buffer(dep_uri)
             if dep_text is None:
                 continue
-            state.stale_uris.add(dep_uri)
+            # ``force_re_elaborate`` (NOT ``stale_uris``) so the
+            # buffer-equality / canonicalize-skip short-circuits know
+            # to bypass — but the stale-transition detector in
+            # ``_apply_compile_result`` still sees an honest False
+            # before this elaborate runs, so a real new failure of
+            # the consumer does push a notification.
+            state.force_re_elaborate.add(dep_uri)
             asyncio.create_task(_full_pass_async(dep_uri, dep_text))
 
     async def _full_pass_async(uri: str, buffer_text: str | None) -> None:
@@ -661,6 +825,15 @@ def build_server() -> LanguageServer:
                     uri, t_locked - t_acquire,
                 )
 
+            # If a cascade trigger queued this elaborate, it left
+            # ``force_re_elaborate`` set — bypass both short-circuits
+            # below, then clear the marker so subsequent same-URI
+            # passes resume normal short-circuit behaviour. Reading
+            # the marker once + clearing immediately keeps the
+            # bypass scope tight to "this one elaborate".
+            forced = uri in state.force_re_elaborate
+            state.force_re_elaborate.discard(uri)
+
             # Short-circuit 1 (T1): if the buffer text is byte-identical to
             # the last successful elaboration we already have a fresh tree
             # for this URI. Eliminates the GIL-pinning re-runs that pile up
@@ -671,6 +844,7 @@ def build_server() -> LanguageServer:
                 prior is not None
                 and prior.text == buffer_text
                 and uri not in state.stale_uris
+                and not forced
             ):
                 return
 
@@ -684,6 +858,7 @@ def build_server() -> LanguageServer:
                 prior is not None
                 and prior.text_canonical is not None
                 and uri not in state.stale_uris
+                and not forced
             ):
                 buffer_canon = _canonicalize_for_skip(buffer_text)
                 if buffer_canon == prior.text_canonical:
@@ -710,45 +885,161 @@ def build_server() -> LanguageServer:
                 logger.debug("could not send elaborationStarted", exc_info=True)
 
             loop = asyncio.get_running_loop()
-            # Run the synchronous compiler off the event loop so a pathological elaborate
-            # can't block hover/cancel/etc. wait_for() can't actually kill the worker thread
-            # on timeout, so we attach a cleanup callback that unlinks the orphan temp file
-            # whenever the late result eventually arrives.
+            # T3: route elaborate through the cross-process pool when
+            # available, otherwise fall back to the asyncio default
+            # ThreadPoolExecutor (legacy behaviour, preserved as an
+            # escape hatch via systemrdl-pro.elaborateInProcess=true).
+            # Pool path returns a zlib-compressed pickle bytes blob; we
+            # decompress in this process. Wrap whichever future kind
+            # we got with asyncio.shield so wait_for can time out
+            # without cancelling the underlying compile work — the
+            # done-callback cleans up the orphan tmp file when the
+            # late result eventually arrives.
             t_submit = time.monotonic()
-            fut: asyncio.Future = loop.run_in_executor(
-                None,
-                _compile_text,
-                uri,
-                buffer_text,
-                state.include_paths,
-                state.include_vars,
-                state.perl_safe_opcodes,
-            )
-            try:
-                messages, roots, tmp_path, consumed_files = await asyncio.wait_for(
-                    asyncio.shield(fut), timeout=state.elaboration_timeout_s
+
+            def _submit_compile() -> tuple[bool, asyncio.Future, Any]:
+                """Submit one elaborate attempt; return
+                ``(using_pool, awaitable, raw_pool_future)``. Pulled
+                into a helper so the BrokenProcessPool recovery path
+                can re-submit cleanly after respawning the pool."""
+                up = (
+                    not state.elaborate_in_process
+                    and state.elaborate_pool is not None
                 )
-            except asyncio.TimeoutError:
+                pf: Any = None
+                if up:
+                    pf = state.elaborate_pool.submit(
+                        _compile_text_compressed,
+                        uri,
+                        buffer_text,
+                        state.include_paths,
+                        state.include_vars,
+                        state.perl_safe_opcodes,
+                    )
+                    awaitable = asyncio.wrap_future(pf)
+                else:
+                    awaitable = loop.run_in_executor(
+                        None,
+                        _compile_text,
+                        uri,
+                        buffer_text,
+                        state.include_paths,
+                        state.include_vars,
+                        state.perl_safe_opcodes,
+                    )
+                return up, awaitable, pf
+
+            # T3-E: BrokenProcessPool is a real production gap — a
+            # subprocess that segfaults on a pathological RDL or gets
+            # killed by an OOM reaper would otherwise poison every
+            # subsequent elaborate until the user manually restarts
+            # the LSP. The exception can fire at TWO points:
+            #
+            #   - ``ProcessPoolExecutor.submit()`` if the pool already
+            #     knows it's broken (a previous worker died and the
+            #     pool noticed before we arrived).
+            #   - ``Future.result()`` (i.e. our ``await``) if the
+            #     worker dies mid-elaborate.
+            #
+            # Both paths share the same recovery: tear down the dead
+            # pool, spawn a fresh one, retry the whole elaborate ONCE.
+            # If the retry also fails, surface the error normally so
+            # we don't loop forever on a deterministically broken
+            # input.
+            recovery_attempted = False
+            timeout_hit = False
+            unexpected_exc = False
+            broken_pool_excs = (BrokenProcessPool, BrokenPipeError, EOFError)
+            while True:
+                try:
+                    using_pool, fut, pool_fut = _submit_compile()
+                except broken_pool_excs as exc:
+                    if recovery_attempted:
+                        logger.exception(
+                            "elaborate pool stuck broken after recovery; "
+                            "giving up on %s", uri,
+                        )
+                        _emit_elaboration_finished(uri)
+                        return
+                    recovery_attempted = True
+                    logger.warning(
+                        "elaborate pool broken at submit (%s: %s); respawning",
+                        type(exc).__name__, exc,
+                    )
+                    _shutdown_elaborate_pool()
+                    _ensure_elaborate_pool()
+                    continue
+                try:
+                    raw_result = await asyncio.wait_for(
+                        asyncio.shield(fut), timeout=state.elaboration_timeout_s
+                    )
+                    if using_pool:
+                        messages, roots, tmp_path, consumed_files = (
+                            _decompress_compile_result(raw_result)
+                        )
+                    else:
+                        messages, roots, tmp_path, consumed_files = raw_result
+                    break
+                except broken_pool_excs as exc:
+                    if recovery_attempted or not using_pool:
+                        logger.exception(
+                            "elaborate pool dead after recovery attempt; "
+                            "elaborate failing on %s", uri,
+                        )
+                        _emit_elaboration_finished(uri)
+                        return
+                    recovery_attempted = True
+                    logger.warning(
+                        "elaborate pool broken in flight (%s: %s); respawning + retry",
+                        type(exc).__name__, exc,
+                    )
+                    _shutdown_elaborate_pool()
+                    _ensure_elaborate_pool()
+                    continue
+                except asyncio.TimeoutError:
+                    timeout_hit = True
+                    break
+                except Exception:
+                    logger.exception(
+                        "unexpected error during async full-pass for %s", uri
+                    )
+                    unexpected_exc = True
+                    break
+            if timeout_hit:
                 logger.warning(
                     "elaborate timeout on %s after %.0fs; keeping last-good",
                     uri, state.elaboration_timeout_s,
                 )
 
-                def _drop_late_result(f: asyncio.Future) -> None:
-                    # The compile_text future may raise (compile error → no tmp
-                    # produced) or be cancelled. We need to unlink the late tmp
-                    # only when it actually exists. `except BaseException` instead
-                    # of `except Exception` catches CancelledError on shutdown
-                    # and any KeyboardInterrupt; the unlink is a fire-and-forget
+                def _drop_late_result(f: Any) -> None:
+                    # The future may raise (compile error → no tmp produced)
+                    # or be cancelled. We need to unlink the late tmp only
+                    # when it actually exists. ``except BaseException``
+                    # catches CancelledError on shutdown and any
+                    # KeyboardInterrupt; the unlink is a fire-and-forget
                     # cleanup that must never escape this callback.
+                    #
+                    # T3: result shape depends on which executor produced
+                    # it. ThreadPoolExecutor path returns the raw 4-tuple;
+                    # ProcessPoolExecutor path returns a zlib+pickle bytes
+                    # blob and the embedded tmp path lives inside the
+                    # decompressed pickle. Detect by type so this works
+                    # whichever path the timeout fired against.
                     try:
                         result = f.result()
                     except BaseException:
                         return
-                    # _compile_text returns 4-tuple as of T2-A
-                    # (..., consumed_files); index defensively in case shape
-                    # ever changes again.
-                    late_tmp = result[2] if len(result) >= 3 else None
+                    if isinstance(result, (bytes, bytearray)):
+                        try:
+                            decoded = _decompress_compile_result(result)
+                        except Exception:
+                            logger.debug(
+                                "late-result decompress failed", exc_info=True,
+                            )
+                            return
+                        late_tmp = decoded[2] if len(decoded) >= 3 else None
+                    else:
+                        late_tmp = result[2] if len(result) >= 3 else None
                     if late_tmp is None:
                         return
                     try:
@@ -756,9 +1047,36 @@ def build_server() -> LanguageServer:
                     except OSError:
                         pass
 
-                fut.add_done_callback(_drop_late_result)
-                if state.cache.get(uri) is not None:
+                # asyncio.shield()'s result is an asyncio Future; the
+                # original concurrent.futures Future from the pool is
+                # in pool_fut. Attach to whichever is the underlying
+                # work-tracking handle so the cleanup fires when the
+                # subprocess actually completes (not when the shielded
+                # asyncio handle thinks it did).
+                if pool_fut is not None:
+                    pool_fut.add_done_callback(_drop_late_result)
+                else:
+                    fut.add_done_callback(_drop_late_result)
+                # Mark stale + force the viewer to re-fetch (see the
+                # parse-failure branch in _apply_compile_result for
+                # the same pattern + rationale).
+                cached_for_timeout = state.cache.get(uri)
+                if cached_for_timeout is not None:
+                    was_stale = uri in state.stale_uris
                     state.stale_uris.add(uri)
+                    if not was_stale:
+                        cached_for_timeout.version += 1
+                        cached_for_timeout.serialized = None
+                        try:
+                            server.protocol.notify(
+                                "rdl/elaboratedTreeChanged",
+                                {"uri": uri, "version": cached_for_timeout.version},
+                            )
+                        except Exception:
+                            logger.debug(
+                                "could not push stale-state-changed (timeout)",
+                                exc_info=True,
+                            )
                 try:
                     target_path = _uri_to_path(uri)
                 except ValueError:
@@ -783,8 +1101,7 @@ def build_server() -> LanguageServer:
                 )
                 _emit_elaboration_finished(uri)
                 return
-            except Exception:
-                logger.exception("unexpected error during async full-pass for %s", uri)
+            if unexpected_exc:
                 _emit_elaboration_finished(uri)
                 return
             t_compile_done = time.monotonic()
@@ -799,7 +1116,24 @@ def build_server() -> LanguageServer:
                 t_apply_done - t_compile_done,
                 ast_changed,
             )
+            # T3-G: count successful subprocess elaborates and recycle
+            # the pool once we cross the leak-mitigation threshold.
+            # Recycle is scheduled for AFTER this elaborate's
+            # _emit_elaboration_finished — workers fully drained.
+            recycle_pool_now = False
+            if using_pool:
+                state.pool_elaborate_count += 1
+                if state.pool_elaborate_count >= state.pool_max_elaborates:
+                    recycle_pool_now = True
             _emit_elaboration_finished(uri)
+            if recycle_pool_now:
+                logger.info(
+                    "T3-G: recycling elaborate pool after %d elaborates "
+                    "to release leaked memory",
+                    state.pool_elaborate_count,
+                )
+                _shutdown_elaborate_pool()
+                _ensure_elaborate_pool()
         # T2-A cascade fires *outside* the URI lock so we don't deadlock on
         # an A↔B include cycle (impossible at the SystemRDL level, but the
         # lock ordering shouldn't depend on it). Each consumer takes its own
@@ -941,6 +1275,9 @@ def build_server() -> LanguageServer:
                             ELABORATION_TIMEOUT_SECONDS_MIN,
                             min(ELABORATION_TIMEOUT_SECONDS_MAX, timeout_ms / 1000.0),
                         )
+                    state.elaborate_in_process = bool(
+                        cfg.get("elaborateInProcess", False)
+                    )
                     logger.info("includePaths from initial config: %s", state.include_paths)
                     logger.info("includeVars from initial config: %s", list(state.include_vars))
                     logger.info("perlSafeOpcodes override: %s", state.perl_safe_opcodes)
@@ -953,6 +1290,11 @@ def build_server() -> LanguageServer:
                     )
             except Exception:
                 logger.debug("could not fetch initial workspace configuration", exc_info=True)
+            # T3: stand up the cross-process elaborate pool *after*
+            # config has been read so the elaborateInProcess override
+            # is honoured. Pool init is best-effort — falls back to
+            # in-thread on failure.
+            _ensure_elaborate_pool()
             # Workspace pre-index runs after config so it picks up the user's
             # configured preindex limit (skip-on-disable + file-count cap).
             # Even on config failure we still try with defaults — pre-warming
@@ -1043,6 +1385,16 @@ def build_server() -> LanguageServer:
                             ELABORATION_TIMEOUT_SECONDS_MIN,
                             min(ELABORATION_TIMEOUT_SECONDS_MAX, timeout_ms / 1000.0),
                         )
+                    if "elaborateInProcess" in configs[0]:
+                        new_in_proc = bool(configs[0].get("elaborateInProcess"))
+                        if new_in_proc != state.elaborate_in_process:
+                            logger.info(
+                                "elaborateInProcess change observed (was=%s now=%s); "
+                                "the LSP must be restarted for it to take effect "
+                                "(SystemRDL: Restart Language Server)",
+                                state.elaborate_in_process, new_in_proc,
+                            )
+                        state.elaborate_in_process = new_in_proc
             except Exception:
                 logger.debug("config refresh failed", exc_info=True)
 
@@ -1743,6 +2095,17 @@ def build_server() -> LanguageServer:
                 # was effectively dead — every cold start re-serialized.
                 if isinstance(disk_envelope, dict):
                     disk_envelope["version"] = cached.version
+                    # Stale flag is per-process runtime state, NOT part
+                    # of the content-addressed disk key — a hit may
+                    # carry whatever ``stale`` value was true when the
+                    # entry was written, which is unrelated to whether
+                    # the latest parse succeeded. Override with the
+                    # current state so a "valid → fetched → broken"
+                    # flow doesn't keep serving the non-stale envelope
+                    # from disk after the in-memory invalidation.
+                    # Field-reported as "broke the file, editor shows
+                    # error, webview shows nothing wrong".
+                    disk_envelope["stale"] = uri in state.stale_uris
                     cached.serialized = disk_envelope
                     return disk_envelope
 

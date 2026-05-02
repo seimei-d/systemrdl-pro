@@ -2,7 +2,7 @@
   "name": "systemrdl-pro",
   "displayName": "SystemRDL Pro",
   "description": "Live diagnostics + interactive memory-map viewer for SystemRDL 2.0",
-  "version": "0.25.1",
+  "version": "0.26.4",
   "publisher": "seimei-d",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -152,6 +152,12 @@
           "maximum": 600000,
           "scope": "resource",
           "description": "Wall-clock cap (ms) for a single elaboration pass. After this the LSP keeps the last-good tree and surfaces a synthetic diagnostic. Default 120000 covers multi-subsystem designs (~25k registers across 50+ included files). Smaller IPs finish in well under a second; raise to 300000+ only for aggregated SoC tops with deep Perl preprocessor sections."
+        },
+        "systemrdl-pro.elaborateInProcess": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "description": "Run the SystemRDL compiler inside the LSP's main Python process instead of the dedicated subprocess pool (T3 default). The subprocess pool lets a small file's edits update while a 25k-register design is still elaborating; in-process mode serializes them on the GIL like before T3. Toggle on only as an escape hatch — for example if a future systemrdl-compiler upgrade breaks RootNode pickle compatibility, or for diagnosing a pool-related issue. Restart the language server (\"SystemRDL: Restart Language Server\") for the change to take effect."
         },
         "systemrdl-pro.viewer.colors": {
           "type": "object",

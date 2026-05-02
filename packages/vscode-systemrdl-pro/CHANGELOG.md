@@ -4,6 +4,177 @@ All notable changes to **SystemRDL Pro** are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [SemVer](https://semver.org/).
 
+## [0.26.4] — 2026-05-02
+
+### Fixed (in `systemrdl-lsp` 0.18.4)
+
+- **Stale-bar surfaces semantic ERRORs that survive a successful
+  elaborate.** Field-reported case: alias and main register sharing
+  the same address — Problems panel showed the conflict but the
+  webview rendered the tree with no warning. `systemrdl-compiler`
+  treats most semantic conflicts as FATAL (handled by the existing
+  parse-failure branch), but the success path now also marks the
+  URI stale when post-elaborate diagnostics carry any ERROR
+  severity. Defensive against permissive-compiler futures and
+  custom diagnostic plugins like the address-conflict scan.
+- **Stale-bar text reworded.** "Showing last good elaboration ·
+  current parse failed" was misleading when the trigger was a
+  semantic ERROR (the tree IS current, it just has issues). New
+  text: "Errors detected — see Problems panel · viewer may show
+  last good or pre-error state". Same visual indicator.
+
+## [0.26.3] — 2026-05-02
+
+### Fixed (in `systemrdl-lsp` 0.18.3)
+
+- **Stale-bar still missing on broken file when disk cache hit (third
+  field-reported attempt at this).** Editing a file invalid + asking
+  the viewer for the tree returned the cached-on-disk envelope (with
+  `stale=False` from the prior successful fetch) because the disk
+  cache key is content-addressed by mtime. The buffer differs from
+  disk while unsaved → mtime unchanged → same key → hit → wrong
+  stale value rendered.
+
+  Fix: the disk-cache fast path in `rdl/elaboratedTree` now overrides
+  `envelope["stale"]` from `state.stale_uris` instead of trusting the
+  value frozen at disk-write time. Symmetric to the existing
+  `version` override that's been there since T1.4.
+
+  This is the ACTUAL root cause of the "broke the file, editor shows
+  error, webview shows nothing wrong" pattern. The 0.26.1 + 0.26.2
+  fixes addressed in-memory cache invalidation but the disk cache
+  was a third source serving a non-stale envelope.
+
+## [0.26.2] — 2026-05-02
+
+Two stale-bar correctness gaps caught in field testing of 0.26.1.
+
+### Fixed (in `systemrdl-lsp` 0.18.2)
+
+- **Stale-bar no longer sticks on a recovered file.** Editing a file
+  invalid → fixing it back to a byte-identical AST left the
+  "Showing last good" indicator visible because the fingerprint-skip
+  path discarded `state.stale_uris` but didn't bump the cache
+  version or invalidate `cached.serialized`. The viewer kept
+  rendering the envelope it fetched while the parse was failing.
+  Fix: stale True → False transition in the fingerprint-skip path
+  bumps version + clears serialized + notifies. Symmetric with the
+  False → True fix from 0.26.1.
+- **Cascade-failure now surfaces the stale-bar on every consumer.**
+  Editing a library file (e.g. `types.rdl`) into a parse error
+  cascade-re-elaborates every open consumer. Each consumer's
+  elaborate fails too — but the cascade trigger used to overload
+  `state.stale_uris` to bypass the buffer-equality short-circuit,
+  so by the time `_apply_compile_result` ran the False → True
+  transition detector saw `was_stale = True` and skipped the
+  notification. Consumers kept their last good render with no
+  stale indicator.
+
+  Fix: cascade now uses a separate `state.force_re_elaborate` set
+  for the bypass. `state.stale_uris` is reserved for actual stale
+  state, so the transition detector sees an honest False before
+  this elaborate marks it True. Plus: the parse-failure branch now
+  also sets `ast_changed = True` so the cascade actually fires when
+  a library file breaks (without it, only the file the user typed
+  in showed stale, the consumers stayed silent).
+
+## [0.26.1] — 2026-05-02
+
+Patch on top of 0.26.0. Three field-reported gaps in T3 + a leak
+mitigation that turned out to be production-critical.
+
+### Fixed (in `systemrdl-lsp` 0.18.1)
+
+- **"Showing last good" stale indicator now appears on broken RDL
+  again.** Editing a file into a parse error used to leave the
+  viewer rendering the prior (non-stale) tree with no visible signal
+  that the LSP had seen the breakage. Root cause: the parse-failure
+  branch added the URI to `state.stale_uris` but never invalidated
+  the cached spine envelope or pushed `rdl/elaboratedTreeChanged`,
+  so the client kept its outdated render. Fix: on stale transition
+  (`False → True`) we bump `cached.version`, drop
+  `cached.serialized`, and notify. Same fix applied on the elaborate
+  timeout path. Regression test pinned in `test_perf_t3.py`.
+- **Pool worker recycling (T3-G).** The PoC's standalone memory
+  spike test surfaced a real upstream leak in `systemrdl-compiler`
+  — about 5 MB per elaborate of a 40-reg fixture, never released.
+  Without intervention the worker process would slowly grow until
+  it OOM-killed itself in a long editing session on a big design.
+  Mitigation: after `pool_max_elaborates` (default 50) successful
+  subprocess elaborates, the pool is torn down and respawned. RSS
+  comes back to baseline; recycle itself is ~150 ms (worker spawn
+  + import warm-up), barely visible during a typing pause.
+- **`BrokenProcessPool` recovery (T3-E).** A subprocess that
+  segfaults on a pathological RDL or gets killed by the OOM reaper
+  used to poison every subsequent elaborate until the user manually
+  restarted the LSP. The exception fires at two points (submit-time
+  if the pool already noticed, await-time if the worker died
+  in-flight) — both are now caught, the dead pool is torn down, a
+  fresh one is spawned, and the elaborate is retried once. If the
+  retry also fails the original exception surfaces normally.
+
+### Tests
+
+- 4 new T3 tests covering crash recovery, recycle threshold, the
+  stale-bar regression, and the upstream memory leak (documents
+  current behaviour at ~250 MB growth across 50 elaborates;
+  ceiling at 500 MB so a doubling regression gets caught).
+- Suite goes 129 → 133.
+
+## [0.26.0] — 2026-05-02
+
+T3 perf release. Closes the cross-URI blocking gap that was the only
+remaining T2 limitation: editing a small `.rdl` file while a 25k-register
+design is still elaborating used to make the small file wait. Now they
+elaborate in parallel.
+
+### Added (in `systemrdl-lsp` 0.18.0)
+
+- **`ProcessPoolExecutor` for elaborate.** Each `.rdl` elaborate now
+  runs in a dedicated subprocess instead of sharing a Python thread
+  with the rest of the LSP. Two pre-warmed workers per LSP process
+  by default. Wire format is `pickle` + `zlib` (level 1) — on
+  `stress_25k_multi.rdl` the IPC payload comes in at ~5 MB compressed
+  vs 174 MB raw; encode time is identical because compression is
+  near-free on the redundant tree shape. PoC report and reproducible
+  bench script in [`docs/perf-poc-processpool.md`][poc] and
+  [`packages/systemrdl-lsp/scripts/poc_process_pool.py`][script].
+- **New setting `systemrdl-pro.elaborateInProcess`** (default `false`).
+  Escape hatch — set to `true` to fall back to the pre-T3 in-thread
+  path. Useful if a future `systemrdl-compiler` upgrade breaks
+  `RootNode` pickle compatibility, or for diagnosing pool-related
+  issues. Restart the language server for the change to take effect.
+
+### Performance
+
+Measured on `examples/stress_25k_multi.rdl` (~25k regs, 52 includes,
+deep Perl preprocessing):
+
+| scenario | small-file wall | small-file slowdown vs alone |
+| --- | ---: | ---: |
+| small alone | 1.7 ms | 1× |
+| small + big in threads (pre-T3) | 20–60 ms | 11–30× |
+| small + big in processes (T3) | 4.4 ms | 2.5× |
+
+Net: **4–13× responsiveness gain on the small file** while the big
+file is mid-elaborate. The big file's wall-clock is unchanged
+either way. Encoded IPC overhead (~5s on 25k) is amortized — a fresh
+elaborate of a 25k design pays it once vs the editor staying
+unresponsive every time the user touches a different file.
+
+### Security note
+
+The pickle wire format is safe in this context because the IPC stays
+between an LSP parent process and a subprocess we spawn under the
+same uid on the same machine. `concurrent.futures.ProcessPoolExecutor`
+uses pickle internally regardless of what we ship through it. We do
+not read pickle from disk (the disk cache stays JSON) or accept
+pickle from any external source. See `docs/perf-poc-processpool.md`
+for the full threat-model writeup.
+
+[poc]: https://github.com/seimei-d/systemrdl-pro/blob/main/docs/perf-poc-processpool.md
+[script]: https://github.com/seimei-d/systemrdl-pro/blob/main/packages/systemrdl-lsp/scripts/poc_process_pool.py
+
 ## [0.25.1] — 2026-05-02
 
 Patch on top of 0.25.0 — fixes three field-reported gaps from the T2

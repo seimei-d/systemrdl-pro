@@ -257,7 +257,7 @@ export function Viewer({ transport }: Props) {
       {tree.stale && (
         <div className="rdl-stale-bar">
           <span>⚠</span>
-          <span>Showing last good elaboration · current parse failed</span>
+          <span>Errors detected — see Problems panel · viewer may show last good or pre-error state</span>
         </div>
       )}
       {isElaborating && (
