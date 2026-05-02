@@ -171,6 +171,97 @@ def test_disk_cache_survives_new_instance(small_stress_roots, tmp_path):
 # ---------------------------------------------------------------------------
 
 
+def test_node_id_rejects_negative_index() -> None:
+    """``_node_id`` is the base-36 encoder for spine ids — must reject negatives.
+
+    The id must match the schema's NodeId pattern ``^[0-9a-z]+$``; a negative
+    index would silently produce a string with ``-`` in it, breaking schema
+    validation downstream. Catching at the source is much easier to debug.
+    """
+    from systemrdl_lsp.serialize import _node_id
+
+    assert _node_id(0) == "0"
+    assert _node_id(35) == "z"
+    assert _node_id(36) == "10"
+    with pytest.raises(ValueError, match="non-negative"):
+        _node_id(-1)
+
+
+def test_cached_expanded_resets_on_re_elaboration(small_stress_roots, tmp_path) -> None:
+    """T1.5 correctness: ``CachedElaboration.expanded`` must NOT survive a
+    cache.put — otherwise ``rdl/expandNode`` would serve stale field data
+    after the user edits a register's fields and re-elaborates.
+
+    The schema's nodeIds are assigned by depth-first visit order; an unrelated
+    edit can shift every downstream id, so an old expand cache is never safe
+    to reuse.
+    """
+    from systemrdl_lsp.compile import CachedElaboration, ElaborationCache
+
+    cache = ElaborationCache()
+    uri = (tmp_path / "x.rdl").as_uri()
+    cache.put(uri, small_stress_roots, "buf1", None)
+    entry = cache.get(uri)
+    assert isinstance(entry, CachedElaboration)
+    assert entry.expanded is None  # default — server lazily inits to {} on first expand
+    # Simulate what the rdl/expandNode handler does: populate the memoization
+    # dict during normal operation.
+    entry.expanded = {"abc": {"kind": "reg", "name": "stale"}}
+    # New elaboration → new entry → old expanded dict must be gone.
+    cache.put(uri, small_stress_roots, "buf2", None)
+    fresh = cache.get(uri)
+    assert fresh is not entry, "put must replace the entry, not mutate it"
+    assert fresh.expanded is None, (
+        "stale expand-memoization must NOT survive a re-elaborate; "
+        "nodeIds are reassigned by DFS order on every fresh serialize"
+    )
+
+
+def test_disk_cache_evict_lru_accepts_explicit_cap(tmp_path) -> None:
+    """``evict_lru(max_entries=N)`` overrides the constructor default.
+
+    Operators / tests use this to force-shrink a runaway cache without
+    constructing a new ``DiskCache`` instance.
+    """
+    cache = DiskCache(base=tmp_path / "cache", max_entries=100)
+    for i in range(6):
+        cache.put(f"k{i}", {"i": i})
+        time.sleep(0.01)  # distinct mtimes for deterministic LRU sort
+    # All 6 fit under the constructor cap (100).
+    assert len(list((tmp_path / "cache").iterdir())) == 6
+    # Force evict down to 2 — overrides the constructor cap.
+    evicted = cache.evict_lru(max_entries=2)
+    assert evicted == 4
+    assert len(list((tmp_path / "cache").iterdir())) == 2
+    # Negative cap is clamped to 0 (defensive — kills everything).
+    cache.evict_lru(max_entries=-5)
+    assert list((tmp_path / "cache").iterdir()) == []
+
+
+def test_disk_cache_put_cleans_tmp_when_target_unwritable(tmp_path, monkeypatch) -> None:
+    """Atomicity guarantee: if ``os.replace`` fails, the leftover ``.tmp`` file
+    must not survive — it would otherwise pollute the cache dir with N orphan
+    artifacts on a flaky disk.
+    """
+    cache = DiskCache(base=tmp_path / "cache", max_entries=5)
+    # Simulate a write failure at os.replace time. We let the .tmp write succeed
+    # but make the rename raise OSError — the put() except branch must unlink
+    # the orphan tmp file.
+    real_replace = __import__("os").replace
+
+    def boom(src, dst):
+        raise OSError("simulated replace failure")
+
+    monkeypatch.setattr("systemrdl_lsp.cache.os.replace", boom)
+    cache.put("doomed", {"v": 1})
+    # Restore + assert no leftover .tmp files.
+    monkeypatch.setattr("systemrdl_lsp.cache.os.replace", real_replace)
+    leftover = list((tmp_path / "cache").glob("**/*.tmp"))
+    assert leftover == [], f"tmp file leak after failed put: {leftover}"
+    # And the target was never created.
+    assert cache.get("doomed") is None
+
+
 def test_spine_under_two_seconds_at_1k_regs(medium_stress_roots, capsys):
     """Wall-clock budget for the spine serialize on 1k regs.
 
