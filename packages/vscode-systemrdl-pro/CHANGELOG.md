@@ -4,6 +4,60 @@ All notable changes to **SystemRDL Pro** are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [SemVer](https://semver.org/).
 
+## [0.26.0] — 2026-05-02
+
+T3 perf release. Closes the cross-URI blocking gap that was the only
+remaining T2 limitation: editing a small `.rdl` file while a 25k-register
+design is still elaborating used to make the small file wait. Now they
+elaborate in parallel.
+
+### Added (in `systemrdl-lsp` 0.18.0)
+
+- **`ProcessPoolExecutor` for elaborate.** Each `.rdl` elaborate now
+  runs in a dedicated subprocess instead of sharing a Python thread
+  with the rest of the LSP. Two pre-warmed workers per LSP process
+  by default. Wire format is `pickle` + `zlib` (level 1) — on
+  `stress_25k_multi.rdl` the IPC payload comes in at ~5 MB compressed
+  vs 174 MB raw; encode time is identical because compression is
+  near-free on the redundant tree shape. PoC report and reproducible
+  bench script in [`docs/perf-poc-processpool.md`][poc] and
+  [`packages/systemrdl-lsp/scripts/poc_process_pool.py`][script].
+- **New setting `systemrdl-pro.elaborateInProcess`** (default `false`).
+  Escape hatch — set to `true` to fall back to the pre-T3 in-thread
+  path. Useful if a future `systemrdl-compiler` upgrade breaks
+  `RootNode` pickle compatibility, or for diagnosing pool-related
+  issues. Restart the language server for the change to take effect.
+
+### Performance
+
+Measured on `examples/stress_25k_multi.rdl` (~25k regs, 52 includes,
+deep Perl preprocessing):
+
+| scenario | small-file wall | small-file slowdown vs alone |
+| --- | ---: | ---: |
+| small alone | 1.7 ms | 1× |
+| small + big in threads (pre-T3) | 20–60 ms | 11–30× |
+| small + big in processes (T3) | 4.4 ms | 2.5× |
+
+Net: **4–13× responsiveness gain on the small file** while the big
+file is mid-elaborate. The big file's wall-clock is unchanged
+either way. Encoded IPC overhead (~5s on 25k) is amortized — a fresh
+elaborate of a 25k design pays it once vs the editor staying
+unresponsive every time the user touches a different file.
+
+### Security note
+
+The pickle wire format is safe in this context because the IPC stays
+between an LSP parent process and a subprocess we spawn under the
+same uid on the same machine. `concurrent.futures.ProcessPoolExecutor`
+uses pickle internally regardless of what we ship through it. We do
+not read pickle from disk (the disk cache stays JSON) or accept
+pickle from any external source. See `docs/perf-poc-processpool.md`
+for the full threat-model writeup.
+
+[poc]: https://github.com/seimei-d/systemrdl-pro/blob/main/docs/perf-poc-processpool.md
+[script]: https://github.com/seimei-d/systemrdl-pro/blob/main/packages/systemrdl-lsp/scripts/poc_process_pool.py
+
 ## [0.25.1] — 2026-05-02
 
 Patch on top of 0.25.0 — fixes three field-reported gaps from the T2
