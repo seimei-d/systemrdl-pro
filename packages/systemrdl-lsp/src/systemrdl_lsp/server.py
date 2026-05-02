@@ -66,6 +66,7 @@ from .compile import (
     CapturingPrinter,
     CompilerMessage,
     ElaborationCache,
+    _canonicalize_for_skip,
     _compile_text,
     _elaborate,
     _expand_include_vars,
@@ -266,9 +267,9 @@ DEBOUNCE_SECONDS = 0.3
 # Past that we keep last-good (D7) and surface a synthetic diagnostic. A pathological
 # Perl-style include cycle in a third-party RDL pack should NOT freeze the editor.
 # Override per-workspace via systemrdl-pro.elaborationTimeoutMs (state.elaboration_timeout_s).
-ELABORATION_TIMEOUT_SECONDS = 60.0
+ELABORATION_TIMEOUT_SECONDS = 120.0
 ELABORATION_TIMEOUT_SECONDS_MIN = 1.0
-ELABORATION_TIMEOUT_SECONDS_MAX = 300.0
+ELABORATION_TIMEOUT_SECONDS_MAX = 600.0
 
 
 # Re-exports for backwards-compat — tests import several private helpers
@@ -293,6 +294,7 @@ __all__ = [
     "_SimpleRef",
     "_address_conflict_diagnostics",
     "_build_range",
+    "_canonicalize_for_skip",
     "_code_actions_for_range",
     "_code_lenses_for_addrmaps",
     "_comp_defs_from_cached",
@@ -498,6 +500,7 @@ def build_server() -> LanguageServer:
             ):
                 tmp_path.unlink(missing_ok=True)
                 old.text = buffer_text
+                old.text_canonical = _canonicalize_for_skip(buffer_text)
                 old.elaborated_at = time.time()
                 state.stale_uris.discard(uri)
                 _update_include_graph(uri, consumed_files)
@@ -658,13 +661,11 @@ def build_server() -> LanguageServer:
                     uri, t_locked - t_acquire,
                 )
 
-            # Short-circuit: if the buffer text is byte-identical to the last
-            # successful elaboration we already have a fresh tree for this URI.
-            # This eliminates the GIL-pinning re-runs that pile up when VSCode
-            # fires duplicate didOpens on workspace restore, when format-on-save
-            # or trim-trailing-whitespace touches the buffer without producing a
-            # real diff, and when small files get queued behind a 25k re-elaborate
-            # for no reason. Costs one string equality check; saves seconds.
+            # Short-circuit 1 (T1): if the buffer text is byte-identical to
+            # the last successful elaboration we already have a fresh tree
+            # for this URI. Eliminates the GIL-pinning re-runs that pile up
+            # when VSCode fires duplicate didOpens on workspace restore.
+            # Costs one string equality check; saves seconds.
             prior = state.cache.get(uri)
             if (
                 prior is not None
@@ -672,6 +673,28 @@ def build_server() -> LanguageServer:
                 and uri not in state.stale_uris
             ):
                 return
+
+            # Short-circuit 2 (T2-D): if the buffer differs from the last
+            # elaboration only in whitespace/comments, the elaborate would
+            # produce identical AST. Skip the entire pipeline — no
+            # elaboration_started notification, so the viewer banner never
+            # flashes on a space character typed in stress_25k_multi.rdl.
+            # Refresh ``prior.text`` so the next exact-equality check hits.
+            if (
+                prior is not None
+                and prior.text_canonical is not None
+                and uri not in state.stale_uris
+            ):
+                buffer_canon = _canonicalize_for_skip(buffer_text)
+                if buffer_canon == prior.text_canonical:
+                    prior.text = buffer_text
+                    prior.elaborated_at = time.time()
+                    logger.debug(
+                        "_full_pass_async %s: canonical-equal short-circuit "
+                        "(elaborate skipped, no banner)",
+                        uri,
+                    )
+                    return
 
             _check_perl_pre_flight(buffer_text)
 
@@ -979,6 +1002,15 @@ def build_server() -> LanguageServer:
     def _on_cancel(_ls: LanguageServer, _params: Any) -> None:
         # pygls 2.x logs noisy warnings for cancel notifications that arrive after
         # the request already completed. A no-op handler keeps the channel quiet.
+        return None
+
+    @server.feature("workspace/didChangeWatchedFiles")
+    def _on_watched_files_changed(_ls: LanguageServer, _params: Any) -> None:
+        # VSCode fires this notification whenever any tracked file changes
+        # on disk. We don't react to disk changes (the include cascade
+        # already covers cross-file invalidation through the buffer-edit
+        # path), but pygls 2.x logs an [WARNING] for every unhandled
+        # notification. Empty handler suppresses the noise.
         return None
 
     @server.feature(WORKSPACE_DID_CHANGE_CONFIGURATION)

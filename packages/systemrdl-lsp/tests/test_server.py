@@ -667,13 +667,14 @@ def test_document_symbols_carry_addresses(tmp_path):
 def test_elaboration_timeout_constant_is_reasonable():
     """Sanity-check the wall-clock cap on a single elaborate pass.
 
-    Default sits at 60s — long enough to absorb aggregated multi-subsystem
-    designs (~25k regs), short enough that a runaway (Perl preprocessor
-    recursion, pathological include) doesn't freeze the editor for minutes.
-    Anchoring this in a test prevents accidental drift to multi-minute
-    timeouts.
+    Default sits at 120s — long enough to absorb aggregated multi-
+    subsystem designs that span 50+ included files with deep Perl
+    preprocessing (the original 60s cap timed out on stress_25k_multi
+    in the field). Short enough that a runaway (Perl recursion, infinite
+    include loop) doesn't freeze the editor indefinitely. Anchoring
+    this in a test prevents accidental drift to multi-minute timeouts.
     """
-    assert 1.0 <= server_mod.ELABORATION_TIMEOUT_SECONDS <= 90.0
+    assert 1.0 <= server_mod.ELABORATION_TIMEOUT_SECONDS <= 180.0
 
 
 def test_timeout_path_preserves_last_good_cache(tmp_path):

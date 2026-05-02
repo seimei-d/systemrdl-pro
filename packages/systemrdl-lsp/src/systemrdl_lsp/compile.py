@@ -115,6 +115,105 @@ _INCLUDE_VAR_RE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?")
 _INCLUDE_DIRECTIVE_RE = re.compile(r'(`include\s+")([^"]*)(")')
 
 
+# ---------------------------------------------------------------------------
+# T2-D: pre-elaborate "is this just whitespace?" canonicalization
+# ---------------------------------------------------------------------------
+
+
+def _canonicalize_for_skip(text: str) -> str:
+    """Return a normalized form that strips comments and collapses non-string
+    whitespace. Two buffers with the same canonical form will produce
+    identical AST out of ``systemrdl-compiler``, so we can skip elaborate
+    entirely (no banner, no version bump, no notification).
+
+    Token-aware enough not to corrupt:
+
+    - Quoted strings (``"hello world"`` keeps both spaces).
+    - Line comments (``//`` and ``#`` — Perl preprocessor markers ``<%``
+      / ``%>`` are NOT comments; left untouched so a Perl-section edit
+      still triggers re-elaborate).
+    - Block comments (``/* ... */``).
+    - Backticks for ```include`` / ```define`` (preserved literally; the
+      directive itself is whitespace-collapsed normally).
+
+    Edits this catches as no-ops:
+
+    - Reformatting (extra blank lines, indent changes).
+    - Adding / removing / editing comments.
+    - Trailing whitespace.
+
+    Edits this does NOT catch as no-ops:
+
+    - Anything that touches a string literal (even adding a single
+      space inside ``"foo bar"``).
+    - Identifier renames (``REG_488`` → ``REG_4888`` differ in
+      canonical form).
+    - Perl preprocessor section changes.
+
+    The check runs in ``_full_pass_async`` between the exact-equality
+    short-circuit and ``_compile_text`` — adds one O(n) string scan per
+    edit. ~50µs on a 1MB buffer; saves seconds when it matches.
+    """
+    if not text:
+        return ""
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    last_was_space = True  # leading whitespace gets stripped
+    while i < n:
+        c = text[i]
+        # Quoted string — copy literally, never collapse internal whitespace.
+        if c == '"':
+            j = i + 1
+            while j < n:
+                if text[j] == "\\" and j + 1 < n:
+                    j += 2
+                    continue
+                if text[j] == '"':
+                    j += 1
+                    break
+                j += 1
+            out.append(text[i:j])
+            last_was_space = False
+            i = j
+            continue
+        # Line comment // ... \n
+        if c == "/" and i + 1 < n and text[i + 1] == "/":
+            while i < n and text[i] != "\n":
+                i += 1
+            continue
+        # Line comment # ... \n  (RDL allows '#' comments inside Perl
+        # context only, but stripping it everywhere is safe — the
+        # compiler would treat a stray '#' outside Perl as an error
+        # both before and after stripping, so the canonical comparison
+        # stays consistent with the compiler's actual behaviour.)
+        if c == "#":
+            while i < n and text[i] != "\n":
+                i += 1
+            continue
+        # Block comment /* ... */
+        if c == "/" and i + 1 < n and text[i + 1] == "*":
+            j = i + 2
+            while j + 1 < n and not (text[j] == "*" and text[j + 1] == "/"):
+                j += 1
+            i = min(n, j + 2)
+            continue
+        # Whitespace run → single space (or nothing at start/end).
+        if c.isspace():
+            if not last_was_space:
+                out.append(" ")
+                last_was_space = True
+            i += 1
+            continue
+        out.append(c)
+        last_was_space = False
+        i += 1
+    # Trim trailing space if we left one.
+    if out and out[-1] == " ":
+        out.pop()
+    return "".join(out)
+
+
 def _expand_include_vars(text: str, vars_map: dict[str, str]) -> str:
     """Expand ``$VAR`` / ``${VAR}`` inside ```include "..."`` paths.
 
@@ -432,17 +531,37 @@ def _harvest_consumed_files(
 # ---------------------------------------------------------------------------
 
 
-# Field properties hashed into the fingerprint. Picked for what the viewer
-# *renders* (access mode, reset, encode) plus the modifier set that affects
-# the access-summary glyph. Source positions intentionally excluded — a
-# whitespace-only edit must hash identically.
+# Properties hashed into the fingerprint. Must mirror EVERY property
+# ``serialize.py`` reads via ``_cached_prop`` — anything the spine
+# envelope renders for the viewer needs to be in here, otherwise an
+# edit to that property would skip the version bump and the viewer
+# would render stale data. Source positions and SourceRef internals
+# stay out so a whitespace-only edit still hashes identically.
+#
+# When you add a new ``_cached_prop(node, "X", cache)`` call to
+# serialize.py, ALSO add "X" to the matching list here. Test
+# ``test_fingerprint_changes_on_<X>`` should pin it down.
 _FIELD_FP_PROPS = (
-    "sw", "hw", "reset", "onread", "onwrite",
+    # Access semantics — drives the access summary glyph + decoder.
+    "sw", "hw", "onread", "onwrite",
     "we", "wel", "swacc", "swmod",
     "rclr", "rset", "woclr", "woset",
-    "singlepulse", "intr",
+    # Field-level state.
+    "reset", "singlepulse", "intr", "counter",
+    # Documentation surface — viewer renders these.
+    "name", "desc",
+    # Enum encoding — viewer renders the value table.
+    "encode",
 )
-_REG_FP_PROPS = ("regwidth", "accesswidth", "shared")
+_REG_FP_PROPS = (
+    "regwidth", "accesswidth", "shared",
+    # Documentation surface — viewer renders these.
+    "name", "desc",
+)
+_CONTAINER_FP_PROPS = (
+    # Addrmap / Regfile / Mem — viewer shows these in the tree row.
+    "name", "desc", "bridge",
+)
 
 
 def _fingerprint_roots(roots: list[RootNode]) -> str:
@@ -460,7 +579,13 @@ def _fingerprint_roots(roots: list[RootNode]) -> str:
     line numbers, file paths, ``inst_src_ref``, dynamic property origin —
     those change with no semantic effect on the viewer.
     """
-    from systemrdl.node import FieldNode, RegNode
+    from systemrdl.node import (
+        AddrmapNode,
+        FieldNode,
+        MemNode,
+        RegfileNode,
+        RegNode,
+    )
 
     h = hashlib.sha256()
 
@@ -511,6 +636,9 @@ def _fingerprint_roots(roots: list[RootNode]) -> str:
             except Exception:
                 feed("?bits")
             for prop in _FIELD_FP_PROPS:
+                feed(f"{prop}={safe_prop(node, prop)}")
+        elif isinstance(node, (AddrmapNode, RegfileNode, MemNode)):
+            for prop in _CONTAINER_FP_PROPS:
                 feed(f"{prop}={safe_prop(node, prop)}")
         try:
             kids = list(node.children(skip_not_present=False))
@@ -601,6 +729,12 @@ class CachedElaboration:
     # ``None`` only on legacy entries seeded before T2 — treated as
     # "always different" to preserve current behaviour.
     ast_fingerprint: str | None = None
+    # T2-D: canonicalized form of ``text`` (comments stripped + non-string
+    # whitespace collapsed). Compared in ``_full_pass_async`` *before*
+    # elaborate so a whitespace-only edit doesn't even start the
+    # compiler — no banner, no version bump, no notification. Computed
+    # once per cache.put (~50µs on 1MB buffers).
+    text_canonical: str | None = None
 
 
 class ElaborationCache:
@@ -642,6 +776,7 @@ class ElaborationCache:
             temp_path=temp_path,
             version=old_version + 1,
             ast_fingerprint=ast_fingerprint,
+            text_canonical=_canonicalize_for_skip(text),
         )
 
     def clear(self) -> None:

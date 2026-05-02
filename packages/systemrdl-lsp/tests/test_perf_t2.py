@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pytest
 from systemrdl_lsp.compile import (
+    _canonicalize_for_skip,
     _compile_text,
     _fingerprint_roots,
     _harvest_consumed_files,
@@ -114,6 +115,71 @@ def test_fingerprint_changes_on_reg_address(tmp_path):
     moved = SIMPLE_RDL.replace("@ 0x00", "@ 0x10")
     r1, t1, _c, _m = _roots(SIMPLE_RDL, tmp_path, "a.rdl")
     r2, t2, _c, _m = _roots(moved, tmp_path, "b.rdl")
+    try:
+        assert _fingerprint_roots(r1) != _fingerprint_roots(r2)
+    finally:
+        t1.unlink(missing_ok=True)
+        t2.unlink(missing_ok=True)
+
+
+# Regression coverage for the user-reported "edited desc / name, viewer
+# didn't update" bug. Anything serialize.py reads via _cached_prop must
+# be in the fingerprint, otherwise its edits silently no-op.
+
+
+def test_fingerprint_changes_on_field_desc(tmp_path):
+    base = SIMPLE_RDL.replace(
+        "field { sw=rw; hw=r; } a[0:0] = 0;",
+        'field { sw=rw; hw=r; desc="old"; } a[0:0] = 0;',
+    )
+    edited = base.replace('"old"', '"new"')
+    r1, t1, _c, _m = _roots(base, tmp_path, "a.rdl")
+    r2, t2, _c, _m = _roots(edited, tmp_path, "b.rdl")
+    try:
+        assert _fingerprint_roots(r1) != _fingerprint_roots(r2)
+    finally:
+        t1.unlink(missing_ok=True)
+        t2.unlink(missing_ok=True)
+
+
+def test_fingerprint_changes_on_field_display_name(tmp_path):
+    base = SIMPLE_RDL.replace(
+        "field { sw=rw; hw=r; } a[0:0] = 0;",
+        'field { sw=rw; hw=r; name="Old"; } a[0:0] = 0;',
+    )
+    edited = base.replace('"Old"', '"New"')
+    r1, t1, _c, _m = _roots(base, tmp_path, "a.rdl")
+    r2, t2, _c, _m = _roots(edited, tmp_path, "b.rdl")
+    try:
+        assert _fingerprint_roots(r1) != _fingerprint_roots(r2)
+    finally:
+        t1.unlink(missing_ok=True)
+        t2.unlink(missing_ok=True)
+
+
+def test_fingerprint_changes_on_reg_desc(tmp_path):
+    base = SIMPLE_RDL.replace(
+        "    reg {",
+        '    reg {\n        desc = "old";',
+    )
+    edited = base.replace('"old"', '"new"')
+    r1, t1, _c, _m = _roots(base, tmp_path, "a.rdl")
+    r2, t2, _c, _m = _roots(edited, tmp_path, "b.rdl")
+    try:
+        assert _fingerprint_roots(r1) != _fingerprint_roots(r2)
+    finally:
+        t1.unlink(missing_ok=True)
+        t2.unlink(missing_ok=True)
+
+
+def test_fingerprint_changes_on_addrmap_desc(tmp_path):
+    base = SIMPLE_RDL.replace(
+        "addrmap top {",
+        'addrmap top { desc="old";',
+    )
+    edited = base.replace('"old"', '"new"')
+    r1, t1, _c, _m = _roots(base, tmp_path, "a.rdl")
+    r2, t2, _c, _m = _roots(edited, tmp_path, "b.rdl")
     try:
         assert _fingerprint_roots(r1) != _fingerprint_roots(r2)
     finally:
@@ -313,3 +379,106 @@ def test_includee_change_triggers_includer_cascade(server_state, tmp_path):
     assert v2 == v1 + 1, (
         f"includer should have re-elaborated; v1={v1} v2={v2}"
     )
+
+
+# ---------------------------------------------------------------------------
+# T2-D: canonicalize-skip (whitespace/comment-only edits never elaborate)
+# ---------------------------------------------------------------------------
+
+
+def test_canonicalize_strips_line_comments():
+    a = "addrmap top { reg { } R @ 0; };  // hello\n"
+    b = "addrmap top { reg { } R @ 0; };  // world\n"
+    assert _canonicalize_for_skip(a) == _canonicalize_for_skip(b)
+
+
+def test_canonicalize_strips_block_comments():
+    a = "/* one */ addrmap x {};\n"
+    b = "/* two */ addrmap x {};\n"
+    assert _canonicalize_for_skip(a) == _canonicalize_for_skip(b)
+
+
+def test_canonicalize_collapses_whitespace_runs():
+    """Different runs of whitespace collapse to single spaces. (Token-level
+    equivalence — e.g. ``reg{}`` vs ``reg { }`` — is intentionally NOT
+    flattened; that would need a real tokenizer and the cost of a missed
+    skip is one extra elaborate, not correctness.)"""
+    a = "addrmap top {\n   reg { } R @ 0;\n};\n"
+    b = "addrmap   top  {\nreg { } R @ 0;\n};"
+    assert _canonicalize_for_skip(a) == _canonicalize_for_skip(b)
+
+
+def test_canonicalize_preserves_string_whitespace():
+    """Two spaces inside a quoted string must NOT collapse — they affect
+    the actual program (name property value, error messages, etc.)."""
+    a = 'reg { name = "hello world"; };\n'
+    b = 'reg { name = "hello  world"; };\n'
+    assert _canonicalize_for_skip(a) != _canonicalize_for_skip(b)
+
+
+def test_canonicalize_distinguishes_identifier_changes():
+    """Renaming a register MUST produce a different canonical form."""
+    a = "addrmap top { reg { } REG_488 @ 0; };\n"
+    b = "addrmap top { reg { } REG_4888 @ 0; };\n"
+    assert _canonicalize_for_skip(a) != _canonicalize_for_skip(b)
+
+
+def test_full_pass_skips_elaborate_on_whitespace_edit(server_state, tmp_path):
+    """Type a space → no elaborate, no version bump, no notifications.
+
+    Monkey-patches ``_compile_text`` with a counting wrapper so we can
+    assert it ran exactly once (the initial elaborate) even after a
+    whitespace-only second pass.
+    """
+    s, state, full_pass = server_state
+    rdl_path = tmp_path / "a.rdl"
+    rdl_path.write_text(SIMPLE_RDL)
+    uri = rdl_path.as_uri()
+
+    _run(full_pass(uri, SIMPLE_RDL))
+    v1 = state.cache.get(uri).version
+
+    # Wrap _compile_text via the loaded module so the closure inside
+    # build_server() (which captured the original symbol) sees the
+    # counter. Easiest path: monkey-patch the module attribute.
+    from systemrdl_lsp import compile as compile_mod
+    from systemrdl_lsp import server as server_mod
+
+    calls = {"n": 0}
+    real = compile_mod._compile_text
+
+    def counting(*args, **kwargs):
+        calls["n"] += 1
+        return real(*args, **kwargs)
+
+    compile_mod._compile_text = counting
+    server_mod._compile_text = counting
+    try:
+        # Add trailing space — semantic no-op, but exact text differs.
+        whitespace_edit = SIMPLE_RDL + " \n"
+        _run(full_pass(uri, whitespace_edit))
+    finally:
+        compile_mod._compile_text = real
+        server_mod._compile_text = real
+
+    v2 = state.cache.get(uri).version
+    assert v2 == v1, "whitespace-only edit must not bump version"
+    assert calls["n"] == 0, (
+        f"whitespace-only edit must NOT call _compile_text; got {calls['n']}"
+    )
+
+
+def test_full_pass_elaborates_on_real_edit(server_state, tmp_path):
+    """Identifier rename DOES go through the compiler (canonical differs)."""
+    s, state, full_pass = server_state
+    rdl_path = tmp_path / "a.rdl"
+    rdl_path.write_text(SIMPLE_RDL)
+    uri = rdl_path.as_uri()
+
+    _run(full_pass(uri, SIMPLE_RDL))
+    v1 = state.cache.get(uri).version
+
+    renamed = SIMPLE_RDL.replace("CTRL", "STATUS")
+    _run(full_pass(uri, renamed))
+    v2 = state.cache.get(uri).version
+    assert v2 == v1 + 1, "rename should re-elaborate and bump version"
