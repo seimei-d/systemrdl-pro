@@ -2,7 +2,7 @@
   "name": "systemrdl-pro",
   "displayName": "SystemRDL Pro",
   "description": "Live diagnostics + interactive memory-map viewer for SystemRDL 2.0",
-  "version": "0.23.0",
+  "version": "0.24.0",
   "publisher": "seimei-d",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -147,11 +147,11 @@
         },
         "systemrdl-pro.elaborationTimeoutMs": {
           "type": "integer",
-          "default": 10000,
+          "default": 60000,
           "minimum": 1000,
           "maximum": 300000,
           "scope": "resource",
-          "description": "Wall-clock cap (ms) for a single elaboration pass. After this the LSP keeps the last-good tree and surfaces a synthetic diagnostic. Default 10000 fits chip designs up to ~3-5k registers. Aggregated multi-subsystem designs in the 10-25k range may need 30000-60000."
+          "description": "Wall-clock cap (ms) for a single elaboration pass. After this the LSP keeps the last-good tree and surfaces a synthetic diagnostic. Default 60000 covers chip designs up to ~25k registers. Smaller IPs finish in well under a second; raise this only for aggregated multi-subsystem designs."
         },
         "systemrdl-pro.viewer.colors": {
           "type": "object",

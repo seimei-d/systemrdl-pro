@@ -119,6 +119,13 @@ html, body { margin: 0; padding: 0; background: var(--rdl-bg); color: var(--rdl-
 .rdl-stale-bar { background: rgba(215,168,90,0.12); border-bottom: 1px solid var(--rdl-warning);
   color: var(--rdl-warning); padding: 7px 14px; font-size: 13px;
   display: flex; align-items: center; gap: 8px; }
+.rdl-elaborating-bar { background: rgba(60,140,220,0.10); border-bottom: 1px solid var(--rdl-accent);
+  color: var(--rdl-accent); padding: 7px 14px; font-size: 13px;
+  display: flex; align-items: center; gap: 10px; }
+.rdl-elaborating-spinner { width: 12px; height: 12px; border-radius: 50%;
+  border: 2px solid currentColor; border-right-color: transparent;
+  animation: rdl-spin 0.9s linear infinite; flex-shrink: 0; }
+@keyframes rdl-spin { to { transform: rotate(360deg); } }
 .rdl-tabs { display: flex; flex-shrink: 0;
   border-bottom: 1px solid var(--rdl-border); background: var(--rdl-chrome);
   overflow-x: auto; overflow-y: hidden; min-height: 36px; }

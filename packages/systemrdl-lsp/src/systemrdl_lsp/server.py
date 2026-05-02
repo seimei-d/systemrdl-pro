@@ -144,7 +144,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-SERVER_VERSION = "0.15.0"
+SERVER_VERSION = "0.16.0"
 
 
 def _iter_rdl_files(root: pathlib.Path, exclude_dirs: set[str]):
@@ -258,11 +258,11 @@ def _is_valid_identifier(name: str) -> bool:
 
 
 DEBOUNCE_SECONDS = 0.3
-# Eng-review safety net #3: cap a single elaborate pass at 10s wall-clock by default.
+# Eng-review safety net #3: cap a single elaborate pass at 60s wall-clock by default.
 # Past that we keep last-good (D7) and surface a synthetic diagnostic. A pathological
 # Perl-style include cycle in a third-party RDL pack should NOT freeze the editor.
 # Override per-workspace via systemrdl-pro.elaborationTimeoutMs (state.elaboration_timeout_s).
-ELABORATION_TIMEOUT_SECONDS = 10.0
+ELABORATION_TIMEOUT_SECONDS = 60.0
 ELABORATION_TIMEOUT_SECONDS_MIN = 1.0
 ELABORATION_TIMEOUT_SECONDS_MAX = 300.0
 
@@ -485,7 +485,33 @@ def build_server() -> LanguageServer:
             except (OSError, ValueError):
                 return
 
+        # Short-circuit: if the buffer text is byte-identical to the last
+        # successful elaboration we already have a fresh tree for this URI.
+        # This eliminates the GIL-pinning re-runs that pile up when VSCode
+        # fires duplicate didOpens on workspace restore, when format-on-save
+        # or trim-trailing-whitespace touches the buffer without producing a
+        # real diff, and when small files get queued behind a 25k re-elaborate
+        # for no reason. Costs one string equality check; saves seconds.
+        prior = state.cache.get(uri)
+        if (
+            prior is not None
+            and prior.text == buffer_text
+            and uri not in state.stale_uris
+        ):
+            return
+
         _check_perl_pre_flight(buffer_text)
+
+        # Tell the client elaboration is starting so it can paint a
+        # "re-elaborating" indicator while keeping the existing tree
+        # interactive. Paired with rdl/elaborationFinished in the finally
+        # block below so the indicator clears on every termination path
+        # (success, timeout, exception). Best-effort: a missed notification
+        # only means a slightly stale UI, never broken state.
+        try:
+            server.send_notification("rdl/elaborationStarted", {"uri": uri})
+        except Exception:
+            logger.debug("could not send elaborationStarted", exc_info=True)
 
         loop = asyncio.get_running_loop()
         # Run the synchronous compiler off the event loop so a pathological elaborate
@@ -524,6 +550,7 @@ def build_server() -> LanguageServer:
             try:
                 target_path = _uri_to_path(uri)
             except ValueError:
+                _emit_elaboration_finished(uri)
                 return
             timeout_msg = CompilerMessage(
                 severity=Severity.ERROR,
@@ -542,11 +569,26 @@ def build_server() -> LanguageServer:
             state.diag_affected[uri] = _publish_diagnostics(
                 server, uri, [timeout_msg], previously_affected
             )
+            _emit_elaboration_finished(uri)
             return
         except Exception:
             logger.exception("unexpected error during async full-pass for %s", uri)
+            _emit_elaboration_finished(uri)
             return
         _apply_compile_result(uri, buffer_text, messages, roots, tmp_path)
+        _emit_elaboration_finished(uri)
+
+    def _emit_elaboration_finished(uri: str) -> None:
+        """Notify clients that an in-flight elaborate completed (any outcome).
+
+        Paired with rdl/elaborationStarted in :func:`_full_pass_async` so the
+        viewer can clear its "re-elaborating" indicator regardless of whether
+        the pass succeeded, timed out, or threw. Best-effort.
+        """
+        try:
+            server.send_notification("rdl/elaborationFinished", {"uri": uri})
+        except Exception:
+            logger.debug("could not send elaborationFinished", exc_info=True)
 
     _PREINDEX_EXCLUDE_DIRS = {
         ".git", "node_modules", ".venv", "venv", "dist",
@@ -1520,17 +1562,15 @@ def build_server() -> LanguageServer:
             )
         cached = state.cache.get(uri)
         if cached is None:
-            raise JsonRpcException(
-                code=-32002, message="VersionMismatch (no cache entry for uri)"
-            )
+            # Soft signal — viewer asked before first elaboration landed (or
+            # after the cache was evicted). Returning a sentinel keeps this
+            # off the JSON-RPC error channel: pygls auto-logs unhandled
+            # JsonRpcException as [ERROR] with a traceback, and a normal race
+            # shouldn't look like a server fault. The viewer's onTreeUpdate
+            # will deliver a fresh tree and useEffect will retry.
+            return {"outdated": True, "currentVersion": None}
         if cached.version != version:
-            raise JsonRpcException(
-                code=-32002,
-                message=(
-                    f"VersionMismatch (have version {cached.version}, "
-                    f"client asked for {version})"
-                ),
-            )
+            return {"outdated": True, "currentVersion": cached.version}
 
         # Memoize per node so repeat fetches of the same reg cost a dict ref.
         if cached.expanded is None:

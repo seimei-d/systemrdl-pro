@@ -270,6 +270,24 @@ async function startServer(context: vscode.ExtensionContext): Promise<void> {
         outputChannel?.warn(`refresh on push failed: ${err}`),
       );
     });
+
+    // Re-elaborate started/finished — drives the viewer's "re-elaborating"
+    // banner so the user knows the LSP is working on a fresh tree while the
+    // existing one stays interactive. Fired only when the LSP actually runs
+    // a full pass (the buffer-equality skip in _full_pass_async never fires
+    // these), so the banner doesn't blink on no-op didChanges.
+    client.onNotification('rdl/elaborationStarted', (params: { uri: string }) => {
+      if (!params || typeof params.uri !== 'string') return;
+      const entry = memoryMapPanels.get(params.uri);
+      if (!entry) return;
+      safePostTo(entry, { type: 'elaborating', state: true });
+    });
+    client.onNotification('rdl/elaborationFinished', (params: { uri: string }) => {
+      if (!params || typeof params.uri !== 'string') return;
+      const entry = memoryMapPanels.get(params.uri);
+      if (!entry) return;
+      safePostTo(entry, { type: 'elaborating', state: false });
+    });
   } catch (err) {
     outputChannel?.error(`Failed to start LSP: ${err}`);
     showRestartBanner();
@@ -515,6 +533,19 @@ async function handleWebviewMessage(msg: WebviewMessage, panelUri: string): Prom
         version: msg.version,
         nodeId: msg.nodeId,
       });
+      // Server returns a soft `{outdated: true}` sentinel when the version
+      // ask is stale — that's a normal race (new tree was elaborated between
+      // the viewer reading tree.version and the request landing). Route it
+      // to the error channel so the viewer clears in-flight tracking and
+      // retries on the next onTreeUpdate (which will carry a fresh version).
+      if (reg && typeof reg === 'object' && (reg as { outdated?: boolean }).outdated) {
+        safePostTo(entry, {
+          type: 'expandNodeError',
+          nodeId: msg.nodeId,
+          message: 'outdated',
+        });
+        return;
+      }
       safePostTo(entry, { type: 'expandNodeResult', nodeId: msg.nodeId, reg });
       if (entry.lastTree) {
         spliceExpandedNode(entry.lastTree, msg.nodeId, reg);
@@ -542,6 +573,11 @@ function spliceExpandedNode(tree: ElaboratedTree, nodeId: string, expanded: unkn
     const node = stack.pop()!;
     if (node.kind === 'reg' && node.nodeId === nodeId && node.loadState === 'placeholder') {
       Object.assign(node, expanded);
+      // expand_node response intentionally omits loadState — we must clear
+      // the placeholder marker explicitly, otherwise next sinceVersion check
+      // ships the still-marked node back to the webview and the viewer
+      // re-fires expand in a loop.
+      node.loadState = 'loaded';
       return;
     }
     if (Array.isArray(node.children)) stack.push(...(node.children as Walkable[]));
@@ -810,7 +846,9 @@ function renderViewerHtml(
     vscode.setState({ uri: ${JSON.stringify(panelUri)} });
     const updaters = new Set();
     const cursorListeners = new Set();
+    const elaboratingListeners = new Set();
     let pendingTree = null;
+    let elaboratingState = false;
     // T1.7 wiring: per-nodeId resolvers for the lazy expandNode round-trip.
     // Webview posts {type:'expandNode', version, nodeId}; host LSP-forwards
     // and posts back {type:'expandNodeResult', nodeId, reg} or {type:'expandNodeError'}.
@@ -826,6 +864,9 @@ function renderViewerHtml(
         updaters.forEach(cb => cb(m.tree));
       } else if (m && m.type === 'cursor') {
         cursorListeners.forEach(cb => cb(m.line));
+      } else if (m && m.type === 'elaborating') {
+        elaboratingState = !!m.state;
+        elaboratingListeners.forEach(cb => cb(elaboratingState));
       } else if (m && m.type === 'expandNodeResult') {
         const r = expandResolvers.get(m.nodeId);
         expandResolvers.delete(m.nodeId);
@@ -852,6 +893,13 @@ function renderViewerHtml(
       },
       onTreeUpdate(cb) { updaters.add(cb); return () => updaters.delete(cb); },
       onCursorMove(cb) { cursorListeners.add(cb); return () => cursorListeners.delete(cb); },
+      onElaborating(cb) {
+        elaboratingListeners.add(cb);
+        // Replay the latest known state so listeners that subscribe after the
+        // first started/finished message still see the correct banner.
+        cb(elaboratingState);
+        return () => elaboratingListeners.delete(cb);
+      },
       reveal(source) { vscode.postMessage({ type: 'reveal', source }); },
       copy(text, label) { vscode.postMessage({ type: 'copy', text, label }); },
       expandNode(version, nodeId) {

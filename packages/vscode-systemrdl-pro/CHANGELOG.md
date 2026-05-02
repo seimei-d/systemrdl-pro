@@ -4,6 +4,42 @@ All notable changes to **SystemRDL Pro** are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [SemVer](https://semver.org/).
 
+## [0.24.0] — 2026-05-02
+
+### Added
+
+- **Re-elaborate progress indicator.** When you edit a large `.rdl`
+  file (~10s elaborate at 25k registers), the Memory Map now shows a
+  "Re-elaborating in background" banner instead of leaving you guessing.
+  The previous tree stays interactive throughout — the banner clears
+  when the fresh tree arrives. Driven by new `rdl/elaborationStarted`
+  / `rdl/elaborationFinished` LSP notifications.
+- **Default `elaborationTimeoutMs` raised from 10s to 60s.** 25k-register
+  designs need ~10s to elaborate cold, with no headroom under the old
+  cap. The 60s default covers aggregated multi-subsystem designs out of
+  the box; smaller IPs still finish in well under a second.
+
+### Fixed
+
+- **Decoder panel now updates after switching registers.** The lazy-tree
+  splice was mutating the placeholder reg in place, so React's
+  `useMemo([reg, decoderInput])` saw a referentially-equal `reg` and
+  reused stale decoded values from the previous register. Splice now
+  replaces the reg in its parent's `children` array, giving downstream
+  memos a real ref change.
+- **Soft handling of `expandNode` version-mismatch races.** When the LSP
+  re-elaborates while a placeholder expand is in flight (common at 25k:
+  edit → 10s elaborate → click in old tree), the server now returns a
+  `{outdated: true}` sentinel instead of raising `JsonRpcException`,
+  and the viewer transparently retries against the new `tree.version`.
+  Eliminates the noisy `[ERROR] VersionMismatch` traceback.
+- **Skip re-elaborate when buffer is byte-identical to last pass.** VSCode
+  fires duplicate `didOpen` on workspace restore, and various editor
+  extensions touch the buffer without producing a real diff. Previously
+  every event triggered a full elaborate; on a 25k file this would pin
+  the GIL and stall opens of small files. Now we short-circuit on a
+  string equality check.
+
 ## [0.23.0] — 2026-05-01
 
 ### Added

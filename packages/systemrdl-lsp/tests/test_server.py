@@ -667,12 +667,13 @@ def test_document_symbols_carry_addresses(tmp_path):
 def test_elaboration_timeout_constant_is_reasonable():
     """Sanity-check the wall-clock cap on a single elaborate pass.
 
-    Eng review locked 10s as the ceiling: longer than any real-world map
-    elaborates, short enough that a runaway (Perl preprocessor recursion,
-    pathological include) doesn't freeze the editor. Anchoring this in a
-    test prevents accidental drift to multi-minute timeouts.
+    Default sits at 60s — long enough to absorb aggregated multi-subsystem
+    designs (~25k regs), short enough that a runaway (Perl preprocessor
+    recursion, pathological include) doesn't freeze the editor for minutes.
+    Anchoring this in a test prevents accidental drift to multi-minute
+    timeouts.
     """
-    assert 1.0 <= server_mod.ELABORATION_TIMEOUT_SECONDS <= 30.0
+    assert 1.0 <= server_mod.ELABORATION_TIMEOUT_SECONDS <= 90.0
 
 
 def test_timeout_path_preserves_last_good_cache(tmp_path):

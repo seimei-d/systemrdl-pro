@@ -63,4 +63,12 @@ export type Transport = {
    * advertised lazy capability).
    */
   expandNode?(version: number, nodeId: string): Promise<Reg>;
+  /**
+   * Optional: re-elaborate progress signal. The host emits `true` when the
+   * LSP starts a fresh elaboration pass (so the viewer can paint a "re-
+   * elaborating" indicator) and `false` when it completes. The viewer keeps
+   * the existing tree interactive throughout — this is a hint, not a gate.
+   * Absent in surfaces that have no equivalent (CLI does a single shot).
+   */
+  onElaborating?(cb: (active: boolean) => void): () => void;
 };
