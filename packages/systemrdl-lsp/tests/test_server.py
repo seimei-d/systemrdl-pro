@@ -121,7 +121,7 @@ def test_missing_file_returns_message_not_crash(tmp_path):
 def test_compile_text_returns_root_on_valid_buffer(tmp_path):
     """Compiling a buffer (without saving) yields a usable RootNode."""
     uri = (tmp_path / "x.rdl").as_uri()
-    messages, roots, tmp_file = _compile_text(uri, VALID_RDL)
+    messages, roots, tmp_file, _consumed = _compile_text(uri, VALID_RDL)
     try:
         errors = [m for m in messages if m.severity in (Severity.ERROR, Severity.FATAL)]
         assert errors == []
@@ -133,7 +133,7 @@ def test_compile_text_returns_root_on_valid_buffer(tmp_path):
 def test_compile_text_returns_no_root_on_parse_error(tmp_path):
     """A parse error yields an empty roots list and reports diagnostics."""
     uri = (tmp_path / "x.rdl").as_uri()
-    messages, roots, tmp_file = _compile_text(uri, INVALID_RDL)
+    messages, roots, tmp_file, _consumed = _compile_text(uri, INVALID_RDL)
     try:
         assert roots == []
         errors = [m for m in messages if m.severity in (Severity.ERROR, Severity.FATAL)]
@@ -146,7 +146,7 @@ def test_compile_text_translates_temp_path_to_original_uri(tmp_path):
     """Diagnostics carry the original file path, not the LSP-internal temp path."""
     original = tmp_path / "real.rdl"
     uri = original.as_uri()
-    messages, _roots, tmp_file = _compile_text(uri, INVALID_RDL)
+    messages, _roots, tmp_file, _consumed = _compile_text(uri, INVALID_RDL)
     try:
         with_path = [m for m in messages if m.file_path is not None]
         assert with_path, "expected at least one message with a resolved file path"
@@ -212,7 +212,7 @@ def test_word_at_position_handles_out_of_range():
 def test_definition_resolves_top_level_type(tmp_path):
     """F12 on ``my_ctrl_t`` (line 5, col 4) jumps to its ``reg`` definition (line 1)."""
     uri = (tmp_path / "x.rdl").as_uri()
-    _msgs, roots, tmp = _compile_text(uri, TYPED_RDL)
+    _msgs, roots, tmp, _consumed = _compile_text(uri, TYPED_RDL)
     try:
         assert roots, "expected at least one elaborated root"
         defs = _comp_defs_from_cached(roots)
@@ -234,7 +234,7 @@ def test_references_finds_all_instantiation_sites(tmp_path):
     """
     from systemrdl_lsp.server import _references_to_type
     uri = (tmp_path / "x.rdl").as_uri()
-    _msgs, roots, tmp = _compile_text(uri, TYPED_RDL)
+    _msgs, roots, tmp, _consumed = _compile_text(uri, TYPED_RDL)
     try:
         translate = {tmp: tmp_path / "x.rdl"}
         # Without the declaration: just the two CTRL/STATUS instance lines.
@@ -258,7 +258,7 @@ def test_rename_locations_covers_def_and_uses(tmp_path):
     from systemrdl_lsp.server import _rename_locations
     rdl_path = tmp_path / "x.rdl"
     rdl_path.write_text(TYPED_RDL, encoding="utf-8")
-    _msgs, roots, tmp = _compile_text(rdl_path.as_uri(), TYPED_RDL)
+    _msgs, roots, tmp, _consumed = _compile_text(rdl_path.as_uri(), TYPED_RDL)
 
     def reader(p, line_idx):
         try:
@@ -297,7 +297,7 @@ def test_rename_skips_unrelated_types(tmp_path):
     """).strip()
     rdl_path = tmp_path / "x.rdl"
     rdl_path.write_text(src, encoding="utf-8")
-    _msgs, roots, tmp = _compile_text(rdl_path.as_uri(), src)
+    _msgs, roots, tmp, _consumed = _compile_text(rdl_path.as_uri(), src)
 
     def reader(p, line_idx):
         try:
@@ -319,7 +319,7 @@ def test_rename_skips_unrelated_types(tmp_path):
 def test_references_returns_empty_for_unknown(tmp_path):
     from systemrdl_lsp.server import _references_to_type
     uri = (tmp_path / "x.rdl").as_uri()
-    _msgs, roots, tmp = _compile_text(uri, TYPED_RDL)
+    _msgs, roots, tmp, _consumed = _compile_text(uri, TYPED_RDL)
     try:
         assert _references_to_type("nonexistent_t", roots, True, path_translate=None) == []
     finally:
@@ -328,7 +328,7 @@ def test_references_returns_empty_for_unknown(tmp_path):
 
 def test_definition_returns_none_for_unknown_word(tmp_path):
     uri = (tmp_path / "x.rdl").as_uri()
-    _msgs, roots, tmp = _compile_text(uri, TYPED_RDL)
+    _msgs, roots, tmp, _consumed = _compile_text(uri, TYPED_RDL)
     try:
         defs = _comp_defs_from_cached(roots)
         assert "doesnotexist" not in defs
@@ -425,7 +425,7 @@ def test_hover_for_word_resolves_access_value():
 def test_hover_for_word_resolves_user_type(tmp_path):
     """Hover on a type identifier surfaces its kind, name, and desc."""
     uri = (tmp_path / "x.rdl").as_uri()
-    _msgs, roots, tmp = _compile_text(uri, TYPED_RDL)
+    _msgs, roots, tmp, _consumed = _compile_text(uri, TYPED_RDL)
     try:
         md = _hover_for_word("my_ctrl_t", roots=roots)
         assert md is not None
@@ -444,7 +444,7 @@ def test_completion_offers_user_defined_types(tmp_path):
     Those names should appear in the completion list so the user can pick them
     when typing an instantiation site."""
     uri = (tmp_path / "x.rdl").as_uri()
-    _msgs, roots, tmp = _compile_text(uri, TYPED_RDL)
+    _msgs, roots, tmp, _consumed = _compile_text(uri, TYPED_RDL)
     try:
         items = _completion_items_for_types(roots)
         labels = {it.label for it in items}
@@ -529,7 +529,7 @@ def test_multi_addrmap_elaborates_each_top_level_definition(tmp_path):
     "для второй карты памяти нет 'tab'"). The fix enumerates ``comp_defs``.
     """
     uri = (tmp_path / "x.rdl").as_uri()
-    _msgs, roots, tmp = _compile_text(uri, MULTI_ADDRMAP_RDL)
+    _msgs, roots, tmp, _consumed = _compile_text(uri, MULTI_ADDRMAP_RDL)
     try:
         assert len(roots) == 2, f"expected 2 RootNodes, got {len(roots)}"
         names = []
@@ -552,14 +552,14 @@ def test_cache_unlinks_old_temp_file_on_replace(tmp_path):
     """Replacing a cache entry must unlink the previous entry's temp file."""
     uri = (tmp_path / "x.rdl").as_uri()
 
-    _msgs1, root1, tmp1 = _compile_text(uri, VALID_RDL)
+    _msgs1, root1, tmp1, _consumed = _compile_text(uri, VALID_RDL)
     assert tmp1.exists()
 
     cache = ElaborationCache()
     cache.put(uri, root1, VALID_RDL, tmp1)
     assert cache.get(uri) is not None
 
-    _msgs2, root2, tmp2 = _compile_text(uri, VALID_RDL)
+    _msgs2, root2, tmp2, _consumed = _compile_text(uri, VALID_RDL)
     cache.put(uri, root2, VALID_RDL, tmp2)
     assert not tmp1.exists(), "old temp file should be unlinked on cache replace"
     assert tmp2.exists(), "new temp file must be alive while cached"
@@ -572,7 +572,7 @@ def test_cache_clear_unlinks_all_temps(tmp_path):
     paths = []
     for i in range(3):
         uri = (tmp_path / f"x{i}.rdl").as_uri()
-        _msgs, root, tmp = _compile_text(uri, VALID_RDL)
+        _msgs, root, tmp, _consumed = _compile_text(uri, VALID_RDL)
         cache.put(uri, root, VALID_RDL, tmp)
         paths.append(tmp)
     for p in paths:
@@ -589,7 +589,7 @@ def test_cache_clear_unlinks_all_temps(tmp_path):
 
 def test_hover_on_field_includes_access_and_reset(tmp_path):
     uri = (tmp_path / "x.rdl").as_uri()
-    _msgs, root, tmp = _compile_text(uri, SAMPLE_RDL)
+    _msgs, root, tmp, _consumed = _compile_text(uri, SAMPLE_RDL)
     try:
         # SAMPLE_RDL is 1-based:
         #   line 3: `field { sw = rw; hw = r; } enable[0:0] = 1;`
@@ -607,7 +607,7 @@ def test_hover_on_field_includes_access_and_reset(tmp_path):
 
 def test_hover_on_register_includes_address_and_width(tmp_path):
     uri = (tmp_path / "x.rdl").as_uri()
-    _msgs, root, tmp = _compile_text(uri, SAMPLE_RDL)
+    _msgs, root, tmp, _consumed = _compile_text(uri, SAMPLE_RDL)
     try:
         # SAMPLE_RDL line 5 (1-based): `} CTRL @ 0x0000;`
         node = _node_at_position(root, 4, 10)
@@ -630,7 +630,7 @@ def test_document_symbols_are_unique(tmp_path):
     """Regression: an earlier implementation iterated children() AND fields() on RegNode,
     yielding every field twice in the outline."""
     uri = (tmp_path / "x.rdl").as_uri()
-    _msgs, root, tmp = _compile_text(uri, SAMPLE_RDL)
+    _msgs, root, tmp, _consumed = _compile_text(uri, SAMPLE_RDL)
     try:
         syms = _document_symbols(root)
         # Top-level: one addrmap (chip)
@@ -649,7 +649,7 @@ def test_document_symbols_are_unique(tmp_path):
 
 def test_document_symbols_carry_addresses(tmp_path):
     uri = (tmp_path / "x.rdl").as_uri()
-    _msgs, root, tmp = _compile_text(uri, SAMPLE_RDL)
+    _msgs, root, tmp, _consumed = _compile_text(uri, SAMPLE_RDL)
     try:
         syms = _document_symbols(root)
         chip = syms[0]
@@ -667,13 +667,14 @@ def test_document_symbols_carry_addresses(tmp_path):
 def test_elaboration_timeout_constant_is_reasonable():
     """Sanity-check the wall-clock cap on a single elaborate pass.
 
-    Default sits at 60s — long enough to absorb aggregated multi-subsystem
-    designs (~25k regs), short enough that a runaway (Perl preprocessor
-    recursion, pathological include) doesn't freeze the editor for minutes.
-    Anchoring this in a test prevents accidental drift to multi-minute
-    timeouts.
+    Default sits at 120s — long enough to absorb aggregated multi-
+    subsystem designs that span 50+ included files with deep Perl
+    preprocessing (the original 60s cap timed out on stress_25k_multi
+    in the field). Short enough that a runaway (Perl recursion, infinite
+    include loop) doesn't freeze the editor indefinitely. Anchoring
+    this in a test prevents accidental drift to multi-minute timeouts.
     """
-    assert 1.0 <= server_mod.ELABORATION_TIMEOUT_SECONDS <= 90.0
+    assert 1.0 <= server_mod.ELABORATION_TIMEOUT_SECONDS <= 180.0
 
 
 def test_timeout_path_preserves_last_good_cache(tmp_path):
@@ -685,7 +686,7 @@ def test_timeout_path_preserves_last_good_cache(tmp_path):
     the viewer's stale-bar (D7).
     """
     uri = (tmp_path / "x.rdl").as_uri()
-    msgs, root, tmp = _compile_text(uri, VALID_RDL)
+    msgs, root, tmp, _consumed = _compile_text(uri, VALID_RDL)
     assert root is not None
     cache = ElaborationCache()
     cache.put(uri, root, VALID_RDL, tmp)
@@ -731,11 +732,11 @@ def test_cache_version_increments_on_each_put(tmp_path):
     """
     cache = ElaborationCache()
     uri = (tmp_path / "x.rdl").as_uri()
-    _msgs1, root1, tmp1 = _compile_text(uri, VALID_RDL)
+    _msgs1, root1, tmp1, _consumed = _compile_text(uri, VALID_RDL)
     cache.put(uri, root1, VALID_RDL, tmp1)
     v1 = cache.get(uri).version
     assert v1 >= 1
-    _msgs2, root2, tmp2 = _compile_text(uri, VALID_RDL)
+    _msgs2, root2, tmp2, _consumed = _compile_text(uri, VALID_RDL)
     cache.put(uri, root2, VALID_RDL, tmp2)
     v2 = cache.get(uri).version
     assert v2 == v1 + 1, f"version must increment monotonically; {v1} → {v2}"
@@ -773,7 +774,7 @@ def test_bridge_keyword_in_completion_and_hover(tmp_path):
     """).strip()
     rdl_path = tmp_path / "x.rdl"
     rdl_path.write_text(rdl, encoding="utf-8")
-    _msgs, roots, tmp = _compile_text(rdl_path.as_uri(), rdl)
+    _msgs, roots, tmp, _consumed = _compile_text(rdl_path.as_uri(), rdl)
     try:
         from systemrdl_lsp.server import _node_at_position
         # Cursor on `addrmap soc {` (line 0 in 0-based).
@@ -804,7 +805,7 @@ def test_address_conflicts_scope_per_top_level_addrmap(tmp_path):
     """).strip()
     rdl_path = tmp_path / "x.rdl"
     rdl_path.write_text(rdl, encoding="utf-8")
-    _msgs, roots, tmp = _compile_text(rdl_path.as_uri(), rdl)
+    _msgs, roots, tmp, _consumed = _compile_text(rdl_path.as_uri(), rdl)
     try:
         out = _address_conflict_diagnostics(roots, tmp)
         assert out == [], f"expected no overlaps; got {[o.text for o in out]}"
@@ -829,7 +830,7 @@ def test_address_conflicts_skip_reused_type_body(tmp_path):
     """).strip()
     rdl_path = tmp_path / "x.rdl"
     rdl_path.write_text(rdl, encoding="utf-8")
-    _msgs, roots, tmp = _compile_text(rdl_path.as_uri(), rdl)
+    _msgs, roots, tmp, _consumed = _compile_text(rdl_path.as_uri(), rdl)
     try:
         out = _address_conflict_diagnostics(roots, tmp)
         assert out == [], f"reused-type body should not self-overlap; got {[o.text for o in out]}"
@@ -859,7 +860,7 @@ def test_hover_works_on_field_inside_reused_reg_type(tmp_path):
     """).strip()
     rdl_path = tmp_path / "x.rdl"
     rdl_path.write_text(rdl, encoding="utf-8")
-    _msgs, roots, tmp = _compile_text(rdl_path.as_uri(), rdl)
+    _msgs, roots, tmp, _consumed = _compile_text(rdl_path.as_uri(), rdl)
     try:
         # Field declaration `} enable[0:0] = 0;` is on line 2 (0-based 1).
         # Even though my_status_t is reused three times, hover on the field should
@@ -896,7 +897,7 @@ def test_inlay_hints_skip_reused_type_body(tmp_path):
     """).strip()
     rdl_path = tmp_path / "x.rdl"
     rdl_path.write_text(rdl, encoding="utf-8")
-    _msgs, roots, tmp = _compile_text(rdl_path.as_uri(), rdl)
+    _msgs, roots, tmp, _consumed = _compile_text(rdl_path.as_uri(), rdl)
     try:
         # Pass the temp path the compiler actually saw — that's what
         # inlay-hint emission uses for filename comparison.
@@ -1108,7 +1109,7 @@ def test_cross_file_diagnostics_bucket_by_source(tmp_path):
         'addrmap top { my_ctrl_t CTRL @ 0; };\n',
         encoding="utf-8",
     )
-    msgs, _roots, tmp = _compile_text(master.as_uri(), master.read_text())
+    msgs, _roots, tmp, _consumed = _compile_text(master.as_uri(), master.read_text())
     try:
         common_msgs = [m for m in msgs if m.file_path == common]
         master_msgs = [m for m in msgs if m.file_path == master]
@@ -1173,7 +1174,7 @@ def test_compile_text_accepts_perl_safe_opcodes(tmp_path):
     forwarding without depending on a perl binary in CI.
     """
     uri = (tmp_path / "x.rdl").as_uri()
-    msgs, roots, tmp = _compile_text(
+    msgs, roots, tmp, _consumed = _compile_text(
         uri,
         VALID_RDL,
         perl_safe_opcodes=[":base_core", ":base_mem", ":base_loop"],

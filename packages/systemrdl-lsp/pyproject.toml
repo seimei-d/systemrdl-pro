@@ -1,6 +1,6 @@
 [project]
 name = "systemrdl-lsp"
-version = "0.16.0"
+version = "0.17.1"
 description = "Language Server Protocol implementation for SystemRDL 2.0 — diagnostics, hover, goto-def, completion, semantic tokens, and the full LSP feature surface (powered by systemrdl-compiler)"
 readme = "README.md"
 requires-python = ">=3.10"

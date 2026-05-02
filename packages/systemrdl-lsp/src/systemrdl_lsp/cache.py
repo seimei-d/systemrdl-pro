@@ -16,9 +16,11 @@ The compiler version is folded in so a ``pip install -U systemrdl-compiler``
 auto-invalidates everything (output schema may have shifted in subtle ways).
 
 Known limitation: changes to ``\`include``d files do not invalidate the
-cache because their mtimes are not in the key. Acceptable for T1 since the
-primary pain point is window reload of unchanged files. T2-A (per-file
-parse cache) addresses this properly via include-graph hashing.
+disk-cache key because their mtimes are not in the key. The in-memory
+include reverse-dep map (T2-A) compensates by proactively re-elaborating
+open consumers on includee edits — so the disk-cache staleness only
+shows up on a fresh window-load of a file whose includee changed since
+the cache was written. Acceptable; the next save bumps the entry.
 """
 
 from __future__ import annotations
