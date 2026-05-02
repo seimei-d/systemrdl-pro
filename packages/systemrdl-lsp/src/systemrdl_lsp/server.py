@@ -547,10 +547,19 @@ def build_server() -> LanguageServer:
             )
 
             def _drop_late_result(f: asyncio.Future) -> None:
+                # The compile_text future may raise (compile error → no tmp
+                # produced) or be cancelled. We need to unlink the late tmp
+                # only when it actually exists. `except BaseException` instead
+                # of `except Exception` catches CancelledError on shutdown
+                # and any KeyboardInterrupt; the unlink is a fire-and-forget
+                # cleanup that must never escape this callback.
                 try:
                     _msgs, _root, late_tmp = f.result()
+                except BaseException:
+                    return
+                try:
                     late_tmp.unlink(missing_ok=True)
-                except Exception:
+                except OSError:
                     pass
 
             fut.add_done_callback(_drop_late_result)
@@ -1483,13 +1492,19 @@ def build_server() -> LanguageServer:
             disk_key = _disk_cache_key(uri)
             if disk_key is not None:
                 disk_envelope = await asyncio.to_thread(state.disk_cache.get, disk_key)
-                # Trust the on-disk envelope only if its `version` field equals
-                # what we just elaborated to. Mtime in the key should make this
-                # impossible to mismatch in practice, but be defensive.
-                if (
-                    isinstance(disk_envelope, dict)
-                    and disk_envelope.get("version") == cached.version
-                ):
+                # The cache is content-addressed (sha256 of abs path + mtime +
+                # include paths + compiler version). A hit means the envelope's
+                # *content* is byte-equivalent to what a fresh serialize would
+                # produce — that's the whole point of the key. The envelope's
+                # `version` field is a per-process monotonic counter for the
+                # client's sinceVersion gating; the disk copy carries whatever
+                # counter the previous LSP run had, which is rarely == the
+                # current run's counter. Rewrite the field to the current
+                # in-memory version so client sinceVersion checks stay
+                # coherent, then return. Without this rewrite the disk cache
+                # was effectively dead — every cold start re-serialized.
+                if isinstance(disk_envelope, dict):
+                    disk_envelope["version"] = cached.version
                     cached.serialized = disk_envelope
                     return disk_envelope
 
