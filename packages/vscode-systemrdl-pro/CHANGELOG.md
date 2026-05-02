@@ -4,6 +4,25 @@ All notable changes to **SystemRDL Pro** are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [SemVer](https://semver.org/).
 
+## [0.26.4] — 2026-05-02
+
+### Fixed (in `systemrdl-lsp` 0.18.4)
+
+- **Stale-bar surfaces semantic ERRORs that survive a successful
+  elaborate.** Field-reported case: alias and main register sharing
+  the same address — Problems panel showed the conflict but the
+  webview rendered the tree with no warning. `systemrdl-compiler`
+  treats most semantic conflicts as FATAL (handled by the existing
+  parse-failure branch), but the success path now also marks the
+  URI stale when post-elaborate diagnostics carry any ERROR
+  severity. Defensive against permissive-compiler futures and
+  custom diagnostic plugins like the address-conflict scan.
+- **Stale-bar text reworded.** "Showing last good elaboration ·
+  current parse failed" was misleading when the trigger was a
+  semantic ERROR (the tree IS current, it just has issues). New
+  text: "Errors detected — see Problems panel · viewer may show
+  last good or pre-error state". Same visual indicator.
+
 ## [0.26.3] — 2026-05-02
 
 ### Fixed (in `systemrdl-lsp` 0.18.3)

@@ -580,6 +580,60 @@ def test_cascade_failure_marks_consumer_stale_visibly(real_pool, tmp_path):
     assert cached_main_after.serialized is None
 
 
+def test_success_path_marks_stale_when_post_elaborate_diag_has_errors(
+    real_pool, tmp_path, monkeypatch,
+):
+    """Address conflict in current systemrdl-compiler turns into a FATAL
+    diag and roots=[] (handled by the parse-failure branch). But the
+    contract on the success path is also defensive: if a future
+    compiler version (or a custom diagnostic plugin) lets a tree
+    elaborate while still emitting ERROR-severity diagnostics, the
+    viewer must surface that — not silently render a clean tree.
+
+    Test approach: monkey-patch ``_address_conflict_diagnostics`` to
+    always inject an ERROR. Verify the success path lands the URI in
+    ``stale_uris`` and bumps the version so the client re-fetches."""
+    from systemrdl.messages import Severity
+    from systemrdl_lsp import server as server_mod
+    from systemrdl_lsp.compile import CompilerMessage
+
+    rdl = tmp_path / "synthetic_error.rdl"
+    rdl.write_text(SAMPLE_RDL)
+    uri = rdl.as_uri()
+
+    def fake_conflicts(_roots, _tmp_path):
+        return [
+            CompilerMessage(
+                severity=Severity.ERROR,
+                text="synthetic post-elaborate ERROR for test",
+                file_path=rdl,
+                line_1b=1,
+                col_start_1b=1,
+                col_end_1b=1,
+            ),
+        ]
+
+    monkeypatch.setattr(
+        server_mod, "_address_conflict_diagnostics", fake_conflicts,
+    )
+
+    s = build_server()
+    state = s._systemrdl_state
+    full_pass = s._systemrdl_full_pass_async
+    state.elaborate_in_process = False
+    state.elaborate_pool = real_pool
+
+    _run(full_pass(uri, SAMPLE_RDL))
+    cached = state.cache.get(uri)
+    assert cached is not None
+    assert len(cached.roots) == 1
+    assert uri in state.stale_uris, (
+        "success path must mark URI stale when post-elaborate diagnostics "
+        "carry any ERROR severity (defensive against permissive compiler "
+        "futures and address-conflict-style tooling)"
+    )
+
+
 def test_disk_cache_load_overrides_stale_with_current_state(tmp_path, monkeypatch):
     """Field-reported regression: editing a file invalid + asking the
     viewer for the tree returned the cached-on-disk envelope (with

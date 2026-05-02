@@ -225,7 +225,7 @@ wheels = [
 
 [[package]]
 name = "systemrdl-lsp"
-version = "0.18.0"
+version = "0.18.4"
 source = { editable = "packages/systemrdl-lsp" }
 dependencies = [
     { name = "lsprotocol" },

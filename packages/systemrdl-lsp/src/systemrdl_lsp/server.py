@@ -157,7 +157,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-SERVER_VERSION = "0.18.3"
+SERVER_VERSION = "0.18.4"
 
 
 def _iter_rdl_files(root: pathlib.Path, exclude_dirs: set[str]):
@@ -583,14 +583,27 @@ def build_server() -> LanguageServer:
             except Exception:
                 logger.debug("address-conflict scan failed", exc_info=True)
 
+            # ``has_errors`` covers BOTH compile/parse errors AND post-
+            # elaborate conflict diagnostics (address overlaps, alias
+            # collisions, …). The compiler can elaborate a tree
+            # successfully and still emit semantic ERROR severity for
+            # things like duplicate addresses. The viewer needs to know:
+            # field-reported as "alias и main с одинаковым адресом —  # noqa: RUF003
+            # в Problems error, в webview ничего". We re-use the
+            # ``stale_uris`` set + envelope ``stale`` flag for this
+            # signal; the bar text on the viewer side already reads
+            # broadly enough ("Showing last good elaboration · current
+            # parse failed" → would benefit from rewording but that's
+            # extension-side).
+            has_errors = any(m.severity == Severity.ERROR for m in messages)
+            new_fp = _fingerprint_roots(roots)
+            old = state.cache.get(uri)
             # T2-B fingerprint short-circuit: if the elaborated tree is byte-
             # identical (semantically) to the prior one, drop the new tmp_path
             # (we keep the prior entry's tmp_path so lazy SourceRefs keep
             # working) and skip the cache.put + notification. Diagnostics
             # still publish because they may differ across runs (e.g.,
             # severity tweaked by config) without an AST diff.
-            new_fp = _fingerprint_roots(roots)
-            old = state.cache.get(uri)
             if (
                 old is not None
                 and old.ast_fingerprint is not None
@@ -601,18 +614,21 @@ def build_server() -> LanguageServer:
                 old.text = buffer_text
                 old.text_canonical = _canonicalize_for_skip(buffer_text)
                 old.elaborated_at = time.time()
-                # Stale transition True → False. Without this branch the
-                # viewer keeps rendering the stale-bar even after a
-                # successful re-elaborate when the AST happened to be
-                # identical to the prior good version (user reverted
-                # their broken edit verbatim, or made a no-op semantic
-                # change). Bump version + invalidate serialized so the
-                # client's sinceVersion check fails and the next fetch
-                # builds a fresh envelope with stale=False. Field-
-                # reported as "stale message stuck on a valid RDL".
+                # Symmetric stale transition (handles both T → F and F
+                # → T). The latter fires when the user introduces an
+                # address conflict in a buffer that otherwise produces
+                # the same fingerprint as before — the AST is the same
+                # but the diagnostics changed. Either direction needs
+                # a version bump + serialized invalidation so the
+                # client re-fetches and the viewer's stale-bar
+                # reflects current state.
                 was_stale = uri in state.stale_uris
-                state.stale_uris.discard(uri)
-                if was_stale:
+                if has_errors:
+                    state.stale_uris.add(uri)
+                else:
+                    state.stale_uris.discard(uri)
+                is_stale = uri in state.stale_uris
+                if was_stale != is_stale:
                     old.version += 1
                     old.serialized = None
                     version_after = old.version
@@ -622,7 +638,10 @@ def build_server() -> LanguageServer:
                 # src_ref reads for hover/documentSymbol). Old entry's
                 # temp file is unlinked there.
                 state.cache.put(uri, roots, buffer_text, tmp_path, ast_fingerprint=new_fp)
-                state.stale_uris.discard(uri)
+                if has_errors:
+                    state.stale_uris.add(uri)
+                else:
+                    state.stale_uris.discard(uri)
                 cached = state.cache.get(uri)
                 version_after = cached.version if cached is not None else None
                 _update_include_graph(uri, consumed_files)
