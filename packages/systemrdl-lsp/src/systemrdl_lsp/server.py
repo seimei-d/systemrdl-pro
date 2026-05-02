@@ -24,11 +24,13 @@ import asyncio
 import dataclasses
 import logging
 import pathlib
+import time
 from typing import TYPE_CHECKING, Any
 
 from lsprotocol.types import (
     INITIALIZED,
     TEXT_DOCUMENT_DID_CHANGE,
+    TEXT_DOCUMENT_DID_CLOSE,
     TEXT_DOCUMENT_DID_OPEN,
     TEXT_DOCUMENT_DID_SAVE,
     TEXT_DOCUMENT_SEMANTIC_TOKENS_FULL,
@@ -36,6 +38,7 @@ from lsprotocol.types import (
     CodeLens,
     DidChangeConfigurationParams,
     DidChangeTextDocumentParams,
+    DidCloseTextDocumentParams,
     DidOpenTextDocumentParams,
     DidSaveTextDocumentParams,
     FoldingRange,
@@ -66,6 +69,7 @@ from .compile import (
     _compile_text,
     _elaborate,
     _expand_include_vars,
+    _fingerprint_roots,
     _peakrdl_toml_paths,
     _perl_available,
     _perl_in_source,
@@ -144,7 +148,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-SERVER_VERSION = "0.16.0"
+SERVER_VERSION = "0.17.0"
 
 
 def _iter_rdl_files(root: pathlib.Path, exclude_dirs: set[str]):
@@ -304,6 +308,7 @@ __all__ = [
     "_elaborate",
     "_expand_include_vars",
     "_field_access_token",
+    "_fingerprint_roots",
     "_folding_ranges_from_text",
     "_format_hex",
     "_format_text",
@@ -348,6 +353,26 @@ class ServerState:
     cache: ElaborationCache = dataclasses.field(default_factory=ElaborationCache)
     pending: dict[str, asyncio.Task] = dataclasses.field(default_factory=dict)
     include_paths: list[str] = dataclasses.field(default_factory=list)
+    # T2-A: forward and reverse maps over the include graph, populated from
+    # the set of source files the compiler actually opened on each successful
+    # elaborate (see ``compile._harvest_consumed_files``). Used to proactively
+    # re-elaborate any open consumer when a library file changes — the user
+    # no longer has to close-and-reopen ``stress_25k.rdl`` after editing
+    # ``types.rdl``. Both maps key on URIs.
+    include_graph: dict[str, set[str]] = dataclasses.field(default_factory=dict)
+    includee_to_includers: dict[str, set[str]] = dataclasses.field(default_factory=dict)
+    # T2-C: per-URI elaboration mutex. Replaces the TODO(T2) marker that used
+    # to live above ``_full_pass_async``. Same-URI didOpen+didSave races
+    # serialize through this lock so the second call sees the first call's
+    # cache.put before short-circuiting on buffer-equality. Different URIs
+    # still elaborate concurrently (subject to GIL contention).
+    uri_elab_locks: dict[str, asyncio.Lock] = dataclasses.field(default_factory=dict)
+    # Test-only override that stands in for the pygls workspace. When
+    # non-None, ``_is_open(uri)`` returns ``uri in self`` and
+    # ``_read_buffer(uri)`` returns ``self.get(uri)`` instead of going
+    # through ``server.workspace`` (which is not initialized in unit
+    # tests). Production code never sets this. Map: URI → buffer text.
+    test_open_buffers: dict[str, str] | None = None
     # Substitution map for ``$VAR`` / ``${VAR}`` inside ```include "..."`` paths.
     # Read from systemrdl-pro.includeVars; falls back to os.environ during expansion.
     include_vars: dict[str, str] = dataclasses.field(default_factory=dict)
@@ -399,11 +424,39 @@ def build_server() -> LanguageServer:
     state = ServerState()
 
     def _read_buffer(uri: str) -> str | None:
+        if state.test_open_buffers is not None:
+            return state.test_open_buffers.get(uri)
         try:
             doc = server.workspace.get_text_document(uri)
         except Exception:
             return None
         return doc.source
+
+    def _update_include_graph(uri: str, consumed_files: set[pathlib.Path]) -> None:
+        """Refresh forward + reverse include maps for ``uri`` (T2-A).
+
+        Replaces this URI's includee set with the freshly observed
+        ``consumed_files`` (converted to URIs). Old reverse-edges that
+        no longer apply are pruned; new ones are added. Cheap — touches
+        only the URIs that actually changed in the dep set.
+        """
+        new_includees: set[str] = set()
+        for path in consumed_files:
+            try:
+                new_includees.add(_path_to_uri(path))
+            except Exception:
+                continue
+        old_includees = state.include_graph.get(uri, set())
+        state.include_graph[uri] = new_includees
+        for stale in old_includees - new_includees:
+            includers = state.includee_to_includers.get(stale)
+            if includers is None:
+                continue
+            includers.discard(uri)
+            if not includers:
+                state.includee_to_includers.pop(stale, None)
+        for added in new_includees - old_includees:
+            state.includee_to_includers.setdefault(added, set()).add(uri)
 
     def _apply_compile_result(
         uri: str,
@@ -411,25 +464,79 @@ def build_server() -> LanguageServer:
         messages: list[CompilerMessage],
         roots: list[RootNode],
         tmp_path: pathlib.Path,
-    ) -> None:
+        consumed_files: set[pathlib.Path],
+    ) -> bool:
+        """Apply elaborate output to cache + diagnostics + viewer notification.
+
+        Returns ``True`` when the AST genuinely changed (cascade-trigger
+        consumers via reverse-dep map). ``False`` when this was a semantic
+        no-op (T2-B fingerprint match) or a parse failure — neither warrants
+        cascading work onto consumers.
+        """
         version_after: int | None = None
+        ast_changed = False
         if roots:
-            # Cache takes ownership of the temp file (it backs lazy src_ref reads
-            # for hover/documentSymbol). Old entry's temp file is unlinked there.
-            state.cache.put(uri, roots, buffer_text, tmp_path)
-            state.stale_uris.discard(uri)
-            cached = state.cache.get(uri)
-            version_after = cached.version if cached is not None else None
             try:
                 conflicts = _address_conflict_diagnostics(roots, tmp_path)
                 messages = list(messages) + conflicts
             except Exception:
                 logger.debug("address-conflict scan failed", exc_info=True)
+
+            # T2-B fingerprint short-circuit: if the elaborated tree is byte-
+            # identical (semantically) to the prior one, drop the new tmp_path
+            # (we keep the prior entry's tmp_path so lazy SourceRefs keep
+            # working) and skip the cache.put + notification. Diagnostics
+            # still publish because they may differ across runs (e.g.,
+            # severity tweaked by config) without an AST diff.
+            new_fp = _fingerprint_roots(roots)
+            old = state.cache.get(uri)
+            if (
+                old is not None
+                and old.ast_fingerprint is not None
+                and old.ast_fingerprint == new_fp
+                and old.roots
+            ):
+                tmp_path.unlink(missing_ok=True)
+                old.text = buffer_text
+                old.elaborated_at = time.time()
+                state.stale_uris.discard(uri)
+                _update_include_graph(uri, consumed_files)
+            else:
+                # Cache takes ownership of the temp file (it backs lazy
+                # src_ref reads for hover/documentSymbol). Old entry's
+                # temp file is unlinked there.
+                state.cache.put(uri, roots, buffer_text, tmp_path, ast_fingerprint=new_fp)
+                state.stale_uris.discard(uri)
+                cached = state.cache.get(uri)
+                version_after = cached.version if cached is not None else None
+                _update_include_graph(uri, consumed_files)
+                ast_changed = True
         else:
-            # Parse failed — keep the previous cache entry intact (D7).
+            # Parse failed OR library file (no top-level addrmap). Both
+            # produce empty roots; tell them apart by looking for ERROR
+            # severity in messages.
+            #
+            # Library files (T2-A): we don't have an AST to fingerprint,
+            # so we conservatively cascade to every open consumer. The
+            # consumer-side buffer-equality + fingerprint short-circuits
+            # absorb redundant work when the includee edit was a no-op
+            # (whitespace, comment).
+            #
+            # Parse failure (D7): keep the previous cache entry intact
+            # so hover/symbol still answer; mark stale so the next valid
+            # buffer triggers a real re-elaborate. Skip cascade — we
+            # don't want to ripple a known-broken state to consumers.
             tmp_path.unlink(missing_ok=True)
-            if state.cache.get(uri) is not None:
-                state.stale_uris.add(uri)
+            had_error = any(m.severity == Severity.ERROR for m in messages)
+            if had_error:
+                if state.cache.get(uri) is not None:
+                    state.stale_uris.add(uri)
+            else:
+                # Library file: refresh the includee graph from this
+                # buffer's perspective (it may itself include other
+                # files) and signal cascade so open consumers re-pick.
+                _update_include_graph(uri, consumed_files)
+                ast_changed = True
         previously_affected = state.diag_affected.get(uri, set())
         state.diag_affected[uri] = _publish_diagnostics(
             server, uri, messages, previously_affected
@@ -440,6 +547,8 @@ def build_server() -> LanguageServer:
         # to fetch the full tree (rdl/elaboratedTree with sinceVersion). This
         # eliminates the user-perceptible refresh delay on save (extension
         # used to wait for didSaveTextDocument before pulling a fresh tree).
+        # T2-B: only fire when ast_changed — a fingerprint-skip path leaves
+        # cache.version untouched so the viewer's existing tree is current.
         if version_after is not None:
             try:
                 server.protocol.notify(
@@ -448,6 +557,8 @@ def build_server() -> LanguageServer:
                 )
             except Exception:
                 logger.debug("could not send elaboratedTreeChanged notification", exc_info=True)
+
+        return ast_changed
 
     def _check_perl_pre_flight(buffer_text: str) -> None:
         """One-shot warning when source uses ``<%`` markers but ``perl`` is missing.
@@ -478,15 +589,54 @@ def build_server() -> LanguageServer:
         except Exception:
             logger.debug("could not surface perl-missing notification", exc_info=True)
 
-    # TODO(T2): no per-URI lock here yet. _on_open and _on_save fire this
-    # immediately (only _on_change is debounced), so a rapid didOpen+didSave
-    # for the same URI launches two concurrent elaborate threads that race
-    # on `state.cache.put` → `cached.expanded` reset. Symptoms today are
-    # cosmetic (one round-trip wasted on a viewer holding the older version),
-    # not data-corrupting. Cleanest fix lands with the T2 background indexer:
-    # an asyncio.Lock per URI gating both this function and `_on_expand_node`.
-    # See PR #1 follow-up. Until then, rely on the buffer-equality short-
-    # circuit below to no-op the redundant pass when content hasn't changed.
+    def _is_open(uri: str) -> bool:
+        """True when the client has the document open in an editor.
+
+        Used by the include-graph cascade (T2-A) to decide whether to
+        proactively re-elaborate a consumer when its includee changes —
+        we don't want to elaborate every workspace file for every typed
+        character, only the ones the user is actively looking at.
+        """
+        if state.test_open_buffers is not None:
+            return uri in state.test_open_buffers
+        try:
+            docs = getattr(server.workspace, "text_documents", None)
+            if isinstance(docs, dict):
+                return uri in docs
+        except Exception:
+            pass
+        # Fallback: probe via get_text_document (may construct a phantom
+        # for unopened files; if the source is non-empty assume open).
+        try:
+            doc = server.workspace.get_text_document(uri)
+            return bool(getattr(doc, "source", None))
+        except Exception:
+            return False
+
+    def _trigger_includer_cascade(changed_uri: str) -> None:
+        """Re-elaborate every open includer of ``changed_uri`` (T2-A).
+
+        Called after a successful AST-changing elaborate so an edit to
+        a library file (``types.rdl``) ripples through to every open
+        consumer (``stress_25k.rdl``) without the user closing and
+        re-opening tabs. Marks each consumer ``stale`` so the buffer-
+        equality short-circuit doesn't pre-empt the recursion. The
+        cascade naturally terminates: each consumer's own elaborate
+        either AST-changes (triggering its own consumers — finite
+        DAG) or fingerprint-skips (no further cascade).
+        """
+        deps = state.includee_to_includers.get(changed_uri)
+        if not deps:
+            return
+        for dep_uri in tuple(deps):
+            if dep_uri == changed_uri or not _is_open(dep_uri):
+                continue
+            dep_text = _read_buffer(dep_uri)
+            if dep_text is None:
+                continue
+            state.stale_uris.add(dep_uri)
+            asyncio.create_task(_full_pass_async(dep_uri, dep_text))
+
     async def _full_pass_async(uri: str, buffer_text: str | None) -> None:
         if buffer_text is None:
             try:
@@ -494,107 +644,146 @@ def build_server() -> LanguageServer:
             except (OSError, ValueError):
                 return
 
-        # Short-circuit: if the buffer text is byte-identical to the last
-        # successful elaboration we already have a fresh tree for this URI.
-        # This eliminates the GIL-pinning re-runs that pile up when VSCode
-        # fires duplicate didOpens on workspace restore, when format-on-save
-        # or trim-trailing-whitespace touches the buffer without producing a
-        # real diff, and when small files get queued behind a 25k re-elaborate
-        # for no reason. Costs one string equality check; saves seconds.
-        prior = state.cache.get(uri)
-        if (
-            prior is not None
-            and prior.text == buffer_text
-            and uri not in state.stale_uris
-        ):
-            return
+        # T2-C: per-URI mutex. Replaces the TODO(T2) marker that used to
+        # warn about same-URI didOpen+didSave races. Different URIs are
+        # not serialized through this lock — cross-URI throughput is still
+        # subject to GIL contention (separate investigation).
+        lock = state.uri_elab_locks.setdefault(uri, asyncio.Lock())
+        t_acquire = time.monotonic()
+        async with lock:
+            t_locked = time.monotonic()
+            if t_locked - t_acquire > 0.05:
+                logger.debug(
+                    "_full_pass_async %s: waited %.3fs for uri lock",
+                    uri, t_locked - t_acquire,
+                )
 
-        _check_perl_pre_flight(buffer_text)
+            # Short-circuit: if the buffer text is byte-identical to the last
+            # successful elaboration we already have a fresh tree for this URI.
+            # This eliminates the GIL-pinning re-runs that pile up when VSCode
+            # fires duplicate didOpens on workspace restore, when format-on-save
+            # or trim-trailing-whitespace touches the buffer without producing a
+            # real diff, and when small files get queued behind a 25k re-elaborate
+            # for no reason. Costs one string equality check; saves seconds.
+            prior = state.cache.get(uri)
+            if (
+                prior is not None
+                and prior.text == buffer_text
+                and uri not in state.stale_uris
+            ):
+                return
 
-        # Tell the client elaboration is starting so it can paint a
-        # "re-elaborating" indicator while keeping the existing tree
-        # interactive. Paired with rdl/elaborationFinished in the finally
-        # block below so the indicator clears on every termination path
-        # (success, timeout, exception). Best-effort: a missed notification
-        # only means a slightly stale UI, never broken state.
-        try:
-            server.protocol.notify("rdl/elaborationStarted", {"uri": uri})
-        except Exception:
-            logger.debug("could not send elaborationStarted", exc_info=True)
+            _check_perl_pre_flight(buffer_text)
 
-        loop = asyncio.get_running_loop()
-        # Run the synchronous compiler off the event loop so a pathological elaborate
-        # can't block hover/cancel/etc. wait_for() can't actually kill the worker thread
-        # on timeout, so we attach a cleanup callback that unlinks the orphan temp file
-        # whenever the late result eventually arrives.
-        fut: asyncio.Future = loop.run_in_executor(
-            None,
-            _compile_text,
-            uri,
-            buffer_text,
-            state.include_paths,
-            state.include_vars,
-            state.perl_safe_opcodes,
-        )
-        try:
-            messages, roots, tmp_path = await asyncio.wait_for(
-                asyncio.shield(fut), timeout=state.elaboration_timeout_s
-            )
-        except asyncio.TimeoutError:
-            logger.warning(
-                "elaborate timeout on %s after %.0fs; keeping last-good",
-                uri, state.elaboration_timeout_s,
-            )
-
-            def _drop_late_result(f: asyncio.Future) -> None:
-                # The compile_text future may raise (compile error → no tmp
-                # produced) or be cancelled. We need to unlink the late tmp
-                # only when it actually exists. `except BaseException` instead
-                # of `except Exception` catches CancelledError on shutdown
-                # and any KeyboardInterrupt; the unlink is a fire-and-forget
-                # cleanup that must never escape this callback.
-                try:
-                    _msgs, _root, late_tmp = f.result()
-                except BaseException:
-                    return
-                try:
-                    late_tmp.unlink(missing_ok=True)
-                except OSError:
-                    pass
-
-            fut.add_done_callback(_drop_late_result)
-            if state.cache.get(uri) is not None:
-                state.stale_uris.add(uri)
+            # Tell the client elaboration is starting so it can paint a
+            # "re-elaborating" indicator while keeping the existing tree
+            # interactive. Paired with rdl/elaborationFinished in the finally
+            # block below so the indicator clears on every termination path
+            # (success, timeout, exception). Best-effort: a missed notification
+            # only means a slightly stale UI, never broken state.
             try:
-                target_path = _uri_to_path(uri)
-            except ValueError:
+                server.protocol.notify("rdl/elaborationStarted", {"uri": uri})
+            except Exception:
+                logger.debug("could not send elaborationStarted", exc_info=True)
+
+            loop = asyncio.get_running_loop()
+            # Run the synchronous compiler off the event loop so a pathological elaborate
+            # can't block hover/cancel/etc. wait_for() can't actually kill the worker thread
+            # on timeout, so we attach a cleanup callback that unlinks the orphan temp file
+            # whenever the late result eventually arrives.
+            t_submit = time.monotonic()
+            fut: asyncio.Future = loop.run_in_executor(
+                None,
+                _compile_text,
+                uri,
+                buffer_text,
+                state.include_paths,
+                state.include_vars,
+                state.perl_safe_opcodes,
+            )
+            try:
+                messages, roots, tmp_path, consumed_files = await asyncio.wait_for(
+                    asyncio.shield(fut), timeout=state.elaboration_timeout_s
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "elaborate timeout on %s after %.0fs; keeping last-good",
+                    uri, state.elaboration_timeout_s,
+                )
+
+                def _drop_late_result(f: asyncio.Future) -> None:
+                    # The compile_text future may raise (compile error → no tmp
+                    # produced) or be cancelled. We need to unlink the late tmp
+                    # only when it actually exists. `except BaseException` instead
+                    # of `except Exception` catches CancelledError on shutdown
+                    # and any KeyboardInterrupt; the unlink is a fire-and-forget
+                    # cleanup that must never escape this callback.
+                    try:
+                        result = f.result()
+                    except BaseException:
+                        return
+                    # _compile_text returns 4-tuple as of T2-A
+                    # (..., consumed_files); index defensively in case shape
+                    # ever changes again.
+                    late_tmp = result[2] if len(result) >= 3 else None
+                    if late_tmp is None:
+                        return
+                    try:
+                        late_tmp.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+
+                fut.add_done_callback(_drop_late_result)
+                if state.cache.get(uri) is not None:
+                    state.stale_uris.add(uri)
+                try:
+                    target_path = _uri_to_path(uri)
+                except ValueError:
+                    _emit_elaboration_finished(uri)
+                    return
+                timeout_msg = CompilerMessage(
+                    severity=Severity.ERROR,
+                    text=(
+                        f"systemrdl-lsp: elaborate exceeded {state.elaboration_timeout_s:.0f}s — "
+                        "viewer is showing last-good tree. Increase the cap with "
+                        "systemrdl-pro.elaborationTimeoutMs if your design legitimately "
+                        "needs longer."
+                    ),
+                    file_path=target_path,
+                    line_1b=1,
+                    col_start_1b=1,
+                    col_end_1b=1,
+                )
+                previously_affected = state.diag_affected.get(uri, set())
+                state.diag_affected[uri] = _publish_diagnostics(
+                    server, uri, [timeout_msg], previously_affected
+                )
                 _emit_elaboration_finished(uri)
                 return
-            timeout_msg = CompilerMessage(
-                severity=Severity.ERROR,
-                text=(
-                    f"systemrdl-lsp: elaborate exceeded {state.elaboration_timeout_s:.0f}s — "
-                    "viewer is showing last-good tree. Increase the cap with "
-                    "systemrdl-pro.elaborationTimeoutMs if your design legitimately "
-                    "needs longer."
-                ),
-                file_path=target_path,
-                line_1b=1,
-                col_start_1b=1,
-                col_end_1b=1,
+            except Exception:
+                logger.exception("unexpected error during async full-pass for %s", uri)
+                _emit_elaboration_finished(uri)
+                return
+            t_compile_done = time.monotonic()
+            ast_changed = _apply_compile_result(
+                uri, buffer_text, messages, roots, tmp_path, consumed_files
             )
-            previously_affected = state.diag_affected.get(uri, set())
-            state.diag_affected[uri] = _publish_diagnostics(
-                server, uri, [timeout_msg], previously_affected
+            t_apply_done = time.monotonic()
+            logger.debug(
+                "_full_pass_async %s: compile=%.3fs apply=%.3fs ast_changed=%s",
+                uri,
+                t_compile_done - t_submit,
+                t_apply_done - t_compile_done,
+                ast_changed,
             )
             _emit_elaboration_finished(uri)
-            return
-        except Exception:
-            logger.exception("unexpected error during async full-pass for %s", uri)
-            _emit_elaboration_finished(uri)
-            return
-        _apply_compile_result(uri, buffer_text, messages, roots, tmp_path)
-        _emit_elaboration_finished(uri)
+        # T2-A cascade fires *outside* the URI lock so we don't deadlock on
+        # an A↔B include cycle (impossible at the SystemRDL level, but the
+        # lock ordering shouldn't depend on it). Each consumer takes its own
+        # lock; if one is currently elaborating, the cascade naturally
+        # serializes there.
+        if ast_changed:
+            _trigger_includer_cascade(uri)
 
     def _emit_elaboration_finished(uri: str) -> None:
         """Notify clients that an in-flight elaborate completed (any outcome).
@@ -768,6 +957,23 @@ def build_server() -> LanguageServer:
         if existing is not None:
             existing.cancel()
         state.pending[uri] = asyncio.ensure_future(_debounced_full_pass(uri))
+
+    @server.feature(TEXT_DOCUMENT_DID_CLOSE)
+    def _on_close(_ls: LanguageServer, params: DidCloseTextDocumentParams) -> None:
+        """Best-effort cleanup of per-URI state when a document closes (T2-C).
+
+        Only drops the elaboration lock if it isn't currently held — a
+        lock with active waiters / a pending elaborate keeps it alive
+        until the next close. The include-graph and reverse map are
+        intentionally NOT cleared here: a workspace-symbol search or a
+        consumer that gets re-opened later is still served correctly
+        by stale-but-bounded data, and clearing would force redundant
+        re-elaborates on every tab close.
+        """
+        uri = params.text_document.uri
+        lock = state.uri_elab_locks.get(uri)
+        if lock is not None and not lock.locked():
+            state.uri_elab_locks.pop(uri, None)
 
     @server.feature("$/cancelRequest")
     def _on_cancel(_ls: LanguageServer, _params: Any) -> None:
@@ -1620,5 +1826,13 @@ def build_server() -> LanguageServer:
             )
         cached.expanded[node_id] = result
         return result
+
+    # Test hook: expose ServerState + the closures the integration suite
+    # needs to drive elaborate paths without spinning up real stdio.
+    # Production code never reads these attributes; private leading
+    # underscore signals "do not depend on this from extension/CLI".
+    server._systemrdl_state = state  # type: ignore[attr-defined]
+    server._systemrdl_full_pass_async = _full_pass_async  # type: ignore[attr-defined]
+    server._systemrdl_apply_compile_result = _apply_compile_result  # type: ignore[attr-defined]
 
     return server

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import dataclasses
 import functools
+import hashlib
 import logging
 import os
 import pathlib
@@ -261,14 +262,19 @@ def _compile_text(
     incl_search_paths: list[str] | None = None,
     include_vars: dict[str, str] | None = None,
     perl_safe_opcodes: list[str] | None = None,
-) -> tuple[list[CompilerMessage], list[RootNode], pathlib.Path]:
-    """Compile in-memory buffer text. Returns (messages, roots, temp_path).
+) -> tuple[list[CompilerMessage], list[RootNode], pathlib.Path, set[pathlib.Path]]:
+    """Compile in-memory buffer text. Returns (messages, roots, temp_path, consumed_files).
 
     ``roots`` is a list of RootNode instances — one per top-level ``addrmap``
     *definition* in the file (Decision 3C). ``compiler.elaborate()`` with no
     ``top_def_name`` only elaborates the *last* defined addrmap, so we enumerate
     ``compiler.root.comp_defs`` and elaborate each one separately. An empty list
     means parse failed or the file has no top-level addrmap (a library file).
+
+    ``consumed_files`` is the set of source files the compiler actually opened
+    while processing this buffer, minus ``temp_path`` itself. Drives the
+    include reverse-dep map (T2-A) so editing ``types.rdl`` proactively
+    re-elaborates every open file that included it.
 
     Implementation: write ``text`` to a temp file (preserves line numbers verbatim),
     point ``incl_search_paths`` at the original file's directory so relative
@@ -343,7 +349,197 @@ def _compile_text(
         CompilerMessage.from_compiler(sev, msg_text, src_ref, translate)
         for sev, msg_text, src_ref in printer.captured
     ]
-    return messages, roots, tmp_path
+    consumed = _harvest_consumed_files(roots, printer.captured, tmp_path)
+    return messages, roots, tmp_path, consumed
+
+
+# ---------------------------------------------------------------------------
+# T2-A: include reverse-dep harvesting
+# ---------------------------------------------------------------------------
+
+
+def _harvest_consumed_files(
+    roots: list[RootNode],
+    captured: list[tuple[Severity, str, Any]],
+    tmp_path: pathlib.Path,
+) -> set[pathlib.Path]:
+    """Return the set of source files the compiler opened, minus ``tmp_path``.
+
+    Walks every ``src_ref`` we can reach: diagnostic messages and every
+    instance's ``def_src_ref`` / ``inst_src_ref`` in the elaborated tree.
+    Used by the LSP to maintain the include-graph reverse map so an edit to
+    a library file proactively re-elaborates open consumers (T2-A).
+    """
+    files: set[pathlib.Path] = set()
+    try:
+        tmp_resolved = tmp_path.resolve()
+    except OSError:
+        tmp_resolved = tmp_path
+
+    def feed(raw: Any) -> None:
+        if not raw:
+            return
+        try:
+            path = pathlib.Path(raw).resolve()
+        except (OSError, ValueError):
+            return
+        if path == tmp_resolved:
+            return
+        files.add(path)
+
+    for _sev, _text, src_ref in captured:
+        if src_ref is None:
+            continue
+        feed(getattr(src_ref, "filename", None))
+
+    def walk(node: Any) -> None:
+        inst = getattr(node, "inst", None)
+        if inst is not None:
+            for attr in ("def_src_ref", "inst_src_ref"):
+                ref = getattr(inst, attr, None)
+                if ref is not None:
+                    feed(getattr(ref, "filename", None))
+        try:
+            kids = list(node.children(skip_not_present=False))
+        except TypeError:
+            try:
+                kids = list(node.children())
+            except Exception:
+                kids = []
+        except Exception:
+            kids = []
+        for kid in kids:
+            walk(kid)
+
+    for root in roots:
+        try:
+            top = list(root.children(skip_not_present=False))
+        except TypeError:
+            try:
+                top = list(root.children())
+            except Exception:
+                top = []
+        except Exception:
+            top = []
+        for child in top:
+            walk(child)
+
+    return files
+
+
+# ---------------------------------------------------------------------------
+# T2-B: AST fingerprint
+# ---------------------------------------------------------------------------
+
+
+# Field properties hashed into the fingerprint. Picked for what the viewer
+# *renders* (access mode, reset, encode) plus the modifier set that affects
+# the access-summary glyph. Source positions intentionally excluded — a
+# whitespace-only edit must hash identically.
+_FIELD_FP_PROPS = (
+    "sw", "hw", "reset", "onread", "onwrite",
+    "we", "wel", "swacc", "swmod",
+    "rclr", "rset", "woclr", "woset",
+    "singlepulse", "intr",
+)
+_REG_FP_PROPS = ("regwidth", "accesswidth", "shared")
+
+
+def _fingerprint_roots(roots: list[RootNode]) -> str:
+    """Stable SHA-256 hex of the elaborated tree's viewer-facing semantics.
+
+    The LSP uses this to detect "elaborate produced an identical tree" and
+    skip the cache version bump + ``rdl/elaboratedTreeChanged`` push (T2-B).
+    Two compiles whose fingerprints match are guaranteed to produce
+    identical spine envelopes — within a few hundred ms on 25k registers,
+    cheaper than the spine serialize we avoid.
+
+    Hashed inputs: node type, instance name, absolute address, array
+    dimensions, regwidth/accesswidth (regs), lsb/msb + access modifiers
+    (fields), and recursive child hashes. Excluded on purpose: source
+    line numbers, file paths, ``inst_src_ref``, dynamic property origin —
+    those change with no semantic effect on the viewer.
+    """
+    from systemrdl.node import FieldNode, RegNode
+
+    h = hashlib.sha256()
+
+    def feed(s: str) -> None:
+        h.update(s.encode("utf-8", errors="replace"))
+        h.update(b"\0")
+
+    def safe_prop(node: Any, name: str) -> str:
+        try:
+            value = node.get_property(name)
+        except Exception:
+            return "ERR"
+        if value is None:
+            return ""
+        # Enum values (AccessType, OnReadType, ...) have stable repr.
+        # Ints stringify cleanly. Expressions get whatever __repr__ yields,
+        # which is consistent across runs on the same compiler version.
+        return repr(value)
+
+    def visit(node: Any) -> None:
+        feed(type(node).__name__)
+        feed(str(node.inst_name or ""))
+        try:
+            feed(str(node.absolute_address))
+        except Exception:
+            feed("?addr")
+        inst = getattr(node, "inst", None)
+        if inst is not None:
+            feed(str(getattr(inst, "type_name", "") or ""))
+            try:
+                dims = getattr(inst, "array_dimensions", None) or ()
+                feed(",".join(str(d) for d in dims))
+            except Exception:
+                feed("?dims")
+            try:
+                stride = getattr(inst, "array_stride", None)
+                feed(str(stride) if stride is not None else "")
+            except Exception:
+                feed("?stride")
+        if isinstance(node, RegNode):
+            for prop in _REG_FP_PROPS:
+                feed(f"{prop}={safe_prop(node, prop)}")
+            feed(f"is_alias={getattr(node, 'is_alias', False)}")
+        elif isinstance(node, FieldNode):
+            try:
+                feed(f"lsb={node.lsb}")
+                feed(f"msb={node.msb}")
+            except Exception:
+                feed("?bits")
+            for prop in _FIELD_FP_PROPS:
+                feed(f"{prop}={safe_prop(node, prop)}")
+        try:
+            kids = list(node.children(skip_not_present=False))
+        except TypeError:
+            try:
+                kids = list(node.children())
+            except Exception:
+                kids = []
+        except Exception:
+            kids = []
+        feed(f"#kids={len(kids)}")
+        for kid in kids:
+            visit(kid)
+
+    for root in roots:
+        feed("$ROOT")
+        try:
+            top = list(root.children(skip_not_present=False))
+        except TypeError:
+            try:
+                top = list(root.children())
+            except Exception:
+                top = []
+        except Exception:
+            top = []
+        for child in top:
+            visit(child)
+
+    return h.hexdigest()
 
 
 def _elaborate(path: pathlib.Path) -> list[tuple[Severity, str, Any]]:
@@ -354,7 +550,7 @@ def _elaborate(path: pathlib.Path) -> list[tuple[Severity, str, Any]]:
         return printer.captured
 
     text = path.read_text(encoding="utf-8")
-    messages, _roots, tmp_path = _compile_text(path.as_uri(), text)
+    messages, _roots, tmp_path, _consumed = _compile_text(path.as_uri(), text)
     tmp_path.unlink(missing_ok=True)  # legacy path doesn't cache, safe to drop now
     out: list[tuple[Severity, str, Any]] = []
     for m in messages:
@@ -398,6 +594,13 @@ class CachedElaboration:
     # initialized on first expand request. Cleared whenever the entry is
     # replaced (next elaboration regenerates ids so old entries are stale).
     expanded: dict[str, dict[str, Any]] | None = None
+    # T2-B: SHA-256 fingerprint of the elaborated tree's viewer-facing
+    # semantics. Lets ``_apply_compile_result`` skip the cache version
+    # bump + ``rdl/elaboratedTreeChanged`` push when an edit produced an
+    # identical AST (whitespace, comments, dead-code rename, etc.).
+    # ``None`` only on legacy entries seeded before T2 — treated as
+    # "always different" to preserve current behaviour.
+    ast_fingerprint: str | None = None
 
 
 class ElaborationCache:
@@ -424,6 +627,7 @@ class ElaborationCache:
         roots: list[RootNode],
         text: str,
         temp_path: pathlib.Path | None = None,
+        ast_fingerprint: str | None = None,
     ) -> None:
         old = self._entries.get(uri)
         old_version = 0
@@ -437,6 +641,7 @@ class ElaborationCache:
             elaborated_at=time.time(),
             temp_path=temp_path,
             version=old_version + 1,
+            ast_fingerprint=ast_fingerprint,
         )
 
     def clear(self) -> None:
