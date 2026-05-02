@@ -378,6 +378,7 @@ def _serialize_addressable(
     path_translate: dict[pathlib.Path, pathlib.Path] | None = None,
     lazy: bool = False,
     id_counter: list[int] | None = None,
+    out_index: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Serialize one ``AddrmapNode | RegfileNode | RegNode`` to its dict shape.
 
@@ -402,6 +403,13 @@ def _serialize_addressable(
         out = _serialize_reg(node, cache, path_translate, lazy=lazy)
         if my_id is not None:
             out["nodeId"] = my_id
+            # Populate the expand-index in lock-step with id assignment
+            # so callers (the LSP) can hand the dict to ``expand_node``
+            # for O(1) lookup. Built during the same DFS as the spine
+            # — zero extra walk cost. Without this, the first click on
+            # any reg paid an O(N) tree walk to find the matching id.
+            if out_index is not None:
+                out_index[my_id] = node
         return out
     if isinstance(node, (AddrmapNode, RegfileNode)):
         kind = "addrmap" if isinstance(node, AddrmapNode) else "regfile"
@@ -409,7 +417,8 @@ def _serialize_addressable(
         try:
             for c in node.children(unroll=True):
                 child = _serialize_addressable(
-                    c, cache, path_translate, lazy=lazy, id_counter=id_counter
+                    c, cache, path_translate, lazy=lazy,
+                    id_counter=id_counter, out_index=out_index,
                 )
                 if child is not None:
                     children.append(child)
@@ -469,6 +478,7 @@ def _serialize_root(
     path_translate: dict[pathlib.Path, pathlib.Path] | None = None,
     version: int = 0,
     lazy: bool = False,
+    out_index: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the JSON envelope matching ``schemas/elaborated-tree.json`` v0.2.0.
 
@@ -503,7 +513,8 @@ def _serialize_root(
         try:
             for top in r.children(unroll=True):
                 serialized = _serialize_addressable(
-                    top, cache, path_translate, lazy=lazy, id_counter=id_counter
+                    top, cache, path_translate, lazy=lazy,
+                    id_counter=id_counter, out_index=out_index,
                 )
                 if serialized is not None and serialized.get("kind") == "addrmap":
                     serialized_roots.append(serialized)
@@ -528,6 +539,7 @@ def _serialize_spine(
     stale: bool,
     path_translate: dict[pathlib.Path, pathlib.Path] | None = None,
     version: int = 0,
+    out_index: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Lazy-mode envelope: spine + placeholders. See ``_serialize_root``.
 
@@ -535,8 +547,18 @@ def _serialize_spine(
     callsite (``_serialize_spine(...)`` vs ``_serialize_root(..., lazy=True)``)
     and so the LSP server can reach for one or the other based on the
     client's advertised capability without sprinkling kwargs.
+
+    ``out_index``: when provided, the same DFS that builds the spine
+    populates a ``{nodeId: RegNode}`` map. Hand it to ``expand_node``
+    later for O(1) lookup. Avoids the slow first-click penalty on big
+    designs (lazy-build via ``_build_node_index`` ran in to_thread but
+    still pinned the GIL for ~hundreds of ms on 25k regs, making
+    concurrent expand requests on other URIs queue behind it).
     """
-    return _serialize_root(roots_input, stale, path_translate, version, lazy=True)
+    return _serialize_root(
+        roots_input, stale, path_translate, version,
+        lazy=True, out_index=out_index,
+    )
 
 
 def _build_node_index(

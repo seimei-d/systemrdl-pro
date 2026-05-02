@@ -4,6 +4,24 @@ All notable changes to **SystemRDL Pro** are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [SemVer](https://semver.org/).
 
+## [0.28.3] — 2026-05-02
+
+Bumps bundled language server to **systemrdl-lsp 0.20.3**.
+
+### Fixed
+
+- **First-click expand was still slow on big designs and serialized
+  across panels.** 0.28.2's `expand_node` O(1) fix lazy-built the
+  `nodeId → RegNode` index on first click, but on a 25k-reg design
+  that build itself ran for hundreds of ms holding the GIL — so
+  clicking a register in stress_25k.rdl AND simultaneously clicking a
+  register in another open file made the second click wait for the
+  first to finish. Now the index is built FOR FREE during spine
+  serialization (same DFS that assigns node ids). By the time the
+  viewer renders and the user can click, the index is already
+  populated, so every expand request is a O(1) dict lookup with no
+  CPU work to contend over.
+
 ## [0.28.2] — 2026-05-02
 
 Bumps bundled language server to **systemrdl-lsp 0.20.2**.

@@ -2260,6 +2260,27 @@ def build_server() -> LanguageServer:
                     # error, webview shows nothing wrong".
                     disk_envelope["stale"] = uri in state.stale_uris
                     cached.serialized = disk_envelope
+                    # Disk hit skips the spine-build, which is also where
+                    # we now populate the expand-index for free. Build
+                    # it here on a thread so the first click after a
+                    # window reload doesn't pay the slow O(N) walk.
+                    # Fire-and-forget — the click handler will lazy-build
+                    # too if it races ahead, so this is purely an
+                    # optimization, not a correctness requirement.
+                    if cached.node_index is None:
+                        async def _bg_build_index(c: Any = cached) -> None:
+                            try:
+                                idx = await asyncio.to_thread(
+                                    _build_node_index, c.roots
+                                )
+                                if c.node_index is None:
+                                    c.node_index = idx
+                            except Exception:
+                                logger.debug(
+                                    "background node-index build failed",
+                                    exc_info=True,
+                                )
+                        asyncio.create_task(_bg_build_index())
                     return disk_envelope
 
         try:
@@ -2274,15 +2295,30 @@ def build_server() -> LanguageServer:
         # Pick spine vs full based on the client's advertised capability and
         # run in a thread so the event loop stays responsive during the
         # ~1s (spine) or ~6s (full) wall-clock at 25k regs.
+        # Build the expand-index alongside the spine on the same DFS pass
+        # — zero extra walk cost. By the time the viewer renders and the
+        # user can click a placeholder reg, ``cached.node_index`` is
+        # already populated, so ``_on_expand_node`` is an O(1) dict
+        # lookup. Pre-fix, the index was lazy-built on first click via
+        # _build_node_index in to_thread; on a 25k-reg design that ran
+        # for hundreds of ms holding the GIL, blocking concurrent
+        # expand requests on other URIs (field-reported as "click on
+        # small file's reg waits for big file's first click").
         serialize_fn = _serialize_spine if state.lazy_supported else _serialize_root
+        index_out: dict[str, Any] | None = (
+            {} if state.lazy_supported and cached.node_index is None else None
+        )
         envelope = await asyncio.to_thread(
             serialize_fn,
             cached.roots,
             uri in state.stale_uris,
             path_translate=translate,
             version=cached.version,
+            out_index=index_out,
         )
         cached.serialized = envelope
+        if index_out is not None:
+            cached.node_index = index_out
 
         # Persist spine to disk (best-effort, fire-and-forget) for window-reload
         # speed. Full trees are too big to be worth caching to disk.
