@@ -442,7 +442,7 @@ def build_server() -> LanguageServer:
         # used to wait for didSaveTextDocument before pulling a fresh tree).
         if version_after is not None:
             try:
-                server.send_notification(
+                server.protocol.notify(
                     "rdl/elaboratedTreeChanged",
                     {"uri": uri, "version": version_after},
                 )
@@ -509,7 +509,7 @@ def build_server() -> LanguageServer:
         # (success, timeout, exception). Best-effort: a missed notification
         # only means a slightly stale UI, never broken state.
         try:
-            server.send_notification("rdl/elaborationStarted", {"uri": uri})
+            server.protocol.notify("rdl/elaborationStarted", {"uri": uri})
         except Exception:
             logger.debug("could not send elaborationStarted", exc_info=True)
 
@@ -586,7 +586,7 @@ def build_server() -> LanguageServer:
         the pass succeeded, timed out, or threw. Best-effort.
         """
         try:
-            server.send_notification("rdl/elaborationFinished", {"uri": uri})
+            server.protocol.notify("rdl/elaborationFinished", {"uri": uri})
         except Exception:
             logger.debug("could not send elaborationFinished", exc_info=True)
 

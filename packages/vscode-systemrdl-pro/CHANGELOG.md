@@ -39,6 +39,27 @@ project uses [SemVer](https://semver.org/).
   every event triggered a full elaborate; on a 25k file this would pin
   the GIL and stall opens of small files. Now we short-circuit on a
   string equality check.
+- **LSP custom notifications now actually fire.** Pre-existing
+  `rdl/elaboratedTreeChanged` (and the new `rdl/elaboration{Started,
+  Finished}`) were calling `server.send_notification(...)` — a method
+  that doesn't exist on `pygls.lsp.server.LanguageServer` in pygls 2.x.
+  The call raised `AttributeError`, swallowed by an outer `try/except`,
+  so the notification silently never reached the client. Switched to
+  the supported `server.protocol.notify(...)` API. Side effects beyond
+  the new banner: edits to `.rdl` files now refresh the Memory Map
+  automatically (renames, reset-value tweaks, etc.) without needing
+  to switch tabs to force a refresh.
+- **No more `Error: Webview is disposed` in the host log.** When a late
+  LSP notification (expand result, tree update) arrives just after the
+  user closed a Memory Map tab, `panel.webview.postMessage` returns a
+  Thenable that rejects with that error. We now swallow it explicitly
+  via `.then(undefined, () => {})` since it's a normal close-race.
+- **Loading state during initial elaborate.** Opening a `.rdl` file
+  used to flash the "No top-level addrmap found" pane for ~10s on a
+  25k design while the LSP was still working on the first elaborate.
+  The viewer now shows "Loading…" until the LSP reports a real version
+  (`>= 1`); after that the addrmap-less pane only shows for files that
+  truly contain no addrmap.
 
 ## [0.23.0] — 2026-05-01
 

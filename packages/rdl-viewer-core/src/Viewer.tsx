@@ -230,7 +230,15 @@ export function Viewer({ transport }: Props) {
       });
   }, [found, tree, transport, pendingExpansions]);
 
-  if (!tree) {
+  // Empty + version=0 = LSP responded before initial elaborate finished (server
+  // returns a stub envelope when its cache is still empty). Don't paint the
+  // "no top-level addrmap" pane in that window — it's misleading and resolves
+  // automatically once `rdl/elaboratedTreeChanged` triggers a refresh. After
+  // version >= 1 the empty-roots state actually means "library file with no
+  // addrmap" and we let the existing message render.
+  const stillElaboratingFirstPass =
+    !tree || (tree.version === 0 && (tree.roots ?? []).length === 0);
+  if (stillElaboratingFirstPass) {
     return (
       <div className="rdl-viewer">
         <div className="rdl-empty"><p>Loading…</p></div>

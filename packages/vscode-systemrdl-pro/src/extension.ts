@@ -496,8 +496,18 @@ function attachMemoryMapPanel(
 
 /** Post to a specific panel; no-ops gracefully if the panel was disposed. */
 function safePostTo(entry: PanelEntry, message: unknown): void {
+  // postMessage returns a Thenable<boolean> that REJECTS when the webview
+  // has been disposed (panel.dispose() — e.g. user closed the Memory Map
+  // tab). The synchronous try/catch only catches errors thrown immediately,
+  // not promise rejections, so a closed-panel post used to surface as
+  // unhandled "Error: Webview is disposed" in the host log. We attach a
+  // .then handler to swallow it explicitly — this is the normal race when
+  // a late LSP notification arrives just after the user closes the panel.
   try {
-    entry.panel.webview.postMessage(message);
+    Promise.resolve(entry.panel.webview.postMessage(message)).then(
+      undefined,
+      () => {},
+    );
   } catch (err) {
     outputChannel?.warn(`webview.postMessage failed: ${err}`);
   }
