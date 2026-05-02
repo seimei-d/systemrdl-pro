@@ -4,6 +4,24 @@ All notable changes to **SystemRDL Pro** are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [SemVer](https://semver.org/).
 
+## [0.28.4] — 2026-05-02
+
+### Fixed
+
+- **Viewer was still slow on click into a 25k-reg placeholder, even
+  though the LSP returned in <1 ms.** The 0.28.3 LSP fix made
+  `expand_node` truly O(1), but the viewer was still spending hundreds
+  of ms per click on JS-side work: `findRegByKey` ran a full O(N)
+  DFS walk every time the selection changed (twice — once in the
+  auto-select effect, once in the `found` useMemo), and the expand
+  response was spliced INTO the tree state so `flatRows` and the new
+  `regIndex` both rebuilt afterwards (each O(N)). Now: a per-root
+  `Map<key, {reg, path}>` makes selection lookup O(1), and the
+  populated reg is stored out-of-band keyed by `version:nodeId` and
+  overrides `found.reg` at render time — the tree state is never
+  touched, so no downstream memo invalidation. Click-to-Detail is now
+  bound by React reconciliation alone.
+
 ## [0.28.3] — 2026-05-02
 
 Bumps bundled language server to **systemrdl-lsp 0.20.3**.

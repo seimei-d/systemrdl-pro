@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { Addrmap, ElaboratedTree, Reg, SourceLoc, Transport, TreeNode } from './types';
-import { findFirstReg, findRegByKey, isContainer, subtreeMatches, type FilterScope } from './util';
+import type { ElaboratedTree, Reg, SourceLoc, Transport, TreeNode } from './types';
+import { findFirstReg, isContainer, subtreeMatches, type FilterScope } from './util';
 import { buildFlatList, FlatRow, Tree } from './Tree';
 import { Detail } from './Detail';
 import { ContextMenu, CtxMenuItem, CtxMenuState } from './ContextMenu';
@@ -86,15 +86,41 @@ export function Viewer({ transport }: Props) {
     [root, filter, filterScope, collapsed],
   );
 
+  // Build a key → {reg, path} index once per root. Drives both the
+  // auto-select effect and the `found` lookup below. Pre-fix every
+  // click ran two `findRegByKey` DFS walks (one in this effect, one
+  // in `found`'s useMemo) plus the flatRows rebuild after splice;
+  // on a 25k-reg design that meant noticeable lag from "click reg"
+  // to "Detail panel updated", which the user perceived as slow
+  // expand. With the index, `found` is an O(1) Map.get and the
+  // auto-select effect is also constant-time. Index build is itself
+  // O(N) but only re-runs when the tree identity flips
+  // (re-elaboration or splice), not on every interaction.
+  const regIndex = useMemo(() => {
+    const m = new Map<string, { reg: Reg; path: string[] }>();
+    if (!root) return m;
+    function walk(node: TreeNode, segs: string[]): void {
+      if (node.kind === 'reg') {
+        m.set(segs.join('.'), { reg: node, path: segs });
+        return;
+      }
+      const kids = node.children;
+      if (!kids) return;
+      for (const c of kids) walk(c, segs.concat([c.name]));
+    }
+    walk(root, [root.name]);
+    return m;
+  }, [root]);
+
   // Auto-select first reg when root changes or selection becomes invalid.
   useEffect(() => {
     if (!root) return;
-    const stillValid = selectedKey && findRegByKey(root, selectedKey);
+    const stillValid = selectedKey && regIndex.has(selectedKey);
     if (!stillValid) {
       const first = findFirstReg(root, [root.name]);
       setSelectedKey(first?.key ?? null);
     }
-  }, [root, selectedKey]);
+  }, [root, selectedKey, regIndex]);
 
   const filterMatchCount = useMemo(
     () => flatRows.filter(r => r.kind === 'reg').length,
@@ -211,19 +237,40 @@ export function Viewer({ transport }: Props) {
     setCtxMenu({ x: ev.clientX, y: ev.clientY, items });
   }, [onCopy, transport]);
 
-  // Memoised — pre-T4-D this O(n) DFS ran in the render body on every
-  // keystroke, scroll, toast, etc. Only depends on `root` (tree
-  // identity flips on re-elaborate) and `selectedKey`.
-  const found = useMemo(
-    () => (root && selectedKey ? findRegByKey(root, selectedKey) : null),
-    [root, selectedKey],
-  );
+  // Out-of-band map of populated regs, keyed by `version:nodeId`. Pre-fix
+  // an expand response was spliced INTO the tree state, which forced
+  // `flatRows` and `regIndex` to rebuild (each O(N) in tree size). On a
+  // 25k-reg design that meant a few hundred ms of pure-JS work between
+  // "click reg" and "Detail panel updated", which the user perceived
+  // as the LSP being slow even after the LSP-side expand became O(1).
+  // Now: store the populated reg out-of-band, override `found.reg` with
+  // it, and leave the tree (and therefore flatRows + regIndex) alone.
+  // Cache scoped by version so a fresh elaboration invalidates all
+  // entries cleanly without a manual purge.
+  const [expandedRegs, setExpandedRegs] = useState<Map<string, Reg>>(() => new Map());
+
+  // O(1) lookup via the per-root regIndex. Pre-fix this was a full
+  // O(N) DFS walk on every selection change — three of them per click
+  // on a 25k-reg design (see regIndex comment).
+  const found = useMemo(() => {
+    const base = selectedKey ? regIndex.get(selectedKey) ?? null : null;
+    if (!base) return null;
+    const v = tree?.version ?? 0;
+    const nid = base.reg.nodeId;
+    if (nid && base.reg.loadState === 'placeholder') {
+      const populated = expandedRegs.get(`${v}:${nid}`);
+      if (populated) {
+        return { reg: { ...populated, loadState: 'loaded' as const }, path: base.path };
+      }
+    }
+    return base;
+  }, [regIndex, selectedKey, expandedRegs, tree?.version]);
 
   // T1.7: lazy expansion of placeholder regs. When the user selects a reg
   // whose `loadState === 'placeholder'`, fire `transport.expandNode` and
-  // splice the populated reg into the tree state so Detail re-renders with
-  // real fields. Per-nodeId in-flight tracking avoids stampedes when the
-  // user rapidly clicks through siblings.
+  // record the populated reg in `expandedRegs` so `found` overrides the
+  // placeholder on next render. Per-key in-flight tracking avoids
+  // stampedes when the user rapidly clicks through siblings.
   //
   // `useRef`, not `useState` with discarded setter. The Set is
   // mutated in place (`.add` / `.delete`) and we never want a re-render
@@ -239,44 +286,37 @@ export function Viewer({ transport }: Props) {
     const nodeId = reg.nodeId;
     const version = tree.version ?? 0;
     // Key by `version:nodeId` (not raw nodeId): the same nodeId in a fresh
-    // elaboration is a *new* request, even though the string matches. With
-    // raw-key tracking, an in-flight expand from version v1 would block the
-    // version-v2 retry until the v1 request resolves as `outdated`, leaving
-    // the spinner up unnecessarily for the round-trip duration.
+    // elaboration is a *new* request, even though the string matches.
     const trackingKey = `${version}:${nodeId}`;
     if (pendingExpansions.has(trackingKey)) return;
+    if (expandedRegs.has(trackingKey)) return;
     pendingExpansions.add(trackingKey);
     transport.expandNode(version, nodeId)
       .then(populated => {
-        // Functional setTree so we always splice into the *current* tree,
-        // not the closure-captured one. If `onTreeUpdate` replaced the tree
-        // while expand was in flight, we splice into the new tree (the
-        // matching placeholder is presumably still there because the new
-        // elaboration would have produced the same shape with the same
-        // nodeId — same DFS order). Falls through gracefully if not.
         pendingExpansions.delete(trackingKey);
-        setTree(currentTree => {
-          if (!currentTree) return currentTree;
-          // spliceExpandedReg returns a fully-cloned tree along
-          // the root → reg path. The new tree object is what flips
-          // React state identity; downstream useMemos keyed on `root`
-          // (buildFlatList → flatRows, etc.) now see a fresh reference
-          // and recompute, fixing the "expand stays as placeholder
-          // even after server returned data" stuck-spinner case.
-          return spliceExpandedReg(currentTree, nodeId, populated);
+        setExpandedRegs(prev => {
+          // Drop entries for stale versions to bound memory; only the
+          // current version's entries are reachable through `found`'s
+          // override path anyway.
+          const next = new Map<string, Reg>();
+          const prefix = `${version}:`;
+          for (const [k, v] of prev) {
+            if (k.startsWith(prefix)) next.set(k, v);
+          }
+          next.set(trackingKey, populated);
+          return next;
         });
       })
       .catch(() => {
         // Swallow errors — placeholder stays visible. The common case here
         // is a soft `outdated` from the server (race against a fresh
         // elaboration). The new tree from onTreeUpdate has already arrived
-        // or is in flight, but we still need to nudge React so useEffect
-        // re-evaluates against the latest tree.version with the placeholder
-        // again — otherwise we'd be stuck on the spinner.
+        // or is in flight; nudging React via setExpandedRegs(new Map(prev))
+        // re-runs this effect against the latest tree.version.
         pendingExpansions.delete(trackingKey);
-        setTree(currentTree => (currentTree ? { ...currentTree } : currentTree));
+        setExpandedRegs(prev => new Map(prev));
       });
-  }, [found, tree, transport, pendingExpansions]);
+  }, [found, tree, transport, pendingExpansions, expandedRegs]);
 
   // Empty + version=0 = LSP responded before initial elaborate finished (server
   // returns a stub envelope when its cache is still empty). Don't paint the
@@ -431,72 +471,6 @@ function filterScopePlaceholder(scope: FilterScope): string {
     case 'field':   return 'Filter by field name…';
     default:        return 'Filter (matches name, address, or field name)…';
   }
-}
-
-/**
- * T1.7 / walk a tree and replace the placeholder Reg with the
- * populated one returned by `transport.expandNode`. Returns a NEW tree
- * with every container on the root → reg path freshly cloned, so that
- * `useMemo`s keyed on the root reference (`buildFlatList` → `flatRows`)
- * actually recompute.
- *
- * Pre-T4-A this function mutated `parent.children[i]` in place and
- * relied on a shallow `{ ...currentTree }` spread to flip top-level
- * identity. That was enough to make `Detail`'s `useMemo([reg])`
- * recompute (the reg itself was a fresh object), but the containers
- * between root and reg kept their identity — so `flatRows`,
- * `filterMatchCount`, and any other downstream memo on `root` would
- * silently bail out, leaving the rendered tree showing the placeholder
- * row even though the reg's data was already in memory.
- *
- * The fix is the standard immutable update path: whenever we descend
- * into a container on the way to the target, replace its `children`
- * with a new array; whenever we fail to find the target in a subtree,
- * return the original container reference unchanged so unrelated
- * subtrees keep their memoization.
- */
-function spliceExpandedReg(
-  tree: ElaboratedTree,
-  nodeId: string,
-  populated: Reg,
-): ElaboratedTree {
-  type Walkable = TreeNode & { children?: TreeNode[] };
-  let foundAny = false;
-
-  function visit(node: Walkable): Walkable {
-    const kids = node.children;
-    if (!Array.isArray(kids)) return node;
-    let mutated = false;
-    const newKids = new Array<TreeNode>(kids.length);
-    for (let i = 0; i < kids.length; i++) {
-      const child = kids[i];
-      if (
-        child.kind === 'reg'
-        && child.nodeId === nodeId
-        && child.loadState === 'placeholder'
-      ) {
-        // Server omits `loadState` on expand responses — clear the
-        // placeholder marker explicitly.
-        newKids[i] = { ...populated, loadState: 'loaded' } as TreeNode;
-        mutated = true;
-        foundAny = true;
-      } else {
-        const next = visit(child as Walkable);
-        if (next !== child) mutated = true;
-        newKids[i] = next as TreeNode;
-      }
-    }
-    return mutated ? ({ ...node, children: newKids } as Walkable) : node;
-  }
-
-  const oldRoots = (tree.roots ?? []) as Walkable[];
-  const newRoots = oldRoots.map(r => visit(r));
-  if (!foundAny) return tree;
-  // tree.roots is typed as `Addrmap[]` in the schema. The walk preserves
-  // the Walkable shape (only mutates `children`) so each newRoots[i] is
-  // structurally still an Addrmap even though we route through the
-  // looser TreeNode union internally. Cast back at the boundary.
-  return { ...tree, roots: newRoots as unknown as Addrmap[] };
 }
 
 /**
