@@ -49,11 +49,19 @@ type PanelEntry = {
   // every call wasted measurable time on big designs.
   cachedRegCount?: number;
   cachedRootNames?: string;
-  // in-flight refreshMemoryMap promise. Coalesces concurrent
-  // calls (drag/resize fires onDidChangeViewState repeatedly). Pre-T4-D
-  // each one issued a fresh `rdl/elaboratedTree` LSP request even
+  // in-flight refreshMemoryMap promise. Coalesces concurrent calls
+  // (drag/resize fires onDidChangeViewState repeatedly). Pre-T4-D
+  // each one issued a fresh rdl/elaboratedTree LSP request even
   // though the sinceVersion guard short-circuited the response body.
   refreshing?: Promise<void>;
+  // Set when refreshMemoryMap is called while a fetch is in flight.
+  // Without this flag the inflight guard would silently drop the
+  // newer request and the viewer could stay 1+ versions behind
+  // until some unrelated event re-triggered refresh — observed in
+  // the field as "edited address, took 15s to show". One queued
+  // re-fetch is enough; subsequent calls during the queued one
+  // coalesce into the same flag.
+  refreshQueued?: boolean;
 };
 const memoryMapPanels = new Map<string, PanelEntry>();
 
@@ -782,13 +790,31 @@ async function revealLocation(loc: SourceLoc): Promise<void> {
 async function refreshMemoryMap(uri: string): Promise<void> {
   const entry = memoryMapPanels.get(uri);
   if (!entry || !client) return;
-  // P14: coalesce concurrent calls. drag/resize / rapid push notifications
-  // used to fire multiple LSP round-trips for the same effective work.
-  if (entry.refreshing) return entry.refreshing;
-  entry.refreshing = doRefreshMemoryMap(uri, entry).finally(() => {
-    entry.refreshing = undefined;
-  });
-  return entry.refreshing;
+  // Coalesce concurrent calls AND queue exactly one follow-up. Pre-fix
+  // the inflight guard alone silently dropped any version notification
+  // that arrived during an in-flight fetch, leaving the viewer one
+  // version behind until some unrelated event re-triggered refresh
+  // (observed as "edited address, took 15s to update"). Mirror the
+  // CLI's refreshInFlight + refreshQueued idiom — N→1 coalescing on
+  // arrival, plus one extra fetch after the in-flight one finishes
+  // if anything was dropped.
+  if (entry.refreshing) {
+    entry.refreshQueued = true;
+    return entry.refreshing;
+  }
+  const run = () => {
+    const p = doRefreshMemoryMap(uri, entry).finally(() => {
+      entry.refreshing = undefined;
+      if (entry.refreshQueued) {
+        entry.refreshQueued = false;
+        // Fire-and-forget — caller has long since returned.
+        run();
+      }
+    });
+    entry.refreshing = p;
+    return p;
+  };
+  return run();
 }
 
 async function doRefreshMemoryMap(uri: string, entry: PanelEntry): Promise<void> {

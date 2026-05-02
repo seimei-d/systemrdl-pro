@@ -4,6 +4,21 @@ All notable changes to **SystemRDL Pro** are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [SemVer](https://semver.org/).
 
+## [0.28.1] — 2026-05-02
+
+### Fixed
+
+- **`refreshMemoryMap` inflight guard dropped follow-up versions.**
+  Field-reported as "edited address, took 15s to update". The 0.28.0
+  inflight guard collapsed N concurrent calls into 1 fetch (correct
+  for drag/resize spam), but if a newer-version notification arrived
+  *during* an in-flight fetch, the new one was silently dropped — the
+  viewer stayed on the just-fetched version until some unrelated
+  event triggered another refresh (typically 15-30 s later when the
+  user clicked away and back). Mirrors the CLI's
+  `refreshInFlight + refreshQueued` idiom: N→1 coalescing on arrival,
+  plus one queued re-fetch after the in-flight one finishes.
+
 ## [0.28.0] — 2026-05-02
 
 T4-C/T4-D — architectural cleanups (Tier-3) + performance fixes
