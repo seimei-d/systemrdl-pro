@@ -157,7 +157,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-SERVER_VERSION = "0.18.1"
+SERVER_VERSION = "0.18.2"
 
 
 def _iter_rdl_files(root: pathlib.Path, exclude_dirs: set[str]):
@@ -389,6 +389,16 @@ class ServerState:
     # URIs whose latest parse attempt failed but for which we still have a last-good
     # cache entry. The viewer renders a stale-bar when a URI is in this set (D7).
     stale_uris: set[str] = dataclasses.field(default_factory=set)
+    # URIs that need to skip the buffer-equality / canonicalize-skip
+    # short-circuits on the next elaborate (typically because a cascade
+    # trigger needs to re-elaborate the file even though its own buffer
+    # didn't change — an includee changed). Cleared the moment the
+    # bypass actually fires. Separate from ``stale_uris`` so the stale-
+    # transition logic in ``_apply_compile_result`` can detect a
+    # genuine False → True (or T → F) move; if cascade overloaded
+    # stale_uris like it used to, ``was_stale`` would always be True
+    # on the cascade path and the viewer would miss the new failure.
+    force_re_elaborate: set[str] = dataclasses.field(default_factory=set)
     # Forwarded to RDLCompiler(perl_safe_opcodes=...). Empty list keeps the
     # compiler's safe default. Power users adding `:base_io` for `print`-based
     # codegen go through this setting.
@@ -591,7 +601,21 @@ def build_server() -> LanguageServer:
                 old.text = buffer_text
                 old.text_canonical = _canonicalize_for_skip(buffer_text)
                 old.elaborated_at = time.time()
+                # Stale transition True → False. Without this branch the
+                # viewer keeps rendering the stale-bar even after a
+                # successful re-elaborate when the AST happened to be
+                # identical to the prior good version (user reverted
+                # their broken edit verbatim, or made a no-op semantic
+                # change). Bump version + invalidate serialized so the
+                # client's sinceVersion check fails and the next fetch
+                # builds a fresh envelope with stale=False. Field-
+                # reported as "stale message stuck on a valid RDL".
+                was_stale = uri in state.stale_uris
                 state.stale_uris.discard(uri)
+                if was_stale:
+                    old.version += 1
+                    old.serialized = None
+                    version_after = old.version
                 _update_include_graph(uri, consumed_files)
             else:
                 # Cache takes ownership of the temp file (it backs lazy
@@ -621,6 +645,13 @@ def build_server() -> LanguageServer:
             tmp_path.unlink(missing_ok=True)
             had_error = any(m.severity == Severity.ERROR for m in messages)
             if had_error:
+                # Tell open consumers to re-elaborate. They'll likely
+                # fail too (broken includee → broken consumer parse),
+                # which surfaces the stale-bar on every dependent
+                # tab — without this, only the file the user typed
+                # in shows stale, the consumers stay rendering their
+                # last good tree with no visible warning.
+                ast_changed = True
                 prior_cached = state.cache.get(uri)
                 if prior_cached is not None:
                     was_stale = uri in state.stale_uris
@@ -745,7 +776,13 @@ def build_server() -> LanguageServer:
             dep_text = _read_buffer(dep_uri)
             if dep_text is None:
                 continue
-            state.stale_uris.add(dep_uri)
+            # ``force_re_elaborate`` (NOT ``stale_uris``) so the
+            # buffer-equality / canonicalize-skip short-circuits know
+            # to bypass — but the stale-transition detector in
+            # ``_apply_compile_result`` still sees an honest False
+            # before this elaborate runs, so a real new failure of
+            # the consumer does push a notification.
+            state.force_re_elaborate.add(dep_uri)
             asyncio.create_task(_full_pass_async(dep_uri, dep_text))
 
     async def _full_pass_async(uri: str, buffer_text: str | None) -> None:
@@ -769,6 +806,15 @@ def build_server() -> LanguageServer:
                     uri, t_locked - t_acquire,
                 )
 
+            # If a cascade trigger queued this elaborate, it left
+            # ``force_re_elaborate`` set — bypass both short-circuits
+            # below, then clear the marker so subsequent same-URI
+            # passes resume normal short-circuit behaviour. Reading
+            # the marker once + clearing immediately keeps the
+            # bypass scope tight to "this one elaborate".
+            forced = uri in state.force_re_elaborate
+            state.force_re_elaborate.discard(uri)
+
             # Short-circuit 1 (T1): if the buffer text is byte-identical to
             # the last successful elaboration we already have a fresh tree
             # for this URI. Eliminates the GIL-pinning re-runs that pile up
@@ -779,6 +825,7 @@ def build_server() -> LanguageServer:
                 prior is not None
                 and prior.text == buffer_text
                 and uri not in state.stale_uris
+                and not forced
             ):
                 return
 
@@ -792,6 +839,7 @@ def build_server() -> LanguageServer:
                 prior is not None
                 and prior.text_canonical is not None
                 and uri not in state.stale_uris
+                and not forced
             ):
                 buffer_canon = _canonicalize_for_skip(buffer_text)
                 if buffer_canon == prior.text_canonical:

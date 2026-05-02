@@ -463,6 +463,123 @@ def test_stale_bar_appears_when_parse_fails(real_pool, tmp_path):
     )
 
 
+def test_stale_bar_clears_on_recovery_with_identical_ast(real_pool, tmp_path):
+    """Field-reported false positive: editing a file invalid → fixing it
+    back to byte-identical AST left the stale-bar visible because the
+    fingerprint-skip path discarded ``stale_uris`` but didn't bump the
+    cache version or invalidate ``cached.serialized``. The viewer kept
+    rendering the stale envelope from the failed pass.
+
+    Fix: stale True → False transition in the fingerprint-skip path
+    bumps version + clears serialized + sets ``version_after`` so the
+    notification fires."""
+    s = build_server()
+    state = s._systemrdl_state
+    full_pass = s._systemrdl_full_pass_async
+    state.elaborate_in_process = False
+    state.elaborate_pool = real_pool
+
+    rdl = tmp_path / "a.rdl"
+    rdl.write_text(SAMPLE_RDL)
+    uri = rdl.as_uri()
+
+    # Step 1: valid → cached, not stale.
+    _run(full_pass(uri, SAMPLE_RDL))
+    cached_v1 = state.cache.get(uri)
+    v_initial = cached_v1.version
+    assert uri not in state.stale_uris
+
+    # Step 2: invalid → stale transition fires (covered by separate test).
+    broken = SAMPLE_RDL + "\n}}}\n"
+    _run(full_pass(uri, broken))
+    assert uri in state.stale_uris
+    cached_v2 = state.cache.get(uri)
+    v_invalid = cached_v2.version
+    assert v_invalid > v_initial
+
+    # Step 3: revert to byte-identical valid → fingerprint matches, but
+    # the stale-bar must clear. Without the T → F transition fix the
+    # version would stay at v_invalid and the viewer would never know
+    # to drop the stale envelope.
+    _run(full_pass(uri, SAMPLE_RDL))
+    cached_v3 = state.cache.get(uri)
+    assert uri not in state.stale_uris
+    assert cached_v3.version > v_invalid, (
+        "fingerprint-skip path must bump version on T → F stale "
+        "transition so the viewer re-fetches and sees stale=False"
+    )
+    assert cached_v3.serialized is None, (
+        "cached envelope must be invalidated so the next fetch builds "
+        "fresh with stale=False"
+    )
+
+
+def test_cascade_failure_marks_consumer_stale_visibly(real_pool, tmp_path):
+    """Field-reported false negative: when a library file (`types.rdl`)
+    breaks, every open consumer gets cascade-re-elaborated. The
+    consumer's elaborate fails too. But the cascade trigger used to
+    pre-mark ``stale_uris`` to bypass the buffer-equality short-
+    circuit, so by the time ``_apply_compile_result`` ran,
+    ``was_stale`` was already True and the False → True transition
+    detector skipped — the consumer's viewer didn't get a refresh
+    notification and kept rendering the previous good tree with no
+    stale-bar.
+
+    Fix: cascade now uses ``force_re_elaborate`` (not ``stale_uris``)
+    to bypass the short-circuits. ``stale_uris`` is reserved for
+    actual stale state, so the transition detector sees an honest
+    False before this elaborate marks it True."""
+    types = tmp_path / "types.rdl"
+    types.write_text("reg t_r { field { sw=rw; hw=r; } f[0:0] = 0; };\n")
+    main = tmp_path / "main.rdl"
+    main_text = f'`include "{types.name}"\naddrmap top {{ t_r R @ 0; }};\n'
+    main.write_text(main_text)
+
+    s = build_server()
+    state = s._systemrdl_state
+    full_pass = s._systemrdl_full_pass_async
+    state.elaborate_in_process = False
+    state.elaborate_pool = real_pool
+
+    # Stand main up first so the include graph knows about types.rdl.
+    _run(full_pass(main.as_uri(), main_text))
+    cached_main = state.cache.get(main.as_uri())
+    v_initial = cached_main.version
+    assert main.as_uri() not in state.stale_uris
+
+    # Pretend the user has main.rdl open in the editor so the
+    # cascade trigger reaches it.
+    state.test_open_buffers = {main.as_uri(): main_text}
+
+    # Break types.rdl. Cascade should fire main's elaborate, which
+    # also fails (include unresolved). The viewer must learn that
+    # main is now stale.
+    types.write_text("not valid rdl }}}\n")
+
+    async def edit_then_settle() -> None:
+        await full_pass(types.as_uri(), "not valid rdl }}}\n")
+        pending = [
+            t for t in asyncio.all_tasks() if t is not asyncio.current_task()
+        ]
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    _run(edit_then_settle())
+
+    # The cascade-driven re-elaborate of main failed → main should be
+    # marked stale AND the viewer should have been notified (version
+    # bumped, serialized invalidated).
+    assert main.as_uri() in state.stale_uris, (
+        "consumer must be marked stale when cascade-re-elaborate fails"
+    )
+    cached_main_after = state.cache.get(main.as_uri())
+    assert cached_main_after.version > v_initial, (
+        "consumer cache version must bump on stale transition so the "
+        "viewer re-fetches and renders the stale-bar"
+    )
+    assert cached_main_after.serialized is None
+
+
 def test_full_pass_pool_path_preserves_includes(real_pool, tmp_path):
     """Pool path returns includee list intact — proves the consumed_files
     set survived pickle. Drives the T2-A include-graph cascade across
