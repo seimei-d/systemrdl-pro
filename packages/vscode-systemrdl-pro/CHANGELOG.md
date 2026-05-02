@@ -60,6 +60,34 @@ project uses [SemVer](https://semver.org/).
   The viewer now shows "Loading…" until the LSP reports a real version
   (`>= 1`); after that the addrmap-less pane only shows for files that
   truly contain no addrmap.
+- **On-disk spine cache actually used on cold start.** The
+  version-equality guard before reading from `~/.cache/systemrdl-pro/`
+  was rejecting every disk hit because `version` is a per-process
+  monotonic counter that resets to 1 on each LSP boot — the disk
+  envelope's recorded counter was almost never equal. The cache key
+  is content-addressed (sha256 of abs path + mtime + include paths +
+  compiler version), so a hit *is* authoritative; we now rewrite the
+  envelope's `version` field to the current process's counter on read
+  instead of gating on equality. Window reload of a 25k file is now
+  the documented "skip parse + elaborate + serialize" path.
+- **`pendingExpansions` keyed by `version:nodeId`.** The viewer's
+  in-flight expand tracking was using the raw `nodeId` string, so
+  when a fresh elaboration produced a new tree with the same DFS
+  shape (same nodeIds), an in-flight v1 request blocked the v2
+  retry until the v1 resolved as `outdated`. Result: the spinner
+  stayed up for an extra round-trip. Version-prefixed keys remove
+  the cross-tree blocking.
+- **Per-process nonce on `DiskCache` `.tmp` filenames.** Two LSP
+  instances on the same workspace (second VSCode window) hashed the
+  same key and both staged to `spine.json.tmp`, racing the final
+  `os.replace`. The .tmp is now per-pid; the rename target is still
+  the shared name so the cache stays content-addressed.
+- **Orphan `.rdl` tmp files no longer leak on elaboration timeouts.**
+  The `_drop_late_result` callback was using `except Exception`,
+  swallowing `CancelledError` on shutdown without unlinking the late
+  tmp. Long-lived LSP sessions hitting frequent 60s timeouts on
+  large designs would slowly fill `/tmp`. Fixed with `BaseException`
+  catch and a separate unlink try-block.
 
 ## [0.23.0] — 2026-05-01
 
