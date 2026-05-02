@@ -28,6 +28,7 @@ import multiprocessing as mp
 import pathlib
 import time
 from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from typing import TYPE_CHECKING, Any
 
 from lsprotocol.types import (
@@ -156,7 +157,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-SERVER_VERSION = "0.18.0"
+SERVER_VERSION = "0.18.1"
 
 
 def _iter_rdl_files(root: pathlib.Path, exclude_dirs: set[str]):
@@ -439,6 +440,20 @@ class ServerState:
     # sweet spot for a developer machine. Surfaced as a setting if a
     # future user reports needing more.
     elaborate_pool_workers: int = 2
+    # T3-G: worker recycle threshold. Mitigates the upstream
+    # systemrdl-compiler memory leak (~5 MB per elaborate of a
+    # 40-reg fixture, observed in test_memory_growth_bounded). After
+    # this many successful subprocess elaborates we tear down the
+    # pool and spawn a fresh one — RSS comes back to baseline. 50
+    # gives a few minutes of editing on big designs before the
+    # next recycle, recycling itself is ~150 ms (worker spawn +
+    # _pool_worker_init), barely visible during a typing pause.
+    pool_max_elaborates: int = 50
+    # Counts successful subprocess elaborates since the current pool
+    # was spawned. Reset to 0 in ``_ensure_elaborate_pool``. When it
+    # hits ``pool_max_elaborates`` the elaborate-finished bookkeeping
+    # schedules a recycle and resets the counter.
+    pool_elaborate_count: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -480,9 +495,11 @@ def build_server() -> LanguageServer:
             )
             for _ in range(state.elaborate_pool_workers):
                 state.elaborate_pool.submit(_pool_warmup_noop)
+            state.pool_elaborate_count = 0
             logger.info(
-                "T3 elaborate pool: %d workers, spawn ctx, pre-warming",
-                state.elaborate_pool_workers,
+                "T3 elaborate pool: %d workers, spawn ctx, pre-warming "
+                "(recycle every %d elaborates)",
+                state.elaborate_pool_workers, state.pool_max_elaborates,
             )
         except Exception:
             logger.exception(
@@ -604,8 +621,27 @@ def build_server() -> LanguageServer:
             tmp_path.unlink(missing_ok=True)
             had_error = any(m.severity == Severity.ERROR for m in messages)
             if had_error:
-                if state.cache.get(uri) is not None:
+                prior_cached = state.cache.get(uri)
+                if prior_cached is not None:
+                    was_stale = uri in state.stale_uris
                     state.stale_uris.add(uri)
+                    if not was_stale:
+                        # Stale state just transitioned False → True.
+                        # Without doing anything else, the viewer would
+                        # never know: cached.serialized still holds the
+                        # last (non-stale) envelope, version hasn't
+                        # bumped, so no rdl/elaboratedTreeChanged push
+                        # fires and the client's sinceVersion check
+                        # would short-circuit even if it asked. Bump
+                        # version + clear cached serialization so the
+                        # next fetch builds a fresh envelope with
+                        # ``stale=True`` and the "Showing last good"
+                        # banner appears. This was reported in the
+                        # field after T2 ship — broken RDL no longer
+                        # surfaced the stale icon.
+                        prior_cached.version += 1
+                        prior_cached.serialized = None
+                        version_after = prior_cached.version
             else:
                 # Library file: refresh the includee graph from this
                 # buffer's perspective (it may itself include other
@@ -793,42 +829,116 @@ def build_server() -> LanguageServer:
             # done-callback cleans up the orphan tmp file when the
             # late result eventually arrives.
             t_submit = time.monotonic()
-            using_pool = (
-                not state.elaborate_in_process
-                and state.elaborate_pool is not None
-            )
-            pool_fut = None
-            if using_pool:
-                pool_fut = state.elaborate_pool.submit(
-                    _compile_text_compressed,
-                    uri,
-                    buffer_text,
-                    state.include_paths,
-                    state.include_vars,
-                    state.perl_safe_opcodes,
+
+            def _submit_compile() -> tuple[bool, asyncio.Future, Any]:
+                """Submit one elaborate attempt; return
+                ``(using_pool, awaitable, raw_pool_future)``. Pulled
+                into a helper so the BrokenProcessPool recovery path
+                can re-submit cleanly after respawning the pool."""
+                up = (
+                    not state.elaborate_in_process
+                    and state.elaborate_pool is not None
                 )
-                fut: asyncio.Future = asyncio.wrap_future(pool_fut)
-            else:
-                fut = loop.run_in_executor(
-                    None,
-                    _compile_text,
-                    uri,
-                    buffer_text,
-                    state.include_paths,
-                    state.include_vars,
-                    state.perl_safe_opcodes,
-                )
-            try:
-                raw_result = await asyncio.wait_for(
-                    asyncio.shield(fut), timeout=state.elaboration_timeout_s
-                )
-                if using_pool:
-                    messages, roots, tmp_path, consumed_files = (
-                        _decompress_compile_result(raw_result)
+                pf: Any = None
+                if up:
+                    pf = state.elaborate_pool.submit(
+                        _compile_text_compressed,
+                        uri,
+                        buffer_text,
+                        state.include_paths,
+                        state.include_vars,
+                        state.perl_safe_opcodes,
                     )
+                    awaitable = asyncio.wrap_future(pf)
                 else:
-                    messages, roots, tmp_path, consumed_files = raw_result
-            except asyncio.TimeoutError:
+                    awaitable = loop.run_in_executor(
+                        None,
+                        _compile_text,
+                        uri,
+                        buffer_text,
+                        state.include_paths,
+                        state.include_vars,
+                        state.perl_safe_opcodes,
+                    )
+                return up, awaitable, pf
+
+            # T3-E: BrokenProcessPool is a real production gap — a
+            # subprocess that segfaults on a pathological RDL or gets
+            # killed by an OOM reaper would otherwise poison every
+            # subsequent elaborate until the user manually restarts
+            # the LSP. The exception can fire at TWO points:
+            #
+            #   - ``ProcessPoolExecutor.submit()`` if the pool already
+            #     knows it's broken (a previous worker died and the
+            #     pool noticed before we arrived).
+            #   - ``Future.result()`` (i.e. our ``await``) if the
+            #     worker dies mid-elaborate.
+            #
+            # Both paths share the same recovery: tear down the dead
+            # pool, spawn a fresh one, retry the whole elaborate ONCE.
+            # If the retry also fails, surface the error normally so
+            # we don't loop forever on a deterministically broken
+            # input.
+            recovery_attempted = False
+            timeout_hit = False
+            unexpected_exc = False
+            broken_pool_excs = (BrokenProcessPool, BrokenPipeError, EOFError)
+            while True:
+                try:
+                    using_pool, fut, pool_fut = _submit_compile()
+                except broken_pool_excs as exc:
+                    if recovery_attempted:
+                        logger.exception(
+                            "elaborate pool stuck broken after recovery; "
+                            "giving up on %s", uri,
+                        )
+                        _emit_elaboration_finished(uri)
+                        return
+                    recovery_attempted = True
+                    logger.warning(
+                        "elaborate pool broken at submit (%s: %s); respawning",
+                        type(exc).__name__, exc,
+                    )
+                    _shutdown_elaborate_pool()
+                    _ensure_elaborate_pool()
+                    continue
+                try:
+                    raw_result = await asyncio.wait_for(
+                        asyncio.shield(fut), timeout=state.elaboration_timeout_s
+                    )
+                    if using_pool:
+                        messages, roots, tmp_path, consumed_files = (
+                            _decompress_compile_result(raw_result)
+                        )
+                    else:
+                        messages, roots, tmp_path, consumed_files = raw_result
+                    break
+                except broken_pool_excs as exc:
+                    if recovery_attempted or not using_pool:
+                        logger.exception(
+                            "elaborate pool dead after recovery attempt; "
+                            "elaborate failing on %s", uri,
+                        )
+                        _emit_elaboration_finished(uri)
+                        return
+                    recovery_attempted = True
+                    logger.warning(
+                        "elaborate pool broken in flight (%s: %s); respawning + retry",
+                        type(exc).__name__, exc,
+                    )
+                    _shutdown_elaborate_pool()
+                    _ensure_elaborate_pool()
+                    continue
+                except asyncio.TimeoutError:
+                    timeout_hit = True
+                    break
+                except Exception:
+                    logger.exception(
+                        "unexpected error during async full-pass for %s", uri
+                    )
+                    unexpected_exc = True
+                    break
+            if timeout_hit:
                 logger.warning(
                     "elaborate timeout on %s after %.0fs; keeping last-good",
                     uri, state.elaboration_timeout_s,
@@ -880,8 +990,26 @@ def build_server() -> LanguageServer:
                     pool_fut.add_done_callback(_drop_late_result)
                 else:
                     fut.add_done_callback(_drop_late_result)
-                if state.cache.get(uri) is not None:
+                # Mark stale + force the viewer to re-fetch (see the
+                # parse-failure branch in _apply_compile_result for
+                # the same pattern + rationale).
+                cached_for_timeout = state.cache.get(uri)
+                if cached_for_timeout is not None:
+                    was_stale = uri in state.stale_uris
                     state.stale_uris.add(uri)
+                    if not was_stale:
+                        cached_for_timeout.version += 1
+                        cached_for_timeout.serialized = None
+                        try:
+                            server.protocol.notify(
+                                "rdl/elaboratedTreeChanged",
+                                {"uri": uri, "version": cached_for_timeout.version},
+                            )
+                        except Exception:
+                            logger.debug(
+                                "could not push stale-state-changed (timeout)",
+                                exc_info=True,
+                            )
                 try:
                     target_path = _uri_to_path(uri)
                 except ValueError:
@@ -906,8 +1034,7 @@ def build_server() -> LanguageServer:
                 )
                 _emit_elaboration_finished(uri)
                 return
-            except Exception:
-                logger.exception("unexpected error during async full-pass for %s", uri)
+            if unexpected_exc:
                 _emit_elaboration_finished(uri)
                 return
             t_compile_done = time.monotonic()
@@ -922,7 +1049,24 @@ def build_server() -> LanguageServer:
                 t_apply_done - t_compile_done,
                 ast_changed,
             )
+            # T3-G: count successful subprocess elaborates and recycle
+            # the pool once we cross the leak-mitigation threshold.
+            # Recycle is scheduled for AFTER this elaborate's
+            # _emit_elaboration_finished — workers fully drained.
+            recycle_pool_now = False
+            if using_pool:
+                state.pool_elaborate_count += 1
+                if state.pool_elaborate_count >= state.pool_max_elaborates:
+                    recycle_pool_now = True
             _emit_elaboration_finished(uri)
+            if recycle_pool_now:
+                logger.info(
+                    "T3-G: recycling elaborate pool after %d elaborates "
+                    "to release leaked memory",
+                    state.pool_elaborate_count,
+                )
+                _shutdown_elaborate_pool()
+                _ensure_elaborate_pool()
         # T2-A cascade fires *outside* the URI lock so we don't deadlock on
         # an A↔B include cycle (impossible at the SystemRDL level, but the
         # lock ordering shouldn't depend on it). Each consumer takes its own
