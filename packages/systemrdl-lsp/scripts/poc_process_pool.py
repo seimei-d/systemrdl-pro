@@ -29,7 +29,6 @@ import traceback
 import zlib
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 
-
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
 EXAMPLES = REPO_ROOT / "examples"
 
@@ -124,7 +123,10 @@ def probe_compression() -> dict:
         dec = time.monotonic() - t0
         size_mb = len(compressed) / 1024 / 1024
         ratio = raw_mb / size_mb if size_mb else float("inf")
-        print(f"zlib L={level}: {size_mb:>8.2f} MB  enc={enc:.2f}s  dec={dec:.2f}s  ({ratio:.0f}x smaller)")
+        print(
+            f"zlib L={level}: {size_mb:>8.2f} MB  "
+            f"enc={enc:.2f}s  dec={dec:.2f}s  ({ratio:.0f}x smaller)"
+        )
         results[f"zlib_L{level}"] = {"size_mb": size_mb, "enc": enc, "dec": dec}
 
     tmp_path.unlink(missing_ok=True)

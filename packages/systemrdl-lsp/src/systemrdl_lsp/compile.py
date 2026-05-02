@@ -13,10 +13,12 @@ import hashlib
 import logging
 import os
 import pathlib
+import pickle
 import re
 import shutil
 import tempfile
 import time
+import zlib
 from typing import TYPE_CHECKING, Any
 
 from systemrdl import RDLCompileError, RDLCompiler
@@ -450,6 +452,89 @@ def _compile_text(
     ]
     consumed = _harvest_consumed_files(roots, printer.captured, tmp_path)
     return messages, roots, tmp_path, consumed
+
+
+# ---------------------------------------------------------------------------
+# T3: subprocess wrapper (pickle + zlib) for ProcessPoolExecutor IPC
+# ---------------------------------------------------------------------------
+
+
+# Pickle protocol pin. 5 is the highest stable across Python 3.10-3.13
+# (the LSP's supported range). Bumping this requires confirming all
+# deployment targets support the new protocol; mismatch shows up as
+# UnpicklingError in the parent immediately, so a regression is loud
+# rather than silent.
+_T3_PICKLE_PROTOCOL = 5
+
+# zlib level 1 (fastest) chosen over 6 (default) per the PoC bench:
+# - L=1 on stress_25k_multi: 5.4 MB, encode 2.6s, decode 2.1s
+# - L=6: 2.1 MB, encode 2.85s, decode 2.1s
+# 60% smaller wire vs L=6 costs 0.25s more encode for 3.3 MB less
+# pipe traffic — negligible either way relative to the 34s elaborate.
+# L=1 wins because pipe bandwidth on a local Unix socket is gigabytes/s
+# anyway; the limiting cost is pickle.dumps itself, not transport.
+_T3_ZLIB_LEVEL = 1
+
+
+def _compile_text_compressed(
+    uri: str,
+    text: str,
+    incl_search_paths: list[str] | None = None,
+    include_vars: dict[str, str] | None = None,
+    perl_safe_opcodes: list[str] | None = None,
+) -> bytes:
+    """``_compile_text`` wrapped for ProcessPoolExecutor IPC.
+
+    The subprocess elaborates, then pickles + zlibs the 4-tuple to a
+    bytes blob. The parent decompresses + unpickles via
+    ``_decompress_compile_result``. Compression is essentially free on
+    a homogeneous SystemRDL tree (50 banks × 500 regs × 30 fields =
+    massive structural redundancy that general-purpose compressors
+    crush — see ``docs/perf-poc-processpool.md``).
+
+    Why this wrapper exists rather than letting ``ProcessPoolExecutor``
+    pickle the result itself: the executor's built-in pickling is raw,
+    no compression. On ``stress_25k_multi.rdl`` raw pickle is 174 MB
+    on the wire; zlib L=1 compresses it to 5.4 MB at the same encode
+    speed. Wrapping is a one-liner; integrating compression into the
+    executor's pickle path is not.
+    """
+    result = _compile_text(
+        uri, text, incl_search_paths, include_vars, perl_safe_opcodes,
+    )
+    return zlib.compress(
+        pickle.dumps(result, protocol=_T3_PICKLE_PROTOCOL),
+        _T3_ZLIB_LEVEL,
+    )
+
+
+def _decompress_compile_result(
+    blob: bytes,
+) -> tuple[list[CompilerMessage], list[RootNode], pathlib.Path, set[pathlib.Path]]:
+    """Reverse of ``_compile_text_compressed``. Called in the parent
+    process to materialize the subprocess's elaborate result."""
+    return pickle.loads(zlib.decompress(blob))
+
+
+def _pool_worker_init() -> None:
+    """Runs once per ``ProcessPoolExecutor`` worker at startup.
+
+    Imports the heavy modules each elaborate touches so the first real
+    submission doesn't pay the import cost on the user's typing
+    latency. ``systemrdl-compiler`` import alone is ~150 ms.
+    """
+    import systemrdl  # noqa: F401
+
+    import systemrdl_lsp.compile
+    import systemrdl_lsp.serialize  # noqa: F401
+
+
+def _pool_warmup_noop() -> None:
+    """No-op submitted to a fresh pool so each worker actually spawns
+    (``ProcessPoolExecutor`` is lazy — workers don't start until the
+    first task lands on them). Top-level function so pickle can find
+    it across the process boundary; lambdas would not pickle."""
+    return None
 
 
 # ---------------------------------------------------------------------------
