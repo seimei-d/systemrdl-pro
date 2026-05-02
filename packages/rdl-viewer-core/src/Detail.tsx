@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { memo, useMemo, useState } from 'react';
 import type { EncodeEntry, Field, Reg, SourceLoc, Transport } from './types';
 import { BitGrid } from './BitGrid';
 
@@ -8,7 +8,12 @@ type Props = {
   transport: Transport;
 };
 
-export function Detail({ reg, path, transport }: Props) {
+// Memoised so filter keystrokes in Viewer (which re-render the whole
+// component) don't re-render the heavy bit-grid + field rows when the
+// active reg hasn't actually changed. `reg` and `path` come from
+// `findRegByKey` which returns the same node-reference for the same
+// (root, key) pair across re-renders.
+function DetailInner({ reg, path, transport }: Props) {
   // Decoder input lives at the Detail level so per-field rows can show
   // the decoded value in their reset column when input is non-empty.
   const [decoderInput, setDecoderInput] = useState('');
@@ -89,6 +94,7 @@ export function Detail({ reg, path, transport }: Props) {
     </div>
   );
 }
+export const Detail = memo(DetailInner);
 
 type DecodedField = { value: string; encode?: string };
 

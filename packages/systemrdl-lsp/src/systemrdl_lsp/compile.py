@@ -117,6 +117,11 @@ _INCLUDE_VAR_RE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?")
 _INCLUDE_DIRECTIVE_RE = re.compile(r'(`include\s+")([^"]*)(")')
 
 
+def _format_hex(value: int, width_hex_chars: int = 8) -> str:
+    """Render an integer as a zero-padded uppercase hex literal."""
+    return f"0x{value:0{width_hex_chars}X}"
+
+
 # ---------------------------------------------------------------------------
 # T2-D: pre-elaborate "is this just whitespace?" canonicalization
 # ---------------------------------------------------------------------------
@@ -287,6 +292,7 @@ def _resolve_search_paths(
     return out
 
 
+@functools.lru_cache(maxsize=128)
 def _peakrdl_toml_paths(start: pathlib.Path) -> list[str]:
     """Walk upward from ``start`` looking for ``peakrdl.toml`` and read its
     ``[parser] incl_search_paths`` array.
@@ -295,6 +301,12 @@ def _peakrdl_toml_paths(start: pathlib.Path) -> list[str]:
     with PeakRDL just works in the editor without re-declaring its include
     tree under ``systemrdl-pro.includePaths``. Workspace-relative paths are
     resolved against the .toml's own directory, matching PeakRDL semantics.
+
+    Cached because the toml location and contents rarely change during a
+    session, and ``_resolve_search_paths`` is on the hot path of every
+    didOpen / didSave / documentLink. Cache key is the start path; we
+    bound the cache so a long-running LSP with many distinct workspace
+    files doesn't grow it unbounded. Restart the LSP to invalidate.
     """
     try:
         import tomllib  # Python 3.11+
@@ -542,6 +554,29 @@ def _pool_warmup_noop() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _children_safe(node: Any) -> list[Any]:
+    """Version-portable ``node.children()`` accessor.
+
+    ``systemrdl-compiler`` added ``skip_not_present=False`` to
+    ``children()`` in a specific version; older installs raise
+    ``TypeError`` on the unknown kwarg. extracted as a
+    helper so the 3-tier try/except dance lives in one place
+    instead of being copy-pasted four times across
+    ``_harvest_consumed_files`` and ``_fingerprint_roots``.
+    Returns ``[]`` on any failure — node has no children, or the
+    underlying compiler raised.
+    """
+    try:
+        return list(node.children(skip_not_present=False))
+    except TypeError:
+        try:
+            return list(node.children())
+        except Exception:
+            return []
+    except Exception:
+        return []
+
+
 def _harvest_consumed_files(
     roots: list[RootNode],
     captured: list[tuple[Severity, str, Any]],
@@ -553,8 +588,14 @@ def _harvest_consumed_files(
     instance's ``def_src_ref`` / ``inst_src_ref`` in the elaborated tree.
     Used by the LSP to maintain the include-graph reverse map so an edit to
     a library file proactively re-elaborates open consumers (T2-A).
+
+    T4-C A7 + P7: ``_children_safe`` for the version-portability dance
+    around ``skip_not_present``; ``seen_raw`` dedups before the
+    expensive ``pathlib.resolve()`` syscall (was N calls where K
+    unique would do — ~50-250 ms saved on 25k regs).
     """
     files: set[pathlib.Path] = set()
+    seen_raw: set[str] = set()
     try:
         tmp_resolved = tmp_path.resolve()
     except OSError:
@@ -563,6 +604,14 @@ def _harvest_consumed_files(
     def feed(raw: Any) -> None:
         if not raw:
             return
+        # dedup before resolve(). On 25k regs the harvest visits
+        # ~50k src_refs with ~2 unique filenames; resolving each one
+        # issues a stat()/realpath() syscall (~1-5 µs each). Hashing
+        # the raw string first cuts the syscall count to K, not N.
+        raw_str = str(raw)
+        if raw_str in seen_raw:
+            return
+        seen_raw.add(raw_str)
         try:
             path = pathlib.Path(raw).resolve()
         except (OSError, ValueError):
@@ -583,29 +632,11 @@ def _harvest_consumed_files(
                 ref = getattr(inst, attr, None)
                 if ref is not None:
                     feed(getattr(ref, "filename", None))
-        try:
-            kids = list(node.children(skip_not_present=False))
-        except TypeError:
-            try:
-                kids = list(node.children())
-            except Exception:
-                kids = []
-        except Exception:
-            kids = []
-        for kid in kids:
+        for kid in _children_safe(node):
             walk(kid)
 
     for root in roots:
-        try:
-            top = list(root.children(skip_not_present=False))
-        except TypeError:
-            try:
-                top = list(root.children())
-            except Exception:
-                top = []
-        except Exception:
-            top = []
-        for child in top:
+        for child in _children_safe(root):
             walk(child)
 
     return files
@@ -678,7 +709,7 @@ def _fingerprint_roots(roots: list[RootNode]) -> str:
         h.update(s.encode("utf-8", errors="replace"))
         h.update(b"\0")
 
-    # T4-B H3: type-level memo, mirroring serialize.py's `_TypeCache`
+    # type-level memo, mirroring serialize.py's `_TypeCache`
     # pattern. `node.get_property()` walks the override → type →
     # default chain on every call — uncached, that's 200k+ traversals
     # on a 25k-reg fixture (one fingerprint per elaborate). Cache by
@@ -759,31 +790,14 @@ def _fingerprint_roots(roots: list[RootNode]) -> str:
         elif isinstance(node, (AddrmapNode, RegfileNode, MemNode)):
             for prop in _CONTAINER_FP_PROPS:
                 feed(f"{prop}={safe_prop(node, prop)}")
-        try:
-            kids = list(node.children(skip_not_present=False))
-        except TypeError:
-            try:
-                kids = list(node.children())
-            except Exception:
-                kids = []
-        except Exception:
-            kids = []
+        kids = _children_safe(node)
         feed(f"#kids={len(kids)}")
         for kid in kids:
             visit(kid)
 
     for root in roots:
         feed("$ROOT")
-        try:
-            top = list(root.children(skip_not_present=False))
-        except TypeError:
-            try:
-                top = list(root.children())
-            except Exception:
-                top = []
-        except Exception:
-            top = []
-        for child in top:
+        for child in _children_safe(root):
             visit(child)
 
     return h.hexdigest()

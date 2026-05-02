@@ -24,8 +24,8 @@ from lsprotocol.types import (
     SymbolKind,
 )
 
+from .compile import _format_hex
 from .diagnostics import _build_range
-from .hover import _format_hex
 from .serialize import _hex
 
 if TYPE_CHECKING:

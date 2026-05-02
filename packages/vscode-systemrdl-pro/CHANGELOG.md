@@ -4,6 +4,114 @@ All notable changes to **SystemRDL Pro** are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [SemVer](https://semver.org/).
 
+## [0.28.0] — 2026-05-02
+
+T4-C/T4-D — architectural cleanups (Tier-3) + performance fixes
+(Tier-4) from the post-T3 multi-agent code review. No new features;
+~20 reliability/correctness/performance items landed across all four
+packages. Bigger architectural splits (server.py / extension.ts /
+viewer-core hooks; viewer virtualisation) deferred to dedicated PRs
+where the regression risk warrants standalone review.
+
+### Architecture (T4-C)
+
+- **A3** — `_apply_stale_transition` helper consolidates the stale
+  state machine that used to live inline in three sites
+  (`_apply_compile_result` success + parse-failure, `_full_pass_async`
+  timeout). The last three field-reported stale-bar regressions all
+  traced back to drift between the copies.
+- **A5** — `_read_workspace_config` + `_apply_workspace_config`
+  helpers dedup the config fetch/refresh flow that was copy-pasted
+  between `_on_initialized` and `_on_config_change`.
+- **A7** — `_format_hex` moved to `compile.py`; `outline.py` no
+  longer imports from `hover.py` (inverted dependency cleanup).
+- **A10** — `_children_safe` helper kills the four-times-copy-pasted
+  `node.children(skip_not_present=...)` try/except dance in
+  `_harvest_consumed_files` and `_fingerprint_roots`.
+
+### Performance (T4-D)
+
+In-LSP:
+
+- **P6** — `DiskCache.evict_lru` no longer issues `iterdir + stat`
+  on every put. Counter gate runs the actual eviction every
+  `max_entries / 4` puts.
+- **P7** — `_harvest_consumed_files` dedups raw paths before
+  `pathlib.resolve()` (~50–250 ms saved on 25k regs; the harvest
+  visited 50k src_refs but only K unique filenames).
+- **P8** — `_on_close` cancels the pending debounce task and
+  drops the elaboration lock (was leaving locks alive forever for
+  files closed during a debounce window).
+- **P10** — `_peakrdl_toml_paths` cached via `lru_cache(128)` —
+  pre-T4-D walked ancestor dirs and read the toml on every
+  `_resolve_search_paths` call (every didOpen / didSave).
+- **P11** — `_build_selection_ranges` builds a prefix-sum of line
+  start offsets so `pos_of` is O(log n) (binary search) instead of
+  O(n) per call. Deep nesting in 10k-line files used to be O(K·N).
+
+In viewer-core:
+
+- **P2** — `TreeRow` wrapped in `React.memo` so a selection change
+  re-renders only the two rows whose `selected` flipped, not all
+  500–25k visible rows.
+- **P3** — `findRegByKey` wrapped in `useMemo` so the O(n) DFS
+  doesn't run in the render body on every keystroke / scroll /
+  toast.
+- **P4** — Filter input debounced 150 ms. Pre-T4-D fast typing
+  triggered 200k field comparisons per keystroke on a 25k-reg
+  tree.
+- **P5** — `Detail` wrapped in `React.memo` so filter keystrokes
+  don't re-render the heavy bit-grid + field rows when the active
+  reg hasn't changed.
+
+In extension:
+
+- **P12** — `onDidChangeDiagnostics` debounced 200 ms. Status-bar
+  diag refresh used to fire per LSP publish (multiple per keystroke
+  during catchup), each iterating the entire DiagnosticCollection.
+- **P13** — `cachedRegCount` + `cachedRootNames` populated once on
+  `refreshMemoryMap`. Status-bar updates no longer re-walk the tree
+  on every tab switch / debounced diag tick.
+- **P14** — `refreshMemoryMap` coalesces concurrent calls via a
+  per-panel inflight promise. Drag/resize used to fire multiple LSP
+  round-trips for the same effective work.
+
+In rdl-viewer-cli:
+
+- **P15** — Tree pre-serialised once per refresh (`latestTreeJson`)
+  instead of being re-`JSON.stringify`-d on every `/tree` request
+  and every SSE connect.
+- **P16** — `JSON.parse` accepts the dump's `Buffer` directly,
+  avoiding the intermediate UTF-8 string allocation (saves ~half
+  the peak memory transient on 25k-reg dumps).
+- **P17** — `staticAsset` caches asset bytes in a `Map<string,
+  Buffer>` after the first load. Pre-T4-D every request did
+  `existsSync + readFileSync` syscalls.
+
+### Deferred to follow-up PRs
+
+These are real items from the review but warrant standalone PR
+review because they restructure or add risk:
+
+- **A1** — split `server.py` build_server() factory.
+- **A2** — `ServerState` sub-types (T2 / T3 / config clusters).
+- **A4** — separate test-hooks module + shrink `__all__`.
+- **A8** — move `_canonicalize_for_skip` + `_fingerprint_roots` to `cache.py`.
+- **A9** — split `_full_pass_async` into named phases.
+- **A11** — viewer-core `useTransport` + `useExpandNode` hooks.
+- **A12** — extension.ts module split.
+- **A13/A14** — typed transport factory in viewer-core, used by
+  extension and CLI inline scripts.
+- **A15/A16** — shared python-probe module + CLI server-state factory.
+- **P1** — viewer virtualisation (largest UX win; needs careful
+  perf benchmarks before/after to justify).
+- **P9** — `cached.serialized` non-lazy memory release.
+
+### Tests
+
+138 pass (no test changes — these are reliability/perf fixes
+without new behaviour surface). All typechecks pass.
+
 ## [0.27.1] — 2026-05-02
 
 T4-B — eleven Tier-2 hardening fixes from the post-T3 multi-agent

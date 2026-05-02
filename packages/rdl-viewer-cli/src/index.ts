@@ -70,7 +70,7 @@ function parseArgs(argv: string[]): CliArgs {
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--port' || a === '-p') {
-      // T4-B H11: bounds + numeric check. Pre-T4-B was bare
+      // bounds + numeric check. Pre-T4-B was bare
       // `Number(argv[++i])` which silently produced NaN if the user
       // forgot the value (`rdl-viewer file --port`) — Bun.serve then
       // assigned a random port, leaving the caller confused. Now
@@ -84,7 +84,7 @@ function parseArgs(argv: string[]): CliArgs {
     } else if (a === '--no-open') {
       args.open = false;
     } else if (a === '--python') {
-      // T4-B H11: same — pre-T4-B passed `undefined` into spawnSync,
+      // same — pre-T4-B passed `undefined` into spawnSync,
       // throwing an uncaught synchronous TypeError.
       const val = argv[++i];
       if (val === undefined) {
@@ -196,17 +196,22 @@ function runDump(python: string, file: string): Promise<DumpResult> {
     });
     child.on('close', (code) => {
       clearTimeout(killTimer);
-      const stdout = Buffer.concat(outChunks).toString('utf8');
+      // P16: Bun's JSON.parse accepts a Buffer directly, dodging the
+      // intermediate UTF-8 string allocation. Pre-T4-D `Buffer.concat
+      // → toString → JSON.parse` did three full copies of the dump
+      // payload (~40 MB transient on 25k regs).
+      const stdoutBuf = Buffer.concat(outChunks);
       const stderr = Buffer.concat(errChunks).toString('utf8');
       let tree: unknown = null;
-      if (stdout.trim().length > 0) {
+      if (stdoutBuf.length > 0) {
         try {
-          tree = JSON.parse(stdout);
+          tree = JSON.parse(stdoutBuf.toString('utf8'));
         } catch (e) {
+          const head = stdoutBuf.toString('utf8', 0, Math.min(200, stdoutBuf.length));
           finish({
             ok: false,
             tree: null,
-            stderr: `dump JSON parse failed: ${e}\n${stdout.slice(0, 200)}\n${stderr}`,
+            stderr: `dump JSON parse failed: ${e}\n${head}\n${stderr}`,
           });
           return;
         }
@@ -256,6 +261,7 @@ if (!checkLspModule(python)) {
 }
 
 let latestTree: unknown = null;
+let latestTreeJson: string | null = null;  // P15: pre-serialised; recomputed once per refresh
 let latestStderr = '';
 
 // Debounce concurrent refreshes — fs.watch can fire 2–3 times for an atomic
@@ -275,7 +281,10 @@ async function refresh(): Promise<void> {
     const r = await runDump(python, args.file);
     latestTree = r.tree;
     latestStderr = r.stderr;
-    if (r.tree !== null) broadcast(JSON.stringify(r.tree));
+    if (r.tree !== null) {
+      latestTreeJson = JSON.stringify(r.tree);
+      broadcast(latestTreeJson);
+    }
     if (r.stderr.trim().length > 0) {
       process.stderr.write(`[${new Date().toISOString()}] systemrdl-lsp:\n${r.stderr}`);
     }
@@ -297,7 +306,7 @@ const watcher = watch(args.file, () => {
   watchTimer = setTimeout(() => refresh(), 120);
 });
 
-// T4-B H10: handle SIGTERM in addition to SIGINT. Docker, systemd,
+// handle SIGTERM in addition to SIGINT. Docker, systemd,
 // `kill <pid>` (without args) — all default to SIGTERM, not SIGINT.
 // Pre-T4-B SIGTERM took the default behaviour (exit immediately
 // with no cleanup), leaking the watcher's inotify handle and
@@ -321,7 +330,7 @@ const server = Bun.serve({
       });
     }
     if (url.pathname === '/tree') {
-      return new Response(JSON.stringify(latestTree ?? { schemaVersion: '0.1.0', roots: [] }), {
+      return new Response(latestTreeJson ?? JSON.stringify({ schemaVersion: '0.1.0', roots: [] }), {
         headers: { 'content-type': 'application/json; charset=utf-8' },
       });
     }
@@ -341,8 +350,8 @@ const server = Bun.serve({
         start(controller) {
           sseClients.add(controller);
           controller.enqueue(`event: ready\ndata: 1\n\n`);
-          if (latestTree !== null) {
-            controller.enqueue(`data: ${JSON.stringify(latestTree)}\n\n`);
+          if (latestTreeJson !== null) {
+            controller.enqueue(`data: ${latestTreeJson}\n\n`);
           }
         },
         cancel(controller) {
@@ -368,16 +377,27 @@ const server = Bun.serve({
  * `bun --filter @systemrdl-pro/viewer-core build` to refresh the SPA without
  * rebuilding the CLI.
  */
+// P17: cache asset bytes per-name. The viewer bundle never changes
+// between server restarts, so two syscalls (existsSync + readFileSync)
+// per request was pure waste under any concurrent reload.
+const assetCache = new Map<string, Buffer>();
+
 function staticAsset(name: string, contentType: string): Response {
-  const full = path.join(VIEWER_CORE_DIST, name);
-  if (!existsSync(full)) {
-    return new Response(
-      `viewer-core asset missing: ${name}. Run \`bun --filter @systemrdl-pro/viewer-core build\`.`,
-      { status: 500, headers: { 'content-type': 'text/plain; charset=utf-8' } },
-    );
+  let body = assetCache.get(name);
+  if (!body) {
+    const full = path.join(VIEWER_CORE_DIST, name);
+    if (!existsSync(full)) {
+      return new Response(
+        `viewer-core asset missing: ${name}. Run \`bun --filter @systemrdl-pro/viewer-core build\`.`,
+        { status: 500, headers: { 'content-type': 'text/plain; charset=utf-8' } },
+      );
+    }
+    body = readFileSync(full);
+    assetCache.set(name, body);
   }
-  const body = readFileSync(full);
-  return new Response(body, {
+  // Bun's Response accepts Buffer at runtime; the DOM lib's BodyInit
+  // type does not list it. Cast to satisfy the typechecker.
+  return new Response(body as unknown as BodyInit, {
     headers: { 'content-type': contentType, 'cache-control': 'no-cache' },
   });
 }

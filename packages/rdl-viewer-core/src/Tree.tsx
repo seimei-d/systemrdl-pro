@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import type { Addrmap, Reg, SourceLoc, Transport, TreeNode } from './types';
 import { isContainer, subtreeMatches, type FilterScope } from './util';
 import type { CtxMenuItem } from './ContextMenu';
@@ -153,7 +153,10 @@ type RowProps = {
   onContextMenu: (ev: React.MouseEvent, row: FlatRow) => void;
 };
 
-function TreeRow({
+// Memoised so a selection change re-renders only the two rows whose
+// `selected` flipped, not all 500-25k visible rows. The four callback
+// props are useCallback-stable in Viewer so memo bailout is effective.
+const TreeRow = memo(function TreeRow({
   row, selected, onSelectReg, onRevealContainer, onToggleCollapse, onContextMenu,
 }: RowProps) {
   const indent = row.depth > 0 ? `rdl-indent-${Math.min(row.depth, 3)}` : '';
@@ -221,4 +224,4 @@ function TreeRow({
       <span className="access">{reg.accessSummary || ''}</span>
     </div>
   );
-}
+});

@@ -20,8 +20,12 @@ if TYPE_CHECKING:
     from systemrdl.node import RootNode
 
 
-def _format_hex(value: int, width_hex_chars: int = 8) -> str:
-    return f"0x{value:0{width_hex_chars}X}"
+# re-exported from compile.py so outline.py doesn't have to
+# import from hover.py (outline is structurally higher-level than
+# hover — hover is "tooltip on a single position", outline is "the
+# whole document's symbol tree" — outline depending on hover for a
+# pure number-formatting utility was an inverted dependency).
+from .compile import _format_hex
 
 
 def _literal_value(value: Any) -> Any:
@@ -88,7 +92,7 @@ def _property_origin_hint(
     own_line = getattr(own_ref, "line", None) if own_ref else None
     if prop_line is None or own_line is None or prop_line == own_line:
         return ""
-    # T4-B H4: prefer the LSP buffer-cache line reader over a synchronous
+    # prefer the LSP buffer-cache line reader over a synchronous
     # disk read. Hover handlers run on the asyncio event loop; a slow
     # NFS / spinning-disk read here used to block diagnostics, completion
     # and every other LSP response for hundreds of milliseconds. The
@@ -139,7 +143,7 @@ def _node_at_position(
 
     target_line_1b = line_0b + 1
 
-    # T4-B H4: single-pass walk. Pre-T4-B walked the tree TWICE (once
+    # single-pass walk. Pre-T4-B walked the tree TWICE (once
     # to build the line-uses Counter, once to find the matching node)
     # AND then double-visited fields (children(unroll=True) already
     # yields fields for RegNode, but the visit() loop also iterated

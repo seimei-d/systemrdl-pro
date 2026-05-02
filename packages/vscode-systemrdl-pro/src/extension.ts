@@ -36,13 +36,24 @@ type PanelEntry = {
   panel: vscode.WebviewPanel;
   uri: string;
   lastTree?: ElaboratedTree;
-  // T4-B H5: per-panel cursor-sync state. Pre-T4-B these were
+  // per-panel cursor-sync state. Pre-T4-B these were
   // module-globals — with two panels open (multi-root, Decision 3C),
   // a reveal in panel A would suppress the next cursor sync for
   // panel B too, and a cursor move in panel A's editor would clear
   // panel B's pending debounce. Each panel now owns its own.
   cursorSyncTimer?: ReturnType<typeof setTimeout>;
   suppressNextCursorSync?: boolean;
+  // cached reg count + root-name list, computed once when
+  // a fresh tree arrives. updateStatusBar fires per tab-switch and
+  // per debounced diag change; countRegs is O(N), running it on
+  // every call wasted measurable time on big designs.
+  cachedRegCount?: number;
+  cachedRootNames?: string;
+  // in-flight refreshMemoryMap promise. Coalesces concurrent
+  // calls (drag/resize fires onDidChangeViewState repeatedly). Pre-T4-D
+  // each one issued a fresh `rdl/elaboratedTree` LSP request even
+  // though the sinceVersion guard short-circuited the response body.
+  refreshing?: Promise<void>;
 };
 const memoryMapPanels = new Map<string, PanelEntry>();
 
@@ -56,10 +67,14 @@ let statusBarItem: vscode.StatusBarItem | undefined;
 const MAX_RESTARTS = 3;
 const RESTART_WINDOW_MS = 60_000;
 let recentCrashTimes: number[] = [];
-// T4-B H5: cursor-sync suppression and debounce live PER panel on
+// cursor-sync suppression and debounce live PER panel on
 // PanelEntry — see the type above. Module-level state used to drop
 // events for the wrong panel in multi-root setups.
 const CURSOR_SYNC_DEBOUNCE_MS = 500;
+// Debounce for the diagnostics-change → status-bar refresh path.
+// One firing per ~200 ms is enough; the underlying LSP publishes can
+// spike at multi-per-keystroke rates during elaboration catchup.
+let diagDebounceTimer: ReturnType<typeof setTimeout> | undefined;
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   outputChannel = vscode.window.createOutputChannel('SystemRDL Pro', { log: true });
@@ -69,7 +84,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   statusBarItem.command = 'systemrdl-pro.showMemoryMap';
   statusBarItem.tooltip = 'Click to open SystemRDL Memory Map';
   context.subscriptions.push(statusBarItem);
-  // T4-B H9: register the flash decoration disposable now (lazy
+  // register the flash decoration disposable now (lazy
   // creation on first reveal). The disposable wrapper handles the
   // possibility that the decoration is never actually instantiated.
   context.subscriptions.push({
@@ -119,15 +134,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }, CURSOR_SYNC_DEBOUNCE_MS);
     }),
     // Refresh status bar diag count when diagnostics change for the URI the
-    // active editor is on.
+    // active editor is on. Debounced — pre-T4-D this fired once per LSP
+    // diagnostic publish (multiple per keystroke during debounce catchup),
+    // each call iterating the entire DiagnosticCollection via
+    // `vscode.languages.getDiagnostics`.
     vscode.languages.onDidChangeDiagnostics(event => {
       const active = vscode.window.activeTextEditor;
       if (!active) return;
       const activeUri = active.document.uri.toString();
-      if (event.uris.some(u => u.toString() === activeUri)) {
+      if (!event.uris.some(u => u.toString() === activeUri)) return;
+      if (diagDebounceTimer) clearTimeout(diagDebounceTimer);
+      diagDebounceTimer = setTimeout(() => {
         const entry = memoryMapPanels.get(activeUri);
         if (entry?.lastTree) updateStatusBar(entry.lastTree, activeUri);
-      }
+      }, 200);
     }),
     // Tab focus → swap status bar to track that file's panel.
     vscode.window.onDidChangeActiveTextEditor(editor => {
@@ -193,7 +213,7 @@ export async function deactivate(): Promise<void> {
 // ---------------------------------------------------------------------------
 
 async function startServer(context: vscode.ExtensionContext): Promise<void> {
-  // T4-B H7: settle the clientReady promise on EVERY exit path,
+  // settle the clientReady promise on EVERY exit path,
   // including the early returns below. Pre-T4-B clientReady was a
   // bare `Promise<void>` whose resolver was only called inside the
   // success branch of `client.start()`. If we hit the no-python or
@@ -228,7 +248,7 @@ async function startServer(context: vscode.ExtensionContext): Promise<void> {
     outputChannel,
     synchronize: {
       configurationSection: 'systemrdl-pro',
-      // T4-B H9: capture the watcher into the lifecycle aggregate so
+      // capture the watcher into the lifecycle aggregate so
       // it gets disposed on restart / deactivate. The
       // LanguageClientOptions.synchronize handoff doesn't guarantee
       // disposal — every restart used to mint a fresh watcher and
@@ -283,7 +303,7 @@ async function startServer(context: vscode.ExtensionContext): Promise<void> {
     clear: () => {},
   });
 
-  // T4-B H6: each call to startServer (initial + every restartServer)
+  // each call to startServer (initial + every restartServer)
   // used to push a NEW `{ dispose: () => client?.stop() }` into
   // context.subscriptions WITHOUT removing the previous one, AND
   // register a fresh set of `client.onNotification` handlers. After N
@@ -299,7 +319,7 @@ async function startServer(context: vscode.ExtensionContext): Promise<void> {
     clientLifecycleDisposable.dispose();
     clientLifecycleDisposable = undefined;
   }
-  // T4-B H9: dispose the prior file watcher (if any) before
+  // dispose the prior file watcher (if any) before
   // LanguageClient takes ownership of the new one. Without this,
   // every restart leaks the previous watcher's fd/inotify handle.
   if (lspFileWatcher) {
@@ -367,7 +387,7 @@ async function startServer(context: vscode.ExtensionContext): Promise<void> {
   } catch (err) {
     outputChannel?.error(`Failed to start LSP: ${err}`);
     showRestartBanner();
-    // T4-B H7: same reasoning as the early-returns above — if
+    // same reasoning as the early-returns above — if
     // client.start() throws (e.g., transport handshake failure,
     // pygls version mismatch), unblock awaiters so they can render
     // a fallback state instead of hanging on the readiness gate.
@@ -375,10 +395,10 @@ async function startServer(context: vscode.ExtensionContext): Promise<void> {
   }
 }
 
-// T4-B H6: tracked outside startServer so restartServer can dispose
+// tracked outside startServer so restartServer can dispose
 // the prior lifecycle aggregate before standing up a fresh one.
 let clientLifecycleDisposable: vscode.Disposable | undefined;
-// T4-B H9: tracked outside startServer to ensure proper disposal
+// tracked outside startServer to ensure proper disposal
 // across restartServer cycles. createFileSystemWatcher leaks the
 // inotify/fd handle if not disposed.
 let lspFileWatcher: vscode.FileSystemWatcher | undefined;
@@ -638,7 +658,7 @@ async function handleWebviewMessage(msg: WebviewMessage, panelUri: string): Prom
       // to the error channel so the viewer clears in-flight tracking and
       // retries on the next onTreeUpdate (which will carry a fresh version).
       if (reg && typeof reg === 'object' && (reg as { outdated?: boolean }).outdated) {
-        // T4-A C3: echo the version back so the webview can route the
+        // echo the version back so the webview can route the
         // result to the right `${version}:${nodeId}` resolver key. The
         // pre-T4-A wire shape (no version field) keyed only on
         // ``nodeId`` and silently overwrote prior resolvers when the
@@ -695,7 +715,7 @@ function spliceExpandedNode(tree: ElaboratedTree, nodeId: string, expanded: unkn
   }
 }
 
-// T4-B H9: lazy-create the decoration on first activate() so we can
+// lazy-create the decoration on first activate() so we can
 // push it to context.subscriptions for proper disposal. Pre-T4-B this
 // was a module-load-time singleton with no disposal path — leaked one
 // VSCode decoration handle per extension-host activation.
@@ -725,7 +745,7 @@ async function revealLocation(loc: SourceLoc): Promise<void> {
 
   try {
     const doc = await vscode.workspace.openTextDocument(uri);
-    // T4-B H5: per-panel suppression. The cursor change we're about to
+    // per-panel suppression. The cursor change we're about to
     // cause must not bounce back as a cursor-sync message into the
     // viewer panel that initiated the reveal; suppress one cycle on
     // THAT panel only. Pre-T4-B this was a module-global, so a
@@ -762,11 +782,18 @@ async function revealLocation(loc: SourceLoc): Promise<void> {
 async function refreshMemoryMap(uri: string): Promise<void> {
   const entry = memoryMapPanels.get(uri);
   if (!entry || !client) return;
+  // P14: coalesce concurrent calls. drag/resize / rapid push notifications
+  // used to fire multiple LSP round-trips for the same effective work.
+  if (entry.refreshing) return entry.refreshing;
+  entry.refreshing = doRefreshMemoryMap(uri, entry).finally(() => {
+    entry.refreshing = undefined;
+  });
+  return entry.refreshing;
+}
 
+async function doRefreshMemoryMap(uri: string, entry: PanelEntry): Promise<void> {
+  if (!client) return;
   try {
-    // TODO-1: send the version we last rendered so the LSP can skip
-    // serialization + transport when nothing changed (e.g. focus changes,
-    // panel re-mount, multiple notifications during a debounce window).
     const sinceVersion = entry.lastTree?.version;
     const reply = await client.sendRequest<ElaboratedTree>('rdl/elaboratedTree', {
       uri,
@@ -782,6 +809,10 @@ async function refreshMemoryMap(uri: string): Promise<void> {
     }
     safePostTo(entry, { type: 'tree', tree: reply });
     entry.lastTree = reply;
+    // P13: hydrate the per-panel cache so updateStatusBar doesn't
+    // recompute O(N) every tab switch / diag debounce tick.
+    entry.cachedRegCount = countRegs(reply.roots);
+    entry.cachedRootNames = reply.roots.map(r => r.name).join(', ');
     const active = vscode.window.activeTextEditor?.document.uri.toString();
     if (active === uri) updateStatusBar(reply, uri);
   } catch (err) {
@@ -799,8 +830,13 @@ function updateStatusBar(tree: ElaboratedTree, uri: string): void {
     statusBarItem.hide();
     return;
   }
-  const total = countRegs(tree.roots);
-  const rootNames = tree.roots.map(r => r.name).join(', ');
+  // P13: prefer the cached counts populated by refreshMemoryMap. Fall
+  // back to live recompute if the entry hasn't been hydrated yet (e.g.,
+  // we got here via a path that doesn't go through refreshMemoryMap).
+  const entry = memoryMapPanels.get(uri);
+  const total = entry?.cachedRegCount ?? countRegs(tree.roots);
+  const rootNames =
+    entry?.cachedRootNames ?? tree.roots.map(r => r.name).join(', ');
   const stale = tree.stale ? ' $(warning) stale' : '';
 
   let diag = '';
@@ -979,7 +1015,7 @@ function renderViewerHtml(
     const elaboratingListeners = new Set();
     let pendingTree = null;
     let elaboratingState = false;
-    // T4-A C3: per-(version,nodeId) resolvers for the lazy expandNode
+    // per-(version,nodeId) resolvers for the lazy expandNode
     // round-trip. Pre-T4-A keyed on nodeId only — rapid clicks and
     // cross-version races overwrote pending resolvers and leaked
     // promises (spinner stuck forever). Now keyed by version+":"+nodeId
@@ -1063,7 +1099,7 @@ function renderViewerHtml(
 }
 
 function makeNonce(): string {
-  // T4-B H8: cryptographically secure nonce per VSCode webview CSP guidance.
+  // cryptographically secure nonce per VSCode webview CSP guidance.
   // Pre-T4-B used Math.random() — fine for collision avoidance in
   // practice (VSCode's webview is sandboxed) but the CSP nonce mechanism
   // is meant to defeat injection attacks, and a non-CSPRNG nonce is a

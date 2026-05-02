@@ -12,12 +12,17 @@ export function Viewer({ transport }: Props) {
   const [activeRoot, setActiveRoot] = useState(0);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [filter, setFilter] = useState('');
+  // Separate uncontrolled-style input value so the input feels instant
+  // while `filter` (which drives the expensive subtree scan) only
+  // commits after the user stops typing for 150 ms. Cuts 200k field
+  // comparisons per keystroke down to one per pause on big trees.
+  const filterTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [filterScope, setFilterScope] = useState<FilterScope>('all');
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
   const [ctxMenu, setCtxMenu] = useState<CtxMenuState>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [isElaborating, setIsElaborating] = useState(false);
-  // T4-A C4: surface getTree() rejections to the user. Pre-T4-A this was
+  // surface getTree() rejections to the user. Pre-T4-A this was
   // ``.catch(() => {})``, so any LSP startup failure or transport
   // hiccup left the viewer rendering "Loading…" forever with zero
   // signal. Now the rejection is captured and rendered as an error
@@ -153,6 +158,7 @@ export function Viewer({ transport }: Props) {
       } else if (e.key === 'Escape') {
         const input = document.getElementById('rdl-filter-input') as HTMLInputElement | null;
         if (input && (document.activeElement === input || filter)) {
+          if (filterTimer.current) clearTimeout(filterTimer.current);
           setFilter('');
           input.value = '';
           input.blur();
@@ -205,7 +211,13 @@ export function Viewer({ transport }: Props) {
     setCtxMenu({ x: ev.clientX, y: ev.clientY, items });
   }, [onCopy, transport]);
 
-  const found = root && selectedKey ? findRegByKey(root, selectedKey) : null;
+  // Memoised — pre-T4-D this O(n) DFS ran in the render body on every
+  // keystroke, scroll, toast, etc. Only depends on `root` (tree
+  // identity flips on re-elaborate) and `selectedKey`.
+  const found = useMemo(
+    () => (root && selectedKey ? findRegByKey(root, selectedKey) : null),
+    [root, selectedKey],
+  );
 
   // T1.7: lazy expansion of placeholder regs. When the user selects a reg
   // whose `loadState === 'placeholder'`, fire `transport.expandNode` and
@@ -213,7 +225,7 @@ export function Viewer({ transport }: Props) {
   // real fields. Per-nodeId in-flight tracking avoids stampedes when the
   // user rapidly clicks through siblings.
   //
-  // T4-B H1: `useRef`, not `useState` with discarded setter. The Set is
+  // `useRef`, not `useState` with discarded setter. The Set is
   // mutated in place (`.add` / `.delete`) and we never want a re-render
   // off it — that's exactly what refs are for. The previous `useState`
   // shape implied React-tracked state and broke under StrictMode
@@ -245,7 +257,7 @@ export function Viewer({ transport }: Props) {
         pendingExpansions.delete(trackingKey);
         setTree(currentTree => {
           if (!currentTree) return currentTree;
-          // T4-A C2: spliceExpandedReg returns a fully-cloned tree along
+          // spliceExpandedReg returns a fully-cloned tree along
           // the root → reg path. The new tree object is what flips
           // React state identity; downstream useMemos keyed on `root`
           // (buildFlatList → flatRows, etc.) now see a fresh reference
@@ -274,7 +286,7 @@ export function Viewer({ transport }: Props) {
   // addrmap" and we let the existing message render.
   const stillElaboratingFirstPass =
     !tree || (tree.version === 0 && (tree.roots ?? []).length === 0);
-  // T4-A C4: error trumps loading — if getTree rejected, surface the
+  // error trumps loading — if getTree rejected, surface the
   // error with a retry button instead of an indefinite spinner. Retry
   // bumps ``retryCounter`` which re-runs the fetch effect.
   if (loadError && !tree) {
@@ -368,7 +380,11 @@ export function Viewer({ transport }: Props) {
                 id="rdl-filter-input"
                 type="text"
                 placeholder={filterScopePlaceholder(filterScope)}
-                onChange={e => setFilter(e.target.value.toLowerCase())}
+                onChange={e => {
+                  const v = e.target.value.toLowerCase();
+                  if (filterTimer.current) clearTimeout(filterTimer.current);
+                  filterTimer.current = setTimeout(() => setFilter(v), 150);
+                }}
               />
               <button
                 type="button"
@@ -418,7 +434,7 @@ function filterScopePlaceholder(scope: FilterScope): string {
 }
 
 /**
- * T1.7 / T4-A C2: walk a tree and replace the placeholder Reg with the
+ * T1.7 / walk a tree and replace the placeholder Reg with the
  * populated one returned by `transport.expandNode`. Returns a NEW tree
  * with every container on the root → reg path freshly cloned, so that
  * `useMemo`s keyed on the root reference (`buildFlatList` → `flatRows`)

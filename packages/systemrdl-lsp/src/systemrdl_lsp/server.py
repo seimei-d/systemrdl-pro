@@ -157,7 +157,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-SERVER_VERSION = "0.19.1"
+SERVER_VERSION = "0.20.0"
 
 
 def _iter_rdl_files(root: pathlib.Path, exclude_dirs: set[str]):
@@ -218,18 +218,32 @@ def _build_selection_ranges(
         cleaned,
     )
 
-    # Convert (line, char) → absolute offset.
+    # Prefix-sum of line start offsets so both offset_of and pos_of
+    # are O(1) / O(log n) instead of O(n) per call. pos_of is called
+    # 2x per enclosing brace pair, so deep nesting in a 10k-line file
+    # used to be O(K*N) where K is nesting depth.
+    line_starts: list[int] = [0]
+    for ln in lines:
+        line_starts.append(line_starts[-1] + len(ln) + 1)
+
     def offset_of(li: int, co: int) -> int:
-        return sum(len(ln) + 1 for ln in lines[:li]) + co
+        if li < 0:
+            return co
+        if li >= len(lines):
+            return line_starts[-1]
+        return line_starts[li] + co
+
+    import bisect as _bisect
 
     def pos_of(off: int) -> Position:
-        # Inverse of offset_of.
-        seen = 0
-        for li, ln in enumerate(lines):
-            if seen + len(ln) >= off:
-                return Position(line=li, character=off - seen)
-            seen += len(ln) + 1
-        return Position(line=len(lines), character=0)
+        # bisect_right gives the index of the line whose start is > off,
+        # so the line containing off is at idx-1.
+        idx = _bisect.bisect_right(line_starts, off) - 1
+        if idx < 0:
+            return Position(line=0, character=0)
+        if idx >= len(lines):
+            return Position(line=len(lines), character=0)
+        return Position(line=idx, character=off - line_starts[idx])
 
     cursor_off = offset_of(line_0b, char_0b)
     ranges: list[Range] = []
@@ -533,6 +547,33 @@ def build_server() -> LanguageServer:
     # spawned worker processes can stick around as orphans.
     atexit.register(_shutdown_elaborate_pool)
 
+    def _apply_stale_transition(
+        uri: str, cached: CachedElaboration, target_stale: bool,
+    ) -> int | None:
+        """Toggle ``state.stale_uris[uri]`` to match ``target_stale``.
+
+        On a real transition (False → True or True → False), bump
+        ``cached.version`` and clear ``cached.serialized`` so the next
+        ``rdl/elaboratedTree`` fetch builds a fresh envelope with the
+        right stale flag, and return the new version so the caller
+        can fire ``rdl/elaboratedTreeChanged``. Returns ``None`` when
+        state was already correct (no client refresh needed).
+
+        Centralises the stale state machine that used to live inline
+        in three sites — last three field-reported stale-bar
+        regressions all traced back to one of the copies drifting.
+        """
+        is_stale_now = uri in state.stale_uris
+        if target_stale and not is_stale_now:
+            state.stale_uris.add(uri)
+        elif not target_stale and is_stale_now:
+            state.stale_uris.discard(uri)
+        else:
+            return None
+        cached.version += 1
+        cached.serialized = None
+        return cached.version
+
     def _update_include_graph(uri: str, consumed_files: set[pathlib.Path]) -> None:
         """Refresh forward + reverse include maps for ``uri`` (T2-A).
 
@@ -614,24 +655,14 @@ def build_server() -> LanguageServer:
                 old.text = buffer_text
                 old.text_canonical = _canonicalize_for_skip(buffer_text)
                 old.elaborated_at = time.time()
-                # Symmetric stale transition (handles both T → F and F
-                # → T). The latter fires when the user introduces an
-                # address conflict in a buffer that otherwise produces
-                # the same fingerprint as before — the AST is the same
-                # but the diagnostics changed. Either direction needs
-                # a version bump + serialized invalidation so the
-                # client re-fetches and the viewer's stale-bar
-                # reflects current state.
-                was_stale = uri in state.stale_uris
-                if has_errors:
-                    state.stale_uris.add(uri)
-                else:
-                    state.stale_uris.discard(uri)
-                is_stale = uri in state.stale_uris
-                if was_stale != is_stale:
-                    old.version += 1
-                    old.serialized = None
-                    version_after = old.version
+                # symmetric stale transition (handles both T → F
+                # and F → T). The latter fires when the user introduces
+                # an address conflict in a buffer that produces the same
+                # fingerprint as before — AST is the same but the
+                # diagnostics changed.
+                bumped = _apply_stale_transition(uri, old, has_errors)
+                if bumped is not None:
+                    version_after = bumped
                 _update_include_graph(uri, consumed_files)
             else:
                 # Cache takes ownership of the temp file (it backs lazy
@@ -673,25 +704,12 @@ def build_server() -> LanguageServer:
                 ast_changed = True
                 prior_cached = state.cache.get(uri)
                 if prior_cached is not None:
-                    was_stale = uri in state.stale_uris
-                    state.stale_uris.add(uri)
-                    if not was_stale:
-                        # Stale state just transitioned False → True.
-                        # Without doing anything else, the viewer would
-                        # never know: cached.serialized still holds the
-                        # last (non-stale) envelope, version hasn't
-                        # bumped, so no rdl/elaboratedTreeChanged push
-                        # fires and the client's sinceVersion check
-                        # would short-circuit even if it asked. Bump
-                        # version + clear cached serialization so the
-                        # next fetch builds a fresh envelope with
-                        # ``stale=True`` and the "Showing last good"
-                        # banner appears. This was reported in the
-                        # field after T2 ship — broken RDL no longer
-                        # surfaced the stale icon.
-                        prior_cached.version += 1
-                        prior_cached.serialized = None
-                        version_after = prior_cached.version
+                    # stale F → T transition through the
+                    # central helper. Originally inlined here as
+                    # 9 lines of state-machine boilerplate.
+                    bumped = _apply_stale_transition(uri, prior_cached, True)
+                    if bumped is not None:
+                        version_after = bumped
             else:
                 # Library file: refresh the includee graph from this
                 # buffer's perspective (it may itself include other
@@ -873,7 +891,7 @@ def build_server() -> LanguageServer:
 
             _check_perl_pre_flight(buffer_text)
 
-            # T4-A C6: ``started_notified`` + try/finally below guarantee
+            # ``started_notified`` + try/finally below guarantee
             # ``rdl/elaborationFinished`` fires on EVERY exit path —
             # including ``CancelledError`` from LSP shutdown or a rapid
             # restart. Pre-T4-A cancellation propagated up
@@ -900,7 +918,7 @@ def build_server() -> LanguageServer:
             # done-callback cleans up the orphan tmp file when the
             # late result eventually arrives.
             t_submit = time.monotonic()
-            # T4-A C6: track the latest pool future at this scope so the
+            # track the latest pool future at this scope so the
             # outer cancellation handler can register a tmp-cleanup
             # callback on it. Reassigned by ``_submit_compile`` on
             # every BrokenProcessPool retry.
@@ -1028,7 +1046,7 @@ def build_server() -> LanguageServer:
                         messages, roots, tmp_path, consumed_files = raw_result
                     break
                 except asyncio.CancelledError:
-                    # T4-A C6: LSP shutdown / pygls task-cancel arrived
+                    # LSP shutdown / pygls task-cancel arrived
                     # mid-elaborate. The shielded subprocess is still
                     # running and will eventually emit its tmp file —
                     # register a callback so the tmp gets unlinked
@@ -1119,24 +1137,20 @@ def build_server() -> LanguageServer:
                     pool_fut.add_done_callback(_drop_late_result)
                 else:
                     fut.add_done_callback(_drop_late_result)
-                # Mark stale + force the viewer to re-fetch (see the
-                # parse-failure branch in _apply_compile_result for
-                # the same pattern + rationale).
                 cached_for_timeout = state.cache.get(uri)
                 if cached_for_timeout is not None:
-                    was_stale = uri in state.stale_uris
-                    state.stale_uris.add(uri)
-                    if not was_stale:
-                        cached_for_timeout.version += 1
-                        cached_for_timeout.serialized = None
+                    bumped = _apply_stale_transition(
+                        uri, cached_for_timeout, True,
+                    )
+                    if bumped is not None:
                         try:
                             server.protocol.notify(
                                 "rdl/elaboratedTreeChanged",
-                                {"uri": uri, "version": cached_for_timeout.version},
+                                {"uri": uri, "version": bumped},
                             )
                         except Exception:
                             logger.debug(
-                                "could not push stale-state-changed (timeout)",
+                                "stale-state notify failed (timeout)",
                                 exc_info=True,
                             )
                 try:
@@ -1288,9 +1302,85 @@ def build_server() -> LanguageServer:
         finally:
             state.pending.pop(uri, None)
 
+    async def _read_workspace_config() -> dict[str, Any] | None:
+        """Fetch the systemrdl-pro section of the workspace config.
+
+        Returns the dict on success, ``None`` if the client returned
+        nothing or the response wasn't a dict. Raises only on the
+        underlying transport failure — callers wrap in try/except.
+        """
+        from lsprotocol.types import (
+            ConfigurationItem,
+            WorkspaceConfigurationParams,
+        )
+        configs = await server.workspace_configuration_async(
+            WorkspaceConfigurationParams(
+                items=[ConfigurationItem(section="systemrdl-pro")]
+            )
+        )
+        if configs and isinstance(configs[0], dict):
+            return configs[0]
+        return None
+
+    def _apply_workspace_config(cfg: dict[str, Any], *, is_initial: bool) -> None:
+        """Push values from a workspace-config dict into ServerState.
+
+        Shared by ``_on_initialized`` (initial fetch) and
+        ``_on_config_change`` (live update). Pre-T4-C the same
+        ~30 lines of parsing lived in two places and drifted with
+        every new setting.
+
+        ``is_initial`` controls two things: log every value at INFO
+        on first read (operators want a startup snapshot), and reload
+        ``preindex.*`` only on the initial pass (mid-session preindex
+        toggles need an explicit restart anyway since the cache state
+        differs).
+        """
+        paths = cfg.get("includePaths") or []
+        state.include_paths = [str(p) for p in paths if p]
+        raw_vars = cfg.get("includeVars") or {}
+        if isinstance(raw_vars, dict):
+            state.include_vars = {str(k): str(v) for k, v in raw_vars.items()}
+        raw_opcodes = cfg.get("perlSafeOpcodes") or []
+        if isinstance(raw_opcodes, list):
+            state.perl_safe_opcodes = [str(op) for op in raw_opcodes if op]
+        if is_initial:
+            preindex_cfg = cfg.get("preindex") or {}
+            if isinstance(preindex_cfg, dict):
+                if "enabled" in preindex_cfg:
+                    state.preindex_enabled = bool(preindex_cfg["enabled"])
+                max_files = preindex_cfg.get("maxFiles")
+                if isinstance(max_files, int) and max_files > 0:
+                    state.preindex_max_files = max_files
+        timeout_ms = cfg.get("elaborationTimeoutMs")
+        if isinstance(timeout_ms, (int, float)) and timeout_ms > 0:
+            state.elaboration_timeout_s = max(
+                ELABORATION_TIMEOUT_SECONDS_MIN,
+                min(ELABORATION_TIMEOUT_SECONDS_MAX, timeout_ms / 1000.0),
+            )
+        if "elaborateInProcess" in cfg:
+            new_in_proc = bool(cfg.get("elaborateInProcess"))
+            if not is_initial and new_in_proc != state.elaborate_in_process:
+                logger.info(
+                    "elaborateInProcess change observed (was=%s now=%s); "
+                    "restart the LSP for it to take effect "
+                    "(SystemRDL: Restart Language Server)",
+                    state.elaborate_in_process, new_in_proc,
+                )
+            state.elaborate_in_process = new_in_proc
+        if is_initial:
+            logger.info("includePaths: %s", state.include_paths)
+            logger.info("includeVars: %s", list(state.include_vars))
+            logger.info("perlSafeOpcodes override: %s", state.perl_safe_opcodes)
+            logger.info(
+                "preindex enabled=%s max=%d",
+                state.preindex_enabled, state.preindex_max_files,
+            )
+            logger.info("elaboration timeout: %.1fs", state.elaboration_timeout_s)
+
     @server.feature(INITIALIZED)
     def _on_initialized(_ls: LanguageServer, _params: InitializedParams) -> None:
-        # T1.4: detect lazy-tree client capability before answering any
+        # Detect lazy-tree client capability before answering any
         # rdl/elaboratedTree request. The capability lives under
         # `experimental.systemrdlLazyTree` per the design doc; clients that
         # don't set it get the v0.1-shaped full tree (backward compat).
@@ -1305,62 +1395,16 @@ def build_server() -> LanguageServer:
 
         async def fetch() -> None:
             try:
-                from lsprotocol.types import (
-                    ConfigurationItem,
-                    WorkspaceConfigurationParams,
-                )
-                configs = await server.workspace_configuration_async(
-                    WorkspaceConfigurationParams(
-                        items=[ConfigurationItem(section="systemrdl-pro")]
-                    )
-                )
-                if configs and isinstance(configs[0], dict):
-                    cfg = configs[0]
-                    paths = cfg.get("includePaths") or []
-                    state.include_paths = [str(p) for p in paths if p]
-                    raw_vars = cfg.get("includeVars") or {}
-                    if isinstance(raw_vars, dict):
-                        state.include_vars = {str(k): str(v) for k, v in raw_vars.items()}
-                    raw_opcodes = cfg.get("perlSafeOpcodes") or []
-                    if isinstance(raw_opcodes, list):
-                        state.perl_safe_opcodes = [str(op) for op in raw_opcodes if op]
-                    preindex_cfg = cfg.get("preindex") or {}
-                    if isinstance(preindex_cfg, dict):
-                        if "enabled" in preindex_cfg:
-                            state.preindex_enabled = bool(preindex_cfg["enabled"])
-                        max_files = preindex_cfg.get("maxFiles")
-                        if isinstance(max_files, int) and max_files > 0:
-                            state.preindex_max_files = max_files
-                    timeout_ms = cfg.get("elaborationTimeoutMs")
-                    if isinstance(timeout_ms, (int, float)) and timeout_ms > 0:
-                        state.elaboration_timeout_s = max(
-                            ELABORATION_TIMEOUT_SECONDS_MIN,
-                            min(ELABORATION_TIMEOUT_SECONDS_MAX, timeout_ms / 1000.0),
-                        )
-                    state.elaborate_in_process = bool(
-                        cfg.get("elaborateInProcess", False)
-                    )
-                    logger.info("includePaths from initial config: %s", state.include_paths)
-                    logger.info("includeVars from initial config: %s", list(state.include_vars))
-                    logger.info("perlSafeOpcodes override: %s", state.perl_safe_opcodes)
-                    logger.info(
-                        "preindex enabled=%s max=%d",
-                        state.preindex_enabled, state.preindex_max_files,
-                    )
-                    logger.info(
-                        "elaboration timeout: %.1fs", state.elaboration_timeout_s,
-                    )
+                cfg = await _read_workspace_config()
+                if cfg is not None:
+                    _apply_workspace_config(cfg, is_initial=True)
             except Exception:
-                logger.debug("could not fetch initial workspace configuration", exc_info=True)
-            # T3: stand up the cross-process elaborate pool *after*
-            # config has been read so the elaborateInProcess override
-            # is honoured. Pool init is best-effort — falls back to
-            # in-thread on failure.
+                logger.debug("initial workspace config read failed", exc_info=True)
+            # Pool init AFTER config so the elaborateInProcess override
+            # is honoured. Best-effort — falls back to in-thread on failure.
             _ensure_elaborate_pool()
-            # Workspace pre-index runs after config so it picks up the user's
-            # configured preindex limit (skip-on-disable + file-count cap).
-            # Even on config failure we still try with defaults — pre-warming
-            # the cache with default limits is preferable to no index.
+            # Pre-index runs with whatever config we got (defaults on failure
+            # are better than nothing — they still warm the cache).
             asyncio.ensure_future(_preindex_workspace())
 
         asyncio.ensure_future(fetch())
@@ -1387,17 +1431,25 @@ def build_server() -> LanguageServer:
 
     @server.feature(TEXT_DOCUMENT_DID_CLOSE)
     def _on_close(_ls: LanguageServer, params: DidCloseTextDocumentParams) -> None:
-        """Best-effort cleanup of per-URI state when a document closes (T2-C).
+        """Per-URI cleanup when a document closes.
 
-        Only drops the elaboration lock if it isn't currently held — a
-        lock with active waiters / a pending elaborate keeps it alive
-        until the next close. The include-graph and reverse map are
-        intentionally NOT cleared here: a workspace-symbol search or a
-        consumer that gets re-opened later is still served correctly
-        by stale-but-bounded data, and clearing would force redundant
-        re-elaborates on every tab close.
+        - Cancel any pending debounce task so we don't elaborate against
+          stale workspace state moments after close (the buffer might
+          already be gone from pygls' workspace).
+        - Drop the elaboration lock if not held. If currently held, leave
+          it; the in-flight elaborate completes naturally and the next
+          close cleans up.
+
+        ``include_graph`` / ``includee_to_includers`` / ``stale_uris``
+        are intentionally NOT cleared: a workspace-symbol search or
+        re-opened consumer is still served correctly by stale-but-
+        bounded data, and clearing would force redundant re-elaborates
+        on every tab close.
         """
         uri = params.text_document.uri
+        existing = state.pending.pop(uri, None)
+        if existing is not None:
+            existing.cancel()
         lock = state.uri_elab_locks.get(uri)
         if lock is not None and not lock.locked():
             state.uri_elab_locks.pop(uri, None)
@@ -1423,40 +1475,9 @@ def build_server() -> LanguageServer:
     ) -> None:
         async def refresh() -> None:
             try:
-                from lsprotocol.types import (
-                    ConfigurationItem,
-                    WorkspaceConfigurationParams,
-                )
-                configs = await server.workspace_configuration_async(
-                    WorkspaceConfigurationParams(
-                        items=[ConfigurationItem(section="systemrdl-pro")]
-                    )
-                )
-                if configs and isinstance(configs[0], dict):
-                    paths = configs[0].get("includePaths") or []
-                    state.include_paths = [str(p) for p in paths if p]
-                    raw_vars = configs[0].get("includeVars") or {}
-                    if isinstance(raw_vars, dict):
-                        state.include_vars = {str(k): str(v) for k, v in raw_vars.items()}
-                    raw_opcodes = configs[0].get("perlSafeOpcodes") or []
-                    if isinstance(raw_opcodes, list):
-                        state.perl_safe_opcodes = [str(op) for op in raw_opcodes if op]
-                    timeout_ms = configs[0].get("elaborationTimeoutMs")
-                    if isinstance(timeout_ms, (int, float)) and timeout_ms > 0:
-                        state.elaboration_timeout_s = max(
-                            ELABORATION_TIMEOUT_SECONDS_MIN,
-                            min(ELABORATION_TIMEOUT_SECONDS_MAX, timeout_ms / 1000.0),
-                        )
-                    if "elaborateInProcess" in configs[0]:
-                        new_in_proc = bool(configs[0].get("elaborateInProcess"))
-                        if new_in_proc != state.elaborate_in_process:
-                            logger.info(
-                                "elaborateInProcess change observed (was=%s now=%s); "
-                                "the LSP must be restarted for it to take effect "
-                                "(SystemRDL: Restart Language Server)",
-                                state.elaborate_in_process, new_in_proc,
-                            )
-                        state.elaborate_in_process = new_in_proc
+                cfg = await _read_workspace_config()
+                if cfg is not None:
+                    _apply_workspace_config(cfg, is_initial=False)
             except Exception:
                 logger.debug("config refresh failed", exc_info=True)
 
@@ -1473,7 +1494,7 @@ def build_server() -> LanguageServer:
         line, char = params.position.line, params.position.character
 
         # 1. Instance lookup first — gives the richest answer when it hits.
-        # T4-B H4: pass the LSP buffer-cache line reader through so
+        # pass the LSP buffer-cache line reader through so
         # _property_origin_hint avoids the synchronous disk read on the
         # event loop. Falls back to disk inside hover.py if the reader
         # comes up empty.
@@ -2082,7 +2103,7 @@ def build_server() -> LanguageServer:
             compiler_version = getattr(_systemrdl, "__version__", "unknown")
         except Exception:
             compiler_version = "unknown"
-        # T4-B H2: include_vars is part of the cache key. Same file with
+        # include_vars is part of the cache key. Same file with
         # a different $VAR substitution map produces a different include
         # graph and therefore a different elaborated tree.
         return make_key(

@@ -67,14 +67,11 @@ def make_key(
     the first 32 hex chars — 128 bits, far below collision probability
     for any plausible cache size.
 
-    T4-B H2: ``include_vars`` is part of the key. Two compiles of the
-    same file with different ``$IP_ROOT`` substitutions (or any other
-    ``systemrdl-pro.includeVars`` mapping) produce DIFFERENT include
-    graphs and DIFFERENT elaborated trees, so they MUST hash to
-    different keys. Pre-T4-B the disk cache happily served a cross-
-    workspace stale envelope when the only difference was the var
-    map. Backwards-compatible: ``None`` produces the empty-vars hash
-    suffix that matches the pre-T4-B key shape.
+    ``include_vars`` is part of the key: same file with different
+    ``$IP_ROOT`` substitutions (or any other ``includeVars`` mapping)
+    produces a different include graph, so it MUST hash distinctly.
+    ``None`` produces the empty-vars hash suffix, matching the
+    pre-include-vars key shape.
     """
     abs_str = str(pathlib.Path(abs_path).resolve()) if abs_path else ""
     inc_str = "\0".join(sorted(include_paths))
@@ -105,6 +102,10 @@ class DiskCache:
     ) -> None:
         self.base = base if base is not None else default_cache_dir()
         self.max_entries = max_entries
+        # Counter for the cheap eviction gate in ``put``. Walking the
+        # cache dir + stat'ing every entry on every single put was the
+        # workspace-preindex hot path (200 entries x 200 puts).
+        self._entries_since_evict = 0
 
     # ------------------------------------------------------------------
     # Read / write
@@ -177,7 +178,14 @@ class DiskCache:
             except OSError:
                 pass
             return
-        self.evict_lru()
+        # Cheap counter gate so we don't iterdir + stat every dir on every
+        # put. The counter undercounts when other processes write to the
+        # same cache (multi-window), but the next over-cap put corrects it
+        # via the actual eviction walk.
+        self._entries_since_evict += 1
+        if self._entries_since_evict >= max(1, self.max_entries // 4):
+            self.evict_lru()
+            self._entries_since_evict = 0
 
     def evict_lru(self, max_entries: int | None = None) -> int:
         """Delete oldest cache directories beyond ``max_entries``.
