@@ -4,6 +4,53 @@ All notable changes to **SystemRDL Pro** are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [SemVer](https://semver.org/).
 
+## [0.25.0] — 2026-05-02
+
+Server-driven release: extension binaries unchanged, ships against
+`systemrdl-lsp >= 0.17.0`. The user-visible payoff is the **T2 Lean**
+incremental-elaborate trio in the LSP backend.
+
+### Changed (in `systemrdl-lsp` 0.17.0)
+
+- **Cross-file invalidation now works.** Editing `types.rdl` (or any
+  library file) automatically re-elaborates every open consumer
+  (`stress_25k.rdl`, etc.). Previously you had to close-and-reopen the
+  consumer tab to see new reset values, type renames, or field
+  reshapes. Driven by a per-elaborate include reverse-dep map.
+- **No-op edits no longer churn the viewer.** Whitespace,
+  reformatting, comment changes, and dead-code identifier rewrites
+  produce an identical AST — the LSP now SHA-256-fingerprints the
+  elaborated tree and skips the cache version bump + the
+  `rdl/elaboratedTreeChanged` push when the fingerprint matches.
+  Memory Map stops flickering on cosmetic edits.
+- **Per-URI elaboration mutex.** Replaces the TODO(T2) marker that
+  warned about a benign race between `didOpen + didSave` for the
+  same URI. Different URIs still elaborate concurrently.
+- **`_full_pass_async` timing logs.** Behind `trace.server: messages`,
+  every elaborate now logs `compile=<s> apply=<s> ast_changed=<bool>`
+  so future investigation of cross-URI blocking has a baseline.
+
+### Out of scope (deferred)
+
+- **`ProcessPoolExecutor` for true cross-URI parallelism.** GIL
+  contention still serializes CPU-bound elaborates across different
+  files. This is the next perf PR — it requires confirming
+  pickle-viability of `RootNode` and the spine envelope, separate
+  scope.
+- **Delta-push protocol for the viewer.** TODO-1 in ROADMAP. Spine is
+  still re-fetched whole on version change.
+- **Patching `systemrdl-compiler`** for incremental elaborate. Out of
+  scope per project policy — the upstream library stays untouched.
+
+### Install
+
+```sh
+pip install --upgrade systemrdl-lsp
+```
+
+The extension auto-detects the new behavior — no settings change
+needed.
+
 ## [0.24.0] — 2026-05-02
 
 ### Added
