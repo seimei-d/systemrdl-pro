@@ -4,6 +4,28 @@ All notable changes to **SystemRDL Pro** are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [SemVer](https://semver.org/).
 
+## [0.26.3] — 2026-05-02
+
+### Fixed (in `systemrdl-lsp` 0.18.3)
+
+- **Stale-bar still missing on broken file when disk cache hit (third
+  field-reported attempt at this).** Editing a file invalid + asking
+  the viewer for the tree returned the cached-on-disk envelope (with
+  `stale=False` from the prior successful fetch) because the disk
+  cache key is content-addressed by mtime. The buffer differs from
+  disk while unsaved → mtime unchanged → same key → hit → wrong
+  stale value rendered.
+
+  Fix: the disk-cache fast path in `rdl/elaboratedTree` now overrides
+  `envelope["stale"]` from `state.stale_uris` instead of trusting the
+  value frozen at disk-write time. Symmetric to the existing
+  `version` override that's been there since T1.4.
+
+  This is the ACTUAL root cause of the "broke the file, editor shows
+  error, webview shows nothing wrong" pattern. The 0.26.1 + 0.26.2
+  fixes addressed in-memory cache invalidation but the disk cache
+  was a third source serving a non-stale envelope.
+
 ## [0.26.2] — 2026-05-02
 
 Two stale-bar correctness gaps caught in field testing of 0.26.1.

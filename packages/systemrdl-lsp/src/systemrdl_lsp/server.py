@@ -157,7 +157,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-SERVER_VERSION = "0.18.2"
+SERVER_VERSION = "0.18.3"
 
 
 def _iter_rdl_files(root: pathlib.Path, exclude_dirs: set[str]):
@@ -2076,6 +2076,17 @@ def build_server() -> LanguageServer:
                 # was effectively dead — every cold start re-serialized.
                 if isinstance(disk_envelope, dict):
                     disk_envelope["version"] = cached.version
+                    # Stale flag is per-process runtime state, NOT part
+                    # of the content-addressed disk key — a hit may
+                    # carry whatever ``stale`` value was true when the
+                    # entry was written, which is unrelated to whether
+                    # the latest parse succeeded. Override with the
+                    # current state so a "valid → fetched → broken"
+                    # flow doesn't keep serving the non-stale envelope
+                    # from disk after the in-memory invalidation.
+                    # Field-reported as "broke the file, editor shows
+                    # error, webview shows nothing wrong".
+                    disk_envelope["stale"] = uri in state.stale_uris
                     cached.serialized = disk_envelope
                     return disk_envelope
 
