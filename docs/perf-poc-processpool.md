@@ -27,20 +27,42 @@ internals.
 
 ## Findings
 
-### Surprise: `RootNode` IS picklable
+### Surprise 1: `RootNode` IS picklable
 
 Predicted "almost certainly not". Reality: `pickle.dumps(root)` succeeds
 and `pickle.loads` round-trips the tree intact. Measured:
 
-| Fixture | Elaborate | Pickle | Unpickle | Payload size |
+| Fixture | Elaborate | Pickle | Unpickle | Raw size |
 | --- | ---: | ---: | ---: | ---: |
 | `examples/sample.rdl` (3 roots) | <0.1s | <0.01s | <0.01s | 53 KB |
 | `examples/stress_25k_multi.rdl` (1 root, ~25k regs, 52 includes) | 34.5s | 2.7s | 1.9s | **174 MB** |
 
-The 174 MB payload size kills "just send the whole tree" as the contract
-for big designs — IPC bandwidth would dominate the elaborate cost on a
-saturated machine, and the parent process's memory footprint would
-double on every cross-process round-trip.
+### Surprise 2: pickle is wildly compressible — the payload problem evaporates
+
+The 174 MB raw pickle was the original concern that pushed me toward
+"JSON-only" as the alternative. Then I tried compression on a hunch.
+On the same `stress_25k_multi.rdl` fixture:
+
+| Format | Size | Encode | Decode | vs raw |
+| --- | ---: | ---: | ---: | ---: |
+| `pickle` raw (proto 5) | 174.3 MB | 2.71s | 1.96s | 1× |
+| `pickle + zlib` (level 1, fastest) | 5.4 MB | 2.60s | 2.11s | **32×** |
+| `pickle + zlib` (level 6, default) | 2.1 MB | 2.85s | 2.09s | **83×** |
+| `pickle + lz4` (default) | 4.2 MB | 2.42s | 2.00s | **41×** |
+| `pickle + zstd` (level 3) | 0.8 MB | 2.44s | 1.86s | **218×** |
+| `pickle + zstd` (level 9) | 0.7 MB | 2.56s | 2.34s | 249× |
+
+The pickle format has massive redundancy on a tree of similar nodes —
+SystemRDL fixtures typify this (50 banks × 500 regs × 30 fields, mostly
+identical metadata). General-purpose compressors crush it without
+breaking a sweat, and the encode time barely moves because compression
+is dominated by `pickle.dumps` itself.
+
+**Net consequence**: the original payload-size argument for going
+JSON-only is dead. `pickle + zlib` (in the stdlib) gives us the same
+wire size (~5 MB on 25k) as a hypothetical JSON-only contract, with
+the entire `RootNode` arriving on the parent side intact. `zstd`
+shrinks it another 7× if we accept an optional dep.
 
 ### JSON-only contract is small and total
 
@@ -81,74 +103,93 @@ The remaining 2.5× slowdown vs alone is the IPC + spawn cost; could be
 shaved further with worker pre-warm, but that's optimization on top of
 "works."
 
-## Two viable architectures
+## Architecture options after the compression finding
 
-### Option 1 — Pickle full `RootNode` from subprocess
+### Option 1 — Pickle full `RootNode` + zlib (recommended)
 
-Subprocess elaborates and pickles the `RootNode` tree back. Parent caches
-it as today. All hover / symbol / completion features keep working
-identically (they walk the live `RootNode`).
+Subprocess elaborates, pickles the `RootNode` to a `zlib`-compressed
+buffer, ships back. Parent decompresses, unpickles, caches as today.
+All feature handlers keep working identically — they walk the live
+`RootNode` tree they always have.
 
-- ✅ Zero behavioural change to feature handlers.
-- ✅ Smallest diff against the current architecture.
-- ❌ 174 MB payload across the pipe per 25k elaborate. ~5s pickle/unpickle
-  overhead added to a 34s elaborate (15% overhead).
-- ❌ Memory pressure: parent and subprocess each hold the full tree at the
-  moment of return.
-- ❌ Doesn't scale gracefully — large SoC tops would blow up the wire size.
+- ✅ Zero behavioural change to `hover.py`, `outline.py`, `definition.py`,
+  `completion.py`, `code_actions.py`, `links.py`.
+- ✅ `zlib` is in the stdlib — no new runtime dependency.
+- ✅ Wire size on `stress_25k_multi`: ~5 MB compressed (was 174 MB raw).
+- ✅ Encode/decode time within ~5% of raw pickle — compression is
+  near-free vs the underlying `pickle.dumps` cost.
+- ✅ Subprocess crashes don't poison parent state (parent only ever sees
+  the pickled bytes; bad subprocess → re-spawn, retry).
+- ❌ ~5s pickle+compress on 25k still adds ~15% to a 34s elaborate. For
+  smaller designs (where most users live) this is microseconds.
+- ❌ Per-elaborate memory spike: subprocess holds tree, then pickle buffer,
+  then compressed buffer; parent decompresses then unpickles. Briefly
+  3-4× tree size in RAM during the handoff.
 
-### Option 2 — JSON-only contract, hover/symbol read from envelope
+### Option 1+ — same as Option 1 but `zstd` instead of `zlib`
 
-Subprocess returns only the JSON payload. Parent stores the envelope, no
-`RootNode` lives in the parent process at all. Hover / outline / symbol
-features get rewritten to read the envelope dict instead of calling
-`node.get_property("desc")` / `node.children(...)` etc.
+Optional runtime dependency. Wire size drops another 7× (5 MB → 0.8 MB
+on 25k). Same encode/decode time. Worth it if a user reports IPC
+showing up in profiles, but `zlib` already crushes the original concern
+so this is a "nice to have" tier.
 
-- ✅ Small payload (low MB even for 25k).
-- ✅ Subprocess can be killed/replaced at any time without losing parent
-  state — natural cancellation story for "user kept typing while
-  elaborate was running."
-- ✅ Cleaner separation: parent never touches `systemrdl-compiler`.
-- ❌ Touches every feature module that currently reads `cached.roots`:
-  `hover.py`, `outline.py`, `definition.py`, `completion.py`,
-  `code_actions.py`, `links.py`. Each needs an envelope-walking
-  equivalent.
-- ❌ Risk that the envelope misses a property some hover path needs;
-  surfacing it adds a serialize step.
+### Option 2 — JSON-only contract — DROPPED
+
+Originally proposed because the JSON spine (~5 MB on 25k) seemed much
+smaller than the assumed "raw pickle" cost of 174 MB. With compression,
+pickle is the same size (~5 MB) and **doesn't require rewriting every
+feature module to read envelope dicts instead of calling
+`node.get_property(...)`**. The complexity-to-payoff ratio inverted —
+JSON-only is dominated by Option 1+zlib on every axis.
+
+If Option 1 ever falls apart in the field (e.g. memory pressure during
+the pickle handoff bites users with smaller machines), JSON-only is
+still on the shelf — the PoC's `_serialize_in_subprocess` function
+shows the contract works.
 
 ### Recommendation
 
-**Option 1 first, Option 2 if Option 1 doesn't hold up.** Option 1 is one
-PR (~3-5 sessions) instead of a multi-PR refactor across every feature
-module. The 15% IPC overhead on 25k is a real cost but it buys the
-cross-URI win we wanted; smaller designs (where most users live) pay
-microseconds.
-
-If Option 1 ships and a real user complains about IPC time, Option 2 is
-the next move and the PoC contract from this report (`_serialize_in_subprocess`)
-already gives us the envelope-only interface to evolve into.
+**Ship Option 1 with `zlib` (level 1).** Single PR, no new runtime deps,
+no feature rewrites, ~5 MB IPC on the worst fixture we have. Add a
+config knob (`systemrdl-pro.elaborateInProcess`) defaulting to `false`
+(use subprocess) but lettable to `true` to fall back if a user hits a
+pickle-failure regression after a future `systemrdl-compiler` upgrade.
 
 ## What the next PR should do (Option 1 sketch)
 
 1. Replace `loop.run_in_executor(None, _compile_text, ...)` in
-   `_full_pass_async` with a `ProcessPoolExecutor` shared via `ServerState`.
-   Pool size = `min(2, cpu_count)` to keep RAM bounded.
-2. Submit `_compile_text(uri, text, ...)` to the pool; result is a
-   pickled tuple returned across the boundary.
-3. Wire cancellation: when a new elaborate for the same URI arrives, kill
-   the in-flight subprocess via `Future.cancel()` (if pending) or
+   `_full_pass_async` with a `ProcessPoolExecutor` shared via
+   `ServerState`. Pool size = `min(2, cpu_count)` to keep RAM bounded.
+   `ProcessPoolExecutor` already pickles arguments + return value, so
+   nothing extra is needed — but for the 25k case we want `zlib` on
+   top of that. Two ways:
+   a. Wrap the worker function: `def _worker_compile(...)` returns
+      `zlib.compress(pickle.dumps(_compile_text(...)))`; parent calls
+      `pickle.loads(zlib.decompress(...))`. Avoids `ProcessPoolExecutor`'s
+      built-in pickle entirely.
+   b. Custom `multiprocessing.connection` reducer registered via
+      `dispatch_table` to compress everything. Cleaner but more code.
+   Recommend (a) — single function, easy to reason about.
+2. Wire cancellation: when a new elaborate for the same URI arrives,
+   kill the in-flight subprocess via `Future.cancel()` (if pending) or
    `process.terminate()` (if running). Replace the pending tmp file
-   cleanup callback with one that handles `CancelledError` from the new
-   process-level cancel.
-4. Pre-warm one worker on `INITIALIZED` so the first elaborate doesn't
+   cleanup callback with one that handles `CancelledError` from the
+   new process-level cancel.
+3. Pre-warm one worker on `INITIALIZED` so the first elaborate doesn't
    pay spawn cost.
-5. Keep the per-URI lock in the *parent* — subprocess is just the work
-   target, the lock is still about ordering parent-side state mutations
-   (cache.put, notification, cascade trigger).
-6. Tests: add a `test_perf_t3.py` with the timing-style probes from this
-   PoC, plus a unit test that the subprocess call returns a
-   `RootNode`-typed value (proves pickle still works after future
-   `systemrdl-compiler` upgrades).
+4. Keep the per-URI lock in the *parent* — subprocess is just the
+   work target, the lock is still about ordering parent-side state
+   mutations (`cache.put`, notification, cascade trigger).
+5. Pickle-version compatibility: include `pickle.HIGHEST_PROTOCOL` and
+   the `systemrdl_compiler` version in a header on every IPC payload.
+   On version mismatch, parent falls back to in-process elaborate
+   (the `elaborateInProcess: true` config knob).
+6. Tests: add `test_perf_t3.py` with timing-style probes from this PoC,
+   a unit test that the subprocess call returns a `RootNode`-typed
+   value (pins pickle compatibility against `systemrdl-compiler`
+   upgrades), and a memory-pressure spike test that runs 100
+   elaborates in the same pool and asserts RSS doesn't grow without
+   bound.
 
 ## Estimated complexity
 
@@ -163,6 +204,33 @@ already gives us the envelope-only interface to evolve into.
 Worst-case fallback: ship without aggressive cancellation, accept that a
 user typing fast will have elaborate runs queue up until they pause —
 strictly better than today since they're at least running in parallel.
+
+## Security note on pickle
+
+The Python docs warn that pickle is unsafe for untrusted data because a
+crafted pickle stream can execute arbitrary code at deserialize time.
+**That warning does not apply to this design.** Reasoning:
+
+- The pickle stream flows between an LSP parent process we wrote and a
+  subprocess we spawned, both running our own code under the same uid
+  on the same machine.
+- The transport is an OS pipe / `multiprocessing.Connection` —
+  attacker with write access to that pipe already has process-level
+  access to the LSP, at which point pickle is irrelevant.
+- We do not read pickle from disk; the disk cache (`cache.py`) stores
+  JSON envelopes. We do not accept pickle over the network.
+- `concurrent.futures.ProcessPoolExecutor` uses pickle internally to
+  ship arguments and return values across the pipe regardless of what
+  data you give it. Avoiding pickle would mean abandoning the standard
+  multiprocessing primitives.
+
+If a future requirement does introduce an untrusted source — e.g. a
+shared-cache feature that serializes elaborated trees to a network
+share — switch that path to a safer format (the JSON contract from
+this PoC, or a schema-driven binary like Cap'n Proto) and gate the
+unpickler with `pickle.Unpickler.find_class` overrides as a
+defense-in-depth measure. None of that applies to local same-uid
+subprocess IPC.
 
 ## What this PoC does NOT cover
 

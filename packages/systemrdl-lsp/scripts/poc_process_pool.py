@@ -1,16 +1,16 @@
 """ProcessPool PoC for cross-URI parallel elaboration.
 
-Three steps, run in order:
+Four steps, run in order:
 
   1. ``probe_pickle_rootnode()`` — does ``RootNode`` survive pickling?
-     Almost certainly NO. Capture the exact failure mode so the contract
-     decision in step 2 is grounded.
-  2. ``probe_json_contract()`` — can a subprocess return only the JSON
-     pieces the LSP needs (messages, spine envelope, consumed files)?
-  3. ``measure_parallelism()`` — does spawning subprocesses actually let
+     (Spoiler: yes. 53 KB on sample, 174 MB on stress_25k_multi.)
+  2. ``probe_compression()`` — can we shrink the pickle so the wire
+     size isn't the long pole? (Spoiler: yes, zlib gives ~32×, zstd
+     ~218× on stress_25k_multi.)
+  3. ``probe_json_contract()`` — fallback if pickle ever stops working
+     after a future systemrdl-compiler upgrade.
+  4. ``measure_parallelism()`` — does spawning subprocesses actually let
      a small file's elaborate finish while a 25k file is still running?
-     Three scenarios timed: small alone, small+big in threads (current
-     GIL behaviour), small+big in processes.
 
 Run from the repo root:
 
@@ -26,6 +26,7 @@ import pickle
 import sys
 import time
 import traceback
+import zlib
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 
 
@@ -79,7 +80,59 @@ def probe_pickle_rootnode() -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Step 2 — JSON-only contract
+# Step 2 — compression probe (does pickle shrink enough to ignore the wire?)
+# ---------------------------------------------------------------------------
+
+
+BIG_FIXTURE_FOR_COMPRESS = pathlib.Path("examples/stress_25k_multi.rdl")
+
+
+def probe_compression() -> dict:
+    """Pickle the largest available fixture and measure how much general-
+    purpose compression shrinks it. Drives the architecture decision:
+    if compressed pickle is in the same ballpark as a hand-crafted JSON
+    spine, we keep ``RootNode`` and skip the JSON-rewrite of every
+    feature module.
+    """
+    _section("STEP 2 — pickle compression bench")
+
+    big = REPO_ROOT / BIG_FIXTURE_FOR_COMPRESS
+    if not big.exists():
+        # Fall back to the small fixture so the script still runs in CI.
+        big = EXAMPLES / "sample.rdl"
+        print(f"big fixture missing, using {big.name}")
+
+    from systemrdl_lsp.compile import _compile_text
+
+    print(f"elaborating {big.name}...")
+    _msgs, roots, tmp_path, _ = _compile_text(big.as_uri(), big.read_text())
+    if not roots:
+        return {"ok": False, "reason": "no roots"}
+
+    raw = pickle.dumps(roots[0], protocol=5)
+    raw_mb = len(raw) / 1024 / 1024
+    print(f"raw pickle:   {raw_mb:>8.1f} MB")
+
+    results = {"raw_mb": raw_mb}
+
+    for level in (1, 6):
+        t0 = time.monotonic()
+        compressed = zlib.compress(raw, level)
+        enc = time.monotonic() - t0
+        t0 = time.monotonic()
+        zlib.decompress(compressed)
+        dec = time.monotonic() - t0
+        size_mb = len(compressed) / 1024 / 1024
+        ratio = raw_mb / size_mb if size_mb else float("inf")
+        print(f"zlib L={level}: {size_mb:>8.2f} MB  enc={enc:.2f}s  dec={dec:.2f}s  ({ratio:.0f}x smaller)")
+        results[f"zlib_L{level}"] = {"size_mb": size_mb, "enc": enc, "dec": dec}
+
+    tmp_path.unlink(missing_ok=True)
+    return {"ok": True, **results}
+
+
+# ---------------------------------------------------------------------------
+# Step 3 — JSON-only contract (fallback investigation)
 # ---------------------------------------------------------------------------
 
 
@@ -137,8 +190,10 @@ def _serialize_in_subprocess(uri: str, text: str) -> dict:
 
 def probe_json_contract() -> dict:
     """Run elaborate in a subprocess via ProcessPoolExecutor; verify
-    the JSON-only payload arrives intact."""
-    _section("STEP 2 — JSON-only subprocess contract")
+    the JSON-only payload arrives intact. Kept as the fallback contract
+    if pickle ever stops working after a future systemrdl-compiler
+    upgrade — the recommended path is pickle+zlib."""
+    _section("STEP 3 — JSON-only subprocess contract (fallback)")
 
     rdl_path = EXAMPLES / "sample.rdl"
     text = rdl_path.read_text()
@@ -185,6 +240,10 @@ def _elaborate_only(uri: str, text: str) -> tuple[float, int]:
     return elapsed, len(roots)
 
 
+def _section_header_for_step4() -> None:
+    pass
+
+
 def measure_parallelism() -> dict:
     """Three scenarios, each timed:
 
@@ -196,7 +255,7 @@ def measure_parallelism() -> dict:
     its scenario-A time, NOT close to the big file's elapsed. Scenario
     B will show the small file effectively waiting for the big one.
     """
-    _section("STEP 3 — small+big parallelism (threads vs processes)")
+    _section("STEP 4 — small+big parallelism (threads vs processes)")
 
     if not SMALL_FILE.exists() or not BIG_FILE.exists():
         print(f"missing fixture(s): small={SMALL_FILE.exists()} big={BIG_FILE.exists()}")
@@ -271,9 +330,10 @@ def measure_parallelism() -> dict:
 def main() -> None:
     mp.set_start_method("spawn", force=True)
     results = {}
-    results["step1"] = probe_pickle_rootnode()
-    results["step2"] = probe_json_contract()
-    results["step3"] = measure_parallelism()
+    results["step1_pickle"] = probe_pickle_rootnode()
+    results["step2_compress"] = probe_compression()
+    results["step3_json"] = probe_json_contract()
+    results["step4_parallel"] = measure_parallelism()
 
     _section("SUMMARY")
     print(json.dumps(results, indent=2, default=str))
