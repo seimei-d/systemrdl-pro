@@ -423,12 +423,16 @@ def test_canonicalize_distinguishes_identifier_changes():
     assert _canonicalize_for_skip(a) != _canonicalize_for_skip(b)
 
 
-def test_full_pass_skips_elaborate_on_whitespace_edit(server_state, tmp_path):
-    """Type a space → no elaborate, no version bump, no notifications.
+def test_whitespace_edit_does_not_bump_version(server_state, tmp_path):
+    """Whitespace-only edit re-elaborates (so src_refs track the new
+    line positions) but the AST fingerprint short-circuit keeps the
+    cache version untouched — viewer doesn't get pushed an
+    rdl/elaboratedTreeChanged it would have to ignore anyway.
 
-    Monkey-patches ``_compile_text`` with a counting wrapper so we can
-    assert it ran exactly once (the initial elaborate) even after a
-    whitespace-only second pass.
+    Earlier we also short-circuited the elaborate itself (T2-D), but
+    that left codeLens / inlay / hover overlays glued to pre-edit
+    line numbers because cached.roots kept stale src_refs. Now we let
+    the elaborate run and only the version bump is suppressed.
     """
     s, state, full_pass = server_state
     rdl_path = tmp_path / "a.rdl"
@@ -437,34 +441,16 @@ def test_full_pass_skips_elaborate_on_whitespace_edit(server_state, tmp_path):
 
     _run(full_pass(uri, SIMPLE_RDL))
     v1 = state.cache.get(uri).version
+    roots_v1 = state.cache.get(uri).roots
 
-    # Wrap _compile_text via the loaded module so the closure inside
-    # build_server() (which captured the original symbol) sees the
-    # counter. Easiest path: monkey-patch the module attribute.
-    from systemrdl_lsp import compile as compile_mod
-    from systemrdl_lsp import server as server_mod
+    whitespace_edit = SIMPLE_RDL + " \n"
+    _run(full_pass(uri, whitespace_edit))
 
-    calls = {"n": 0}
-    real = compile_mod._compile_text
-
-    def counting(*args, **kwargs):
-        calls["n"] += 1
-        return real(*args, **kwargs)
-
-    compile_mod._compile_text = counting
-    server_mod._compile_text = counting
-    try:
-        # Add trailing space — semantic no-op, but exact text differs.
-        whitespace_edit = SIMPLE_RDL + " \n"
-        _run(full_pass(uri, whitespace_edit))
-    finally:
-        compile_mod._compile_text = real
-        server_mod._compile_text = real
-
-    v2 = state.cache.get(uri).version
-    assert v2 == v1, "whitespace-only edit must not bump version"
-    assert calls["n"] == 0, (
-        f"whitespace-only edit must NOT call _compile_text; got {calls['n']}"
+    cached = state.cache.get(uri)
+    assert cached.version == v1, "whitespace-only edit must not bump version"
+    assert cached.roots is not roots_v1, (
+        "fingerprint short-circuit must swap in fresh roots so src_refs "
+        "track the new line positions (codeLens / inlay / hover regression guard)"
     )
 
 

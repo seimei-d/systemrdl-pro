@@ -423,23 +423,25 @@ def build_server() -> LanguageServer:
                 if bumped is not None:
                     version_after = bumped
                 _update_include_graph(uri, consumed_files)
-                # Force VSCode to re-pull anything tied to source positions
-                # — the AST is the same shape but lines moved. pygls'
-                # refresh helpers all take a single ``None`` params arg
-                # (LSP-spec shape) and return a coroutine.
+                logger.warning(
+                    "[REFRESH] fingerprint-match: swapped roots, firing refreshes for %s",
+                    uri,
+                )
                 for refresh in (
                     server.workspace_code_lens_refresh_async,
                     server.workspace_inlay_hint_refresh_async,
                     server.workspace_semantic_tokens_refresh_async,
                     server.workspace_diagnostic_refresh_async,
                 ):
-                    try:
-                        asyncio.create_task(refresh(None))
-                    except Exception:
-                        logger.warning(
-                            "workspace refresh %s failed",
-                            refresh.__name__, exc_info=True,
-                        )
+                    async def _run(fn=refresh):
+                        try:
+                            await asyncio.wait_for(fn(None), timeout=5.0)
+                            logger.debug("[REFRESH] %s ack'd", fn.__name__)
+                        except asyncio.TimeoutError:
+                            logger.warning("[REFRESH] %s timed out", fn.__name__)
+                        except Exception as exc:
+                            logger.warning("[REFRESH] %s failed: %s", fn.__name__, exc)
+                    asyncio.create_task(_run())
             else:
                 # Cache takes ownership of the temp file (it backs lazy
                 # src_ref reads for hover/documentSymbol). Old entry's
@@ -523,19 +525,20 @@ def build_server() -> LanguageServer:
                 )
             except Exception:
                 logger.debug("could not send elaboratedTreeChanged notification", exc_info=True)
-            # Refresh server→client requests (LSP 3.16/3.17) for overlays
-            # tied to source-line positions. Fire-and-forget. Each helper
-            # takes a single ``None`` params arg per pygls' signature.
+            logger.debug("[REFRESH] real-change path: firing refreshes for %s", uri)
             for refresh in (
                 server.workspace_code_lens_refresh_async,
                 server.workspace_inlay_hint_refresh_async,
                 server.workspace_semantic_tokens_refresh_async,
                 server.workspace_diagnostic_refresh_async,
             ):
-                try:
-                    asyncio.create_task(refresh(None))
-                except Exception:
-                    logger.warning("workspace refresh %s failed", refresh.__name__, exc_info=True)
+                async def _run(fn=refresh):
+                    try:
+                        await fn(None)
+                        logger.debug("[REFRESH] %s ack'd", fn.__name__)
+                    except Exception as exc:
+                        logger.debug("[REFRESH] %s failed: %s", fn.__name__, exc)
+                asyncio.create_task(_run())
 
         return ast_changed
 
@@ -666,28 +669,15 @@ def build_server() -> LanguageServer:
             ):
                 return
 
-            # Short-circuit 2 (T2-D): if the buffer differs from the last
-            # elaboration only in whitespace/comments, the elaborate would
-            # produce identical AST. Skip the entire pipeline — no
-            # elaboration_started notification, so the viewer banner never
-            # flashes on a space character typed in stress_25k_multi.rdl.
-            # Refresh ``prior.text`` so the next exact-equality check hits.
-            if (
-                prior is not None
-                and prior.text_canonical is not None
-                and uri not in state.stale_uris
-                and not forced
-            ):
-                buffer_canon = _canonicalize_for_skip(buffer_text)
-                if buffer_canon == prior.text_canonical:
-                    prior.text = buffer_text
-                    prior.elaborated_at = time.time()
-                    logger.debug(
-                        "_full_pass_async %s: canonical-equal short-circuit "
-                        "(elaborate skipped, no banner)",
-                        uri,
-                    )
-                    return
+            # NOTE: previously we had a T2-D canonical-equal short-circuit
+            # here that skipped elaborate when the buffer differed only in
+            # whitespace/comments. It saved cycles on rapid typing but had
+            # a fatal side-effect: cached.roots kept its OLD src_refs, so
+            # codeLens / inlay / hover overlays stuck to pre-format line
+            # numbers. The fingerprint short-circuit in _apply_compile_result
+            # (T2-B) covers the no-op case at the correct level — it skips
+            # the cache.put + version bump + viewer push, but DOES swap in
+            # fresh roots whose src_refs reflect the current buffer.
 
             _check_perl_pre_flight(buffer_text)
 

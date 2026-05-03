@@ -187,33 +187,44 @@ def register(
 
     @server.feature("textDocument/inlayHint")
     async def _on_inlay_hint(_ls: LanguageServer, params: Any) -> list[InlayHint]:
-        cached = state.cache.get(params.text_document.uri)
+        uri = params.text_document.uri
+        cached = state.cache.get(uri)
         if cached is None or not cached.roots:
             return []
         try:
-            target_path = _uri_to_path(params.text_document.uri)
+            target_path = _uri_to_path(uri)
         except ValueError:
             return []
         path = cached.temp_path or target_path
-        return await asyncio.to_thread(
+        hints = await asyncio.to_thread(
             _inlay_hints_for_addressables, cached.roots, path, cached.text,
         )
+        logger.debug("[INLAY] %s — returning %d hints", uri, len(hints))
+        return hints
 
     @server.feature(
         "textDocument/codeLens",
         CodeLensOptions(resolve_provider=True),
     )
     async def _on_code_lens(_ls: LanguageServer, params: Any) -> list[CodeLens]:
-        cached = state.cache.get(params.text_document.uri)
+        uri = params.text_document.uri
+        cached = state.cache.get(uri)
         if cached is None or not cached.roots:
+            logger.debug("[LENS] %s — no cache, returning []", uri)
             return []
-        path = cached.temp_path or _uri_to_path(params.text_document.uri)
+        path = cached.temp_path or _uri_to_path(uri)
         lenses = await asyncio.to_thread(_code_lenses_for_addrmaps, cached.roots, path)
-        # Round-trip the URI through `data` so resolve doesn't need a second
-        # workspace probe to find which document the lens belongs to.
         for lens in lenses:
             if isinstance(lens.data, dict):
-                lens.data["uri"] = params.text_document.uri
+                lens.data["uri"] = uri
+        if lenses:
+            sample = lenses[0]
+            logger.warning(
+                "[LENS] %s — returning %d lenses, first at line %d",
+                uri, len(lenses), sample.range.start.line,
+            )
+        else:
+            logger.debug("[LENS] %s — returning 0 lenses", uri)
         return lenses
 
     @server.feature("codeLens/resolve")
@@ -358,7 +369,7 @@ def register(
                 path, len(items), [i.label for i in items[:10]],
             )
             if not items:
-                logger.warning("[COMPL] → returning null (no members)")
+                logger.debug("[COMPL] → returning null (no members)")
                 return None
             replace = _replace_range_for_partial()
             logger.warning(
@@ -377,7 +388,7 @@ def register(
                 path, len(items), [i.label for i in items[:10]],
             )
             if not items:
-                logger.warning("[COMPL] → returning null (no properties)")
+                logger.debug("[COMPL] → returning null (no properties)")
                 return None
             replace = _replace_range_for_partial()
             logger.warning(
@@ -407,7 +418,7 @@ def register(
         # outside any property-RHS context (e.g. `addrmap top {<space>`),
         # where popping a 130-item list would be noise.
         if trig in ("=", " "):
-            logger.warning("[COMPL] %r trigger in general ctx → null (suppressed)", trig)
+            logger.debug("[COMPL] %r trigger in general ctx → null (suppressed)", trig)
             return None
         # `general` ctx walks the elaborated tree to harvest type names,
         # user properties, and instance names. Off-load — VSCode fires

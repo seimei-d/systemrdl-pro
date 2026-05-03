@@ -94,4 +94,5 @@ addrmap uart {
         field { sw = w; hw = r;
         } tx_data[7:0] = 0;
     } TX @ 0x8;
+
 };
