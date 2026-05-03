@@ -278,14 +278,22 @@ def _hover_for_word(word: str, roots: list[RootNode]) -> str | None:
     return None
 
 
-def _src_link(node: Any) -> str:
-    """Return ``[name](uri#L<line>)`` for the node's definition, or ''."""
+def _src_link(node: Any, path_translate: dict[pathlib.Path, pathlib.Path] | None = None) -> str:
+    """``[fname:N](file://...#L<N>)`` for the node's definition, or ''.
+
+    ``path_translate`` maps the compiler's tmp file (the elaborator works
+    on a content-addressed copy) back to the user's real workspace file.
+    Without it the link points at ``.systemrdl-lsp-XXXXXX.rdl`` which is
+    not openable.
+    """
     inst = getattr(node, "inst", None)
     src = getattr(inst, "inst_src_ref", None) or getattr(inst, "def_src_ref", None) if inst else None
     if src is None:
         return ""
     try:
         path = pathlib.Path(src.filename).resolve()
+        if path_translate:
+            path = path_translate.get(path, path)
         line = int(getattr(src, "coord", None).line) if getattr(src, "coord", None) else 1
     except Exception:
         return ""
@@ -293,13 +301,17 @@ def _src_link(node: Any) -> str:
     return f" · [{fname}:{line}]({path.as_uri()}#L{line})"
 
 
-def _hover_text_for_node(node: Any, line_reader: Any = None) -> str | None:
+def _hover_text_for_node(
+    node: Any,
+    line_reader: Any = None,
+    path_translate: dict[pathlib.Path, pathlib.Path] | None = None,
+) -> str | None:
     from systemrdl.node import AddressableNode, FieldNode, RegNode
 
     lines: list[str] = []
     name = getattr(node, "inst_name", None) or "(anonymous)"
     type_name = type(node).__name__.replace("Node", "").lower()
-    src_link = _src_link(node)
+    src_link = _src_link(node, path_translate)
 
     if isinstance(node, FieldNode):
         lsb, msb = node.lsb, node.msb

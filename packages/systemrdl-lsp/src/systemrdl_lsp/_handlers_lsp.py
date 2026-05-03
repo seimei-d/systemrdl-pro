@@ -135,7 +135,8 @@ def register(
     async def _on_hover(_ls: LanguageServer, params: Any) -> Any | None:
         from lsprotocol.types import Hover, MarkupContent, MarkupKind
 
-        cached = state.cache.get(params.text_document.uri)
+        uri = params.text_document.uri
+        cached = state.cache.get(uri)
         if cached is None or not cached.roots:
             return None
 
@@ -143,14 +144,21 @@ def register(
         roots = cached.roots
         text = cached.text
 
-        # Tree walk + _hover_text_for_node (which may sync-read disk via the
-        # buffer-cache line reader) + word-based catalogue scan all happen
-        # off the event loop. VSCode fires hover on every cursor move; on a
-        # 25k-reg design the walk alone was holding the loop long enough to
-        # delay every other in-flight LSP request.
+        # Map the compiler's content-addressed tmp file back to the user's
+        # real workspace path so source links in hover are openable.
+        translate: dict[pathlib.Path, pathlib.Path] | None = None
+        if cached.temp_path is not None:
+            try:
+                translate = {cached.temp_path: _uri_to_path(uri)}
+            except ValueError:
+                translate = None
+
         def compute() -> str | None:
             node = _node_at_position(roots, line, char)
-            md = _hover_text_for_node(node, file_line_reader) if node is not None else None
+            md = (
+                _hover_text_for_node(node, file_line_reader, translate)
+                if node is not None else None
+            )
             if md is None:
                 word = _word_at_position(text, line, char)
                 if word:
@@ -975,10 +983,12 @@ def register(
 
     @server.feature("textDocument/willSaveWaitUntil")
     def _on_will_save_wait_until(_ls: LanguageServer, params: Any) -> list[Any]:
-        """Format-on-save: returns the same edits as ``textDocument/formatting``
-        so VSCode applies them in the save round-trip when the user has
-        ``editor.formatOnSave: true``.
+        """Format-on-save — opt-in via ``systemrdl-pro.formatOnSave`` (default
+        off). When enabled, returns the same edits as
+        ``textDocument/formatting`` so VSCode applies them on save.
         """
+        if not getattr(state, "format_on_save", False):
+            return []
         uri = params.text_document.uri
         text = read_buffer(uri)
         if text is None:

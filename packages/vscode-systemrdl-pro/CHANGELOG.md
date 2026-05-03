@@ -4,6 +4,91 @@ All notable changes to **SystemRDL Pro** are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [SemVer](https://semver.org/).
 
+## [0.29.0] — 2026-05-03
+
+Bumps bundled language server to **systemrdl-lsp 0.21.0**.
+
+### Added — completion
+
+- Member access (`WIDE_REG.`) suggests reg fields; field-on-`.` suggests
+  built-in references (`anded` / `ored` / `xored` / `intr` / `halt`).
+- Property access (`inst->`) shows only properties that are
+  **`dyn_assign_allowed`** for the component class — driven by the
+  compiler's authoritative `property_rules` registry so it auto-tracks
+  upstream changes.
+- RHS value completion (`prop = `) lists exact legal literals — boolean
+  `true/false`, AccessType, OnReadType, OnWriteType, PrecedenceType,
+  AddressingType, InterruptType — derived from `valid_types` in the
+  compiler. `ro` / `wo` aliases added explicitly because the AccessType
+  enum uses `r` / `w`.
+- Snippet bodies for `addrmap`, `regfile`, `reg`, `field`, `enum`, `mem`,
+  `signal`, `property` — accept the keyword and tab through `$1` / `$2`
+  placeholders.
+- Instance suggestions deduped by short name (count + path list in the
+  documentation popup) and scoped to the cursor's enclosing addrmap /
+  regfile when detectable from the buffer.
+- LSP 3.17 `CompletionList.itemDefaults.editRange` shared across items.
+  Falls back to per-item `text_edit` when the client lacks the cap.
+
+### Added — formatter
+
+- Re-indents lines by running `{` / `}` depth (over- / under-indented
+  closing braces snap back into place).
+- Splits flat one-line `field { sw=rw; hw=r; reset=0; } NAME[…];` blocks
+  into one attribute per line.
+- Honours `// fmt: off` / `// fmt: on` markers (alias `// systemrdl-fmt:`)
+  to skip a region — same convention as black / clang-format.
+- New `systemrdl-pro.formatOnSave` setting (default `false`) routes the
+  formatter through `textDocument/willSaveWaitUntil`.
+
+### Added — capabilities
+
+- Hover popup carries a `· filename:N` markdown link (clickable goto-def)
+  that translates the compiler's tmp file back to the user's workspace path.
+- `textDocument/diagnostic` (LSP 3.17 pull-model) — push via
+  `publishDiagnostics` stays primary; pull serves a per-URI cached snapshot.
+- `textDocument/semanticTokens/range` (viewport-only re-tokenize) and
+  `textDocument/semanticTokens/full/delta` (single-edit diff against the
+  previous `result_id`).
+- `codeLens/resolve` — initial response is cheap shells; the addrmap walk
+  for `📊 N regs · 0xS..0xE` runs only for lenses VSCode actually paints.
+- `workspace/codeLens/refresh` notification on every successful elaborate
+  so the lens overlay tracks line shifts after format / edit.
+
+### Added — viewer
+
+- Detail panel renders a `Parameters` table for parametrized instances
+  (`parametrized_reg #(.WIDTH(16)) PR16` → `WIDTH = 16 (0x10)`).
+- New schema type `ParameterBinding` carried end-to-end through spine /
+  expand_node serialize.
+
+### Added — lifecycle / reliability
+
+- Formal LSP `shutdown` handler drains pending debounce tasks (with 2 s
+  cap), then `pool.shutdown(wait=True, cancel_futures=True)` so subprocess
+  workers exit cleanly on window close.
+- `ElaborationCache` backed by `OrderedDict` with LRU eviction (default
+  50 entries) — long multi-project sessions stop creeping into memory.
+- Cancellation cascade: in-flight ProcessPool futures are tracked per URI
+  and `.cancel()`'d on rapid `didChange` so queued slots free up
+  immediately. Already-running workers can't be killed safely in Python's
+  pool model, but the asyncio awaiter is dropped on parent cancel.
+
+### Refactored
+
+- `server.py` 2480 → 1388 lines (-44%). Extracted `_state.py`,
+  `_text_utils.py`, `_fingerprint.py`, `_handlers_rdl.py`,
+  `_handlers_lsp.py`.
+- `_publish_diagnostics` mirrors to `state.last_diagnostics` so the
+  pull-model handler answers cheaply.
+
+### Fixed
+
+- `examples/stress_25k_multi/bank_49.rdl` was missing the trailing `;`
+  after the regfile's closing brace — broke the demo file's parse.
+- Hover source link previously pointed at the LSP's content-addressed
+  tmp file (`.systemrdl-lsp-XXXXXX.rdl`); now translated to the real URI.
+
 ## [0.28.5] — 2026-05-02
 
 Bumps bundled language server to **systemrdl-lsp 0.20.4**.

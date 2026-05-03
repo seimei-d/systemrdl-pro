@@ -529,6 +529,19 @@ def build_server() -> LanguageServer:
                 )
             except Exception:
                 logger.debug("could not send elaboratedTreeChanged notification", exc_info=True)
+            # Refresh server→client requests (LSP 3.16/3.17) for everything
+            # that ties UI overlays to source-line positions. Fire-and-forget;
+            # VSCode re-asks with the fresh src_refs.
+            for refresh in (
+                server.workspace_code_lens_refresh_async,
+                server.workspace_inlay_hint_refresh_async,
+                server.workspace_semantic_tokens_refresh_async,
+                server.workspace_diagnostic_refresh_async,
+            ):
+                try:
+                    asyncio.create_task(refresh())
+                except Exception:
+                    logger.debug("workspace refresh %s failed", refresh.__name__, exc_info=True)
 
         return ast_changed
 
@@ -1192,6 +1205,8 @@ def build_server() -> LanguageServer:
         raw_opcodes = cfg.get("perlSafeOpcodes") or []
         if isinstance(raw_opcodes, list):
             state.perl_safe_opcodes = [str(op) for op in raw_opcodes if op]
+        if "formatOnSave" in cfg:
+            state.format_on_save = bool(cfg["formatOnSave"])
         if is_initial:
             preindex_cfg = cfg.get("preindex") or {}
             if isinstance(preindex_cfg, dict):

@@ -29,18 +29,15 @@ class ServerState:
     cache: ElaborationCache = dataclasses.field(default_factory=ElaborationCache)
     pending: dict[str, asyncio.Task] = dataclasses.field(default_factory=dict)
     include_paths: list[str] = dataclasses.field(default_factory=list)
-    # T2-A: forward and reverse maps over the include graph, populated from
-    # the set of source files the compiler actually opened on each successful
-    # elaborate (see ``compile._harvest_consumed_files``). Used to proactively
-    # re-elaborate any open consumer when a library file changes — the user
-    # no longer has to close-and-reopen ``stress_25k.rdl`` after editing
-    # ``types.rdl``. Both maps key on URIs.
+    # Forward + reverse include-graph maps. On every successful elaborate
+    # ``compile._harvest_consumed_files`` records which sources the compiler
+    # opened, so editing a library file proactively re-elaborates open
+    # consumers. Both maps key on URI.
     include_graph: dict[str, set[str]] = dataclasses.field(default_factory=dict)
     includee_to_includers: dict[str, set[str]] = dataclasses.field(default_factory=dict)
-    # T2-C: per-URI elaboration mutex. Same-URI didOpen+didSave races
-    # serialize through this lock so the second call sees the first call's
-    # cache.put before short-circuiting on buffer-equality. Different URIs
-    # still elaborate concurrently (subject to GIL contention).
+    # Per-URI elaboration mutex. Serializes same-URI didOpen+didSave races
+    # so the second call sees the first call's cache.put before its
+    # buffer-equality short-circuit. Different URIs run concurrently.
     uri_elab_locks: dict[str, asyncio.Lock] = dataclasses.field(default_factory=dict)
     # In-flight ProcessPool futures per URI — when a rapid edit cancels the
     # parent asyncio task we also try to ``.cancel()`` the pool future, which
@@ -52,6 +49,10 @@ class ServerState:
     # (``textDocument/diagnostic``). Push (``publishDiagnostics``) stays
     # the primary delivery; this cache makes ``pull`` cheap.
     last_diagnostics: dict[str, list[Any]] = dataclasses.field(default_factory=dict)
+    # Opt-in: apply textDocument/formatting edits during save
+    # (``willSaveWaitUntil``). Default off so VSCode's save round-trip
+    # stays minimal until the user explicitly turns it on.
+    format_on_save: bool = False
     # Test-only override that stands in for the pygls workspace. When
     # non-None, ``_is_open(uri)`` returns ``uri in self`` and
     # ``_read_buffer(uri)`` returns ``self.get(uri)`` instead of going
@@ -64,15 +65,11 @@ class ServerState:
     # URIs whose latest parse attempt failed but for which we still have a last-good
     # cache entry. The viewer renders a stale-bar when a URI is in this set (D7).
     stale_uris: set[str] = dataclasses.field(default_factory=set)
-    # URIs that need to skip the buffer-equality / canonicalize-skip
-    # short-circuits on the next elaborate (typically because a cascade
-    # trigger needs to re-elaborate the file even though its own buffer
-    # didn't change — an includee changed). Cleared the moment the
-    # bypass actually fires. Separate from ``stale_uris`` so the stale-
-    # transition logic in ``_apply_compile_result`` can detect a
-    # genuine False → True (or T → F) move; if cascade overloaded
-    # stale_uris like it used to, ``was_stale`` would always be True
-    # on the cascade path and the viewer would miss the new failure.
+    # URIs that must bypass the buffer-equality + canonicalize short-
+    # circuits on the next elaborate (cascade re-elaborate when an
+    # includee changed but the consumer's buffer didn't). Distinct from
+    # ``stale_uris`` so the stale-transition logic can still detect a
+    # genuine False↔True flip on the cascade path.
     force_re_elaborate: set[str] = dataclasses.field(default_factory=set)
     # Forwarded to RDLCompiler(perl_safe_opcodes=...). Empty list keeps the
     # compiler's safe default. Power users adding `:base_io` for `print`-based
@@ -113,29 +110,13 @@ class ServerState:
     # Workers pre-warm via _pool_warmup_noop so the first real elaborate
     # doesn't pay spawn + import cost on the user's typing latency.
     elaborate_pool: Any = None  # ProcessPoolExecutor when active
-    # systemrdl-pro.elaborateInProcess setting. False (default) = use
-    # the subprocess pool. True = run in the asyncio default
-    # ThreadPoolExecutor as before T3 — kept as an escape hatch in
-    # case a future systemrdl-compiler upgrade breaks RootNode pickle
-    # compatibility, or for diagnosing pool-related issues in the field.
+    # Escape hatch: run elaborate in the asyncio default executor instead
+    # of the subprocess pool. Kept for the case where a future
+    # systemrdl-compiler upgrade breaks RootNode pickle compatibility.
     elaborate_in_process: bool = False
-    # Pool size cap. 2 covers the documented pain (small file behind
-    # one big elaborate). Bumping higher is fine but each worker holds
-    # ~150 MB resident at idle plus the in-flight tree, so 2-4 is the
-    # sweet spot for a developer machine. Surfaced as a setting if a
-    # future user reports needing more.
+    # Each worker holds ~150 MB resident; 2-4 is the sweet spot.
     elaborate_pool_workers: int = 2
-    # T3-G: worker recycle threshold. Mitigates the upstream
-    # systemrdl-compiler memory leak (~5 MB per elaborate of a
-    # 40-reg fixture, observed in test_memory_growth_bounded). After
-    # this many successful subprocess elaborates we tear down the
-    # pool and spawn a fresh one — RSS comes back to baseline. 50
-    # gives a few minutes of editing on big designs before the
-    # next recycle, recycling itself is ~150 ms (worker spawn +
-    # _pool_worker_init), barely visible during a typing pause.
+    # Recycle threshold — mitigates a systemrdl-compiler memory leak
+    # (~5 MB per elaborate). After N successful runs we respawn the pool.
     pool_max_elaborates: int = 50
-    # Counts successful subprocess elaborates since the current pool
-    # was spawned. Reset to 0 in ``_ensure_elaborate_pool``. When it
-    # hits ``pool_max_elaborates`` the elaborate-finished bookkeeping
-    # schedules a recycle and resets the counter.
     pool_elaborate_count: int = 0
