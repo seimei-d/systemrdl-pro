@@ -4,6 +4,35 @@ All notable changes to **SystemRDL Pro** are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [SemVer](https://semver.org/).
 
+## [0.29.1] — 2026-05-03
+
+Bumps bundled language server to **systemrdl-lsp 0.21.1**.
+
+### Fixed
+
+- **CodeLens / inlay hints / hover-link stuck to pre-format line numbers.**
+  T2-D's "skip elaborate when only whitespace/comments changed"
+  short-circuit was correctness-broken: cached.roots kept its old
+  src_refs, so any edit that moved code (formatter run, blank-line
+  insertion, comment edit) left every position-anchored overlay glued
+  to the previous lines. Removed; T2-B fingerprint short-circuit at
+  the right level (after compile) now swaps in fresh roots and fires
+  workspace/{codeLens,inlayHint,semanticTokens,diagnostic}/refresh
+  requests so VSCode re-pulls overlays with the new positions.
+- **Workspace refresh helpers were silently failing.** pygls' helpers
+  (`workspace_code_lens_refresh_async` etc.) require an explicit
+  `params=None` positional argument; calling without it raised
+  `TypeError` swallowed by a too-broad `except`. Now passed correctly,
+  wrapped in `asyncio.wait_for(timeout=5.0)` so a hung client doesn't
+  pile up orphan tasks.
+
+### Docs
+
+- README: diagnostic timeout corrected (10s → 120s default), added
+  `elaborationTimeoutMs` and `elaborateInProcess` to the settings
+  table, merged duplicate Autocomplete + Smart-completion bullets,
+  removed duplicate Semantic-tokens bullet.
+
 ## [0.29.0] — 2026-05-03
 
 Bumps bundled language server to **systemrdl-lsp 0.21.0**.
