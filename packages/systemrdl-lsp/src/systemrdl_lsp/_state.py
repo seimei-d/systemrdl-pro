@@ -42,6 +42,16 @@ class ServerState:
     # cache.put before short-circuiting on buffer-equality. Different URIs
     # still elaborate concurrently (subject to GIL contention).
     uri_elab_locks: dict[str, asyncio.Lock] = dataclasses.field(default_factory=dict)
+    # In-flight ProcessPool futures per URI — when a rapid edit cancels the
+    # parent asyncio task we also try to ``.cancel()`` the pool future, which
+    # frees a not-yet-started worker slot. Workers that have already started
+    # keep running (Python's ProcessPool can't kill them safely), but their
+    # result is discarded because the awaiter is gone.
+    inflight_pool_futures: dict[str, Any] = dataclasses.field(default_factory=dict)
+    # Last published diagnostics per URI, for the LSP 3.17 pull model
+    # (``textDocument/diagnostic``). Push (``publishDiagnostics``) stays
+    # the primary delivery; this cache makes ``pull`` cheap.
+    last_diagnostics: dict[str, list[Any]] = dataclasses.field(default_factory=dict)
     # Test-only override that stands in for the pygls workspace. When
     # non-None, ``_is_open(uri)`` returns ``uri in self`` and
     # ``_read_buffer(uri)`` returns ``self.get(uri)`` instead of going

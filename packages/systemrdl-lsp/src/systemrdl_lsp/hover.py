@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pathlib
 from typing import TYPE_CHECKING, Any
 
 from .completion import (
@@ -277,12 +278,28 @@ def _hover_for_word(word: str, roots: list[RootNode]) -> str | None:
     return None
 
 
+def _src_link(node: Any) -> str:
+    """Return ``[name](uri#L<line>)`` for the node's definition, or ''."""
+    inst = getattr(node, "inst", None)
+    src = getattr(inst, "inst_src_ref", None) or getattr(inst, "def_src_ref", None) if inst else None
+    if src is None:
+        return ""
+    try:
+        path = pathlib.Path(src.filename).resolve()
+        line = int(getattr(src, "coord", None).line) if getattr(src, "coord", None) else 1
+    except Exception:
+        return ""
+    fname = path.name
+    return f" · [{fname}:{line}]({path.as_uri()}#L{line})"
+
+
 def _hover_text_for_node(node: Any, line_reader: Any = None) -> str | None:
     from systemrdl.node import AddressableNode, FieldNode, RegNode
 
     lines: list[str] = []
     name = getattr(node, "inst_name", None) or "(anonymous)"
     type_name = type(node).__name__.replace("Node", "").lower()
+    src_link = _src_link(node)
 
     if isinstance(node, FieldNode):
         lsb, msb = node.lsb, node.msb
@@ -298,7 +315,7 @@ def _hover_text_for_node(node: Any, line_reader: Any = None) -> str | None:
             reset_str = "—"
         access_origin = _property_origin_hint(node, "sw", line_reader)
         reset_origin = _property_origin_hint(node, "reset", line_reader)
-        lines.append(f"**field** `{name}` `[{msb}:{lsb}]`")
+        lines.append(f"**field** `{name}` `[{msb}:{lsb}]`{src_link}")
         lines.append("")
         lines.append(f"- **access**: {access_label}{access_origin}")
         lines.append(f"- **reset**: {reset_str}{reset_origin}")
@@ -333,7 +350,7 @@ def _hover_text_for_node(node: Any, line_reader: Any = None) -> str | None:
                 f"{p.name}={getattr(p, 'value', '?')}" for p in inst_params
             ) + ")"
         title_extra = " · _bridge_" if is_bridge else ""
-        lines.append(f"**{type_name}** `{name}{param_str}`{title_extra}")
+        lines.append(f"**{type_name}** `{name}{param_str}`{title_extra}{src_link}")
         lines.append("")
         lines.append(f"- **address**: {_format_hex(addr)}")
         if size is not None:

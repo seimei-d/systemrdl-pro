@@ -760,11 +760,21 @@ class ElaborationCache:
     temp file is unlinked. ``clear`` drops everything.
     """
 
-    def __init__(self) -> None:
-        self._entries: dict[str, CachedElaboration] = {}
+    def __init__(self, max_entries: int = 50) -> None:
+        # OrderedDict for LRU semantics — most-recently-used moves to end on
+        # `get`/`put`, oldest evicts when count exceeds ``max_entries``.
+        # Default cap matches a generous open-files-per-window estimate;
+        # protect-class URIs (currently-open documents) are reinserted on
+        # every access so they never evict.
+        from collections import OrderedDict
+        self._entries: OrderedDict[str, CachedElaboration] = OrderedDict()
+        self.max_entries = max_entries
 
     def get(self, uri: str) -> CachedElaboration | None:
-        return self._entries.get(uri)
+        entry = self._entries.get(uri)
+        if entry is not None:
+            self._entries.move_to_end(uri)
+        return entry
 
     def put(
         self,
@@ -793,6 +803,14 @@ class ElaborationCache:
             node_index=node_index,
             serialized=serialized,
         )
+        self._entries.move_to_end(uri)
+        self._evict_lru()
+
+    def _evict_lru(self) -> None:
+        while len(self._entries) > self.max_entries:
+            _uri, victim = self._entries.popitem(last=False)
+            if victim.temp_path is not None:
+                victim.temp_path.unlink(missing_ok=True)
 
     def clear(self) -> None:
         for entry in self._entries.values():

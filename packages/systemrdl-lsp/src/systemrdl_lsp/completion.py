@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING, Any
 
-from lsprotocol.types import CompletionItem, CompletionItemKind
+from lsprotocol.types import CompletionItem, CompletionItemKind, InsertTextFormat
 
 from .definition import _comp_defs_from_cached
 
@@ -328,6 +328,40 @@ def _make_items(catalogue: dict[str, str], kind: CompletionItemKind) -> list[Com
     ]
 
 
+# Snippet bodies for top-level keywords. Cursor stops at $1, $2, ... and
+# lands at $0 when finished. Plain-string completions (everything not in
+# this map) just insert the keyword as-is.
+_KEYWORD_SNIPPETS: dict[str, str] = {
+    "addrmap":  "addrmap ${1:name} {\n\t$0\n};",
+    "regfile":  "regfile ${1:type_name} {\n\t$0\n} ${2:inst_name} @ ${3:0x0};",
+    "reg":      "reg {\n\tfield { sw=${1|rw,ro,wo|}; hw=${2|r,w,rw|}; } ${3:name}[${4:0}:${5:0}] = ${6:0};\n} ${7:NAME} @ ${8:0x0};",
+    "field":    "field { sw=${1|rw,ro,wo|}; hw=${2|r,w,rw|}; } ${3:name}[${4:0}:${5:0}] = ${6:0};",
+    "enum":     "enum ${1:Name} {\n\t${2:VALUE_A} = ${3:0};\n\t$0\n};",
+    "mem":      "mem ${1:type_name} {\n\tmementries = ${2:1024};\n\tmemwidth = ${3:32};\n} ${4:inst_name} @ ${5:0x0};",
+    "signal":   "signal { activehigh=true; } ${1:name};",
+    "property": "property ${1:name} {\n\ttype = ${2:boolean};\n\tcomponent = ${3:field};\n\tdefault = ${4:false};\n};",
+}
+
+
+def _make_keyword_items() -> list[CompletionItem]:
+    items: list[CompletionItem] = []
+    for label, doc in SYSTEMRDL_TOP_KEYWORDS.items():
+        snippet = _KEYWORD_SNIPPETS.get(label)
+        if snippet is not None:
+            items.append(CompletionItem(
+                label=label, kind=CompletionItemKind.Keyword,
+                detail=doc, documentation=doc,
+                insert_text=snippet,
+                insert_text_format=InsertTextFormat.Snippet,
+            ))
+        else:
+            items.append(CompletionItem(
+                label=label, kind=CompletionItemKind.Keyword,
+                detail=doc, documentation=doc,
+            ))
+    return items
+
+
 def _completion_items_static() -> list[CompletionItem]:
     """Full keyword + property + value catalogue with one-line docs.
 
@@ -335,7 +369,7 @@ def _completion_items_static() -> list[CompletionItem]:
     ``documentation`` so the user sees the explanation without extra interaction.
     """
     items: list[CompletionItem] = []
-    items.extend(_make_items(SYSTEMRDL_TOP_KEYWORDS, CompletionItemKind.Keyword))
+    items.extend(_make_keyword_items())
     items.extend(_make_items(SYSTEMRDL_PROPERTIES, CompletionItemKind.Property))
     items.extend(_make_items(SYSTEMRDL_RW_VALUES, CompletionItemKind.EnumMember))
     items.extend(_make_items(SYSTEMRDL_ONWRITE_VALUES, CompletionItemKind.EnumMember))

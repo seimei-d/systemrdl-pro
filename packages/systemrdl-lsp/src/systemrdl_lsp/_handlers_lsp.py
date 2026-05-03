@@ -21,16 +21,24 @@ import re as _re
 from typing import TYPE_CHECKING, Any, Callable
 
 from lsprotocol.types import (
+    TEXT_DOCUMENT_DIAGNOSTIC,
     TEXT_DOCUMENT_SEMANTIC_TOKENS_FULL,
+    TEXT_DOCUMENT_SEMANTIC_TOKENS_FULL_DELTA,
+    TEXT_DOCUMENT_SEMANTIC_TOKENS_RANGE,
     CodeLens,
+    CodeLensOptions,
     CompletionOptions,
+    DiagnosticOptions,
     FoldingRange,
     InlayHint,
     Location,
     ParameterInformation,
     Position,
     Range,
+    RelatedFullDocumentDiagnosticReport,
     SemanticTokens,
+    SemanticTokensDelta,
+    SemanticTokensEdit,
     SemanticTokensLegend,
     SignatureHelp,
     SignatureHelpOptions,
@@ -72,6 +80,7 @@ from .outline import (
     _document_symbols,
     _folding_ranges_from_text,
     _inlay_hints_for_addressables,
+    _resolve_code_lens_for,
     _workspace_symbols_for_uri,
 )
 from .semantic import TOKEN_MODIFIERS, TOKEN_TYPES, _semantic_tokens_for_text
@@ -181,13 +190,39 @@ def register(
             _inlay_hints_for_addressables, cached.roots, path, cached.text,
         )
 
-    @server.feature("textDocument/codeLens")
+    @server.feature(
+        "textDocument/codeLens",
+        CodeLensOptions(resolve_provider=True),
+    )
     async def _on_code_lens(_ls: LanguageServer, params: Any) -> list[CodeLens]:
         cached = state.cache.get(params.text_document.uri)
         if cached is None or not cached.roots:
             return []
         path = cached.temp_path or _uri_to_path(params.text_document.uri)
-        return await asyncio.to_thread(_code_lenses_for_addrmaps, cached.roots, path)
+        lenses = await asyncio.to_thread(_code_lenses_for_addrmaps, cached.roots, path)
+        # Round-trip the URI through `data` so resolve doesn't need a second
+        # workspace probe to find which document the lens belongs to.
+        for lens in lenses:
+            if isinstance(lens.data, dict):
+                lens.data["uri"] = params.text_document.uri
+        return lenses
+
+    @server.feature("codeLens/resolve")
+    async def _on_code_lens_resolve(_ls: LanguageServer, params: Any) -> Any:
+        data = getattr(params, "data", None)
+        if not isinstance(data, dict):
+            return params
+        uri = data.get("uri")
+        addrmap = data.get("addrmapName")
+        if not uri or not addrmap:
+            return params
+        cached = state.cache.get(uri)
+        if cached is None or not cached.roots:
+            return params
+        cmd = await asyncio.to_thread(_resolve_code_lens_for, cached.roots, addrmap)
+        if cmd is not None:
+            params.command = cmd
+        return params
 
     @server.feature("workspace/symbol")
     async def _on_workspace_symbol(_ls: LanguageServer, params: Any) -> list[SymbolInformation]:
@@ -216,7 +251,22 @@ def register(
         CompletionOptions(trigger_characters=[".", ">", "=", " "], resolve_provider=False),
     )
     async def _on_completion(_ls: LanguageServer, params: Any) -> Any:
-        from lsprotocol.types import CompletionList, TextEdit
+        from lsprotocol.types import CompletionItemDefaults, CompletionList, TextEdit
+
+        # LSP 3.17 itemDefaults capability — when the client supports it we
+        # ship a single shared edit_range on the CompletionList instead of
+        # repeating it on every CompletionItem (10k items × identical range
+        # was the dominant payload bloat on 25k-reg general-ctx dumps).
+        # Falls back to per-item text_edit when the client is older.
+        item_defaults_supported = False
+        try:
+            cc = server.client_capabilities
+            cl_caps = getattr(getattr(cc, "text_document", None), "completion", None)
+            cli_caps = getattr(cl_caps, "completion_list", None) if cl_caps else None
+            defaults = getattr(cli_caps, "item_defaults", None) if cli_caps else None
+            item_defaults_supported = isinstance(defaults, list) and "editRange" in defaults
+        except Exception:
+            pass
 
         cached = state.cache.get(params.text_document.uri)
         # Live buffer first, cached.text only as a fallback. ``cached.text``
@@ -272,6 +322,21 @@ def register(
                 it.text_edit = TextEdit(range=replace, new_text=it.label)
             return items
 
+        def _build_list(items: list[Any], replace: Range, *, is_incomplete: bool = False) -> Any:
+            """CompletionList with shared editRange when client supports it,
+            per-item text_edit otherwise. Either path produces the same
+            client-visible behaviour; the shared form is just lighter."""
+            if item_defaults_supported:
+                return CompletionList(
+                    is_incomplete=is_incomplete,
+                    items=items,
+                    item_defaults=CompletionItemDefaults(edit_range=replace),
+                )
+            return CompletionList(
+                is_incomplete=is_incomplete,
+                items=_attach_text_edits(items, replace),
+            )
+
         # Member / property access — narrow popup to children of the resolved node.
         if ctx.startswith("member:"):
             path = ctx[len("member:"):]
@@ -287,9 +352,8 @@ def register(
                 logger.warning("[COMPL] → returning null (no members)")
                 return None
             replace = _replace_range_for_partial()
-            items = _attach_text_edits(items, replace)
-            logger.warning("[COMPL] → returning %d items with text_edit", len(items))
-            return CompletionList(is_incomplete=False, items=items)
+            logger.warning("[COMPL] → returning %d items (itemDefaults=%s)", len(items), item_defaults_supported)
+            return _build_list(items, replace)
         if ctx.startswith("property:"):
             path = ctx[len("property:"):]
             items = (
@@ -304,9 +368,8 @@ def register(
                 logger.warning("[COMPL] → returning null (no properties)")
                 return None
             replace = _replace_range_for_partial()
-            items = _attach_text_edits(items, replace)
-            logger.warning("[COMPL] → returning %d items with text_edit", len(items))
-            return CompletionList(is_incomplete=False, items=items)
+            logger.warning("[COMPL] → returning %d items (itemDefaults=%s)", len(items), item_defaults_supported)
+            return _build_list(items, replace)
 
         if ctx != "general":
             ctx_items = _completion_items_for_context(ctx)
@@ -319,8 +382,7 @@ def register(
                 # the popup instead of falling through to other providers.
                 return None
             replace = _replace_range_for_partial()
-            ctx_items = _attach_text_edits(ctx_items, replace)
-            return CompletionList(is_incomplete=False, items=ctx_items)
+            return _build_list(ctx_items, replace)
 
         # `general` context but the user explicitly typed `=` or space as
         # the trigger — they're in an assignment RHS slot we don't
@@ -351,10 +413,11 @@ def register(
         # sees `WIDE_REG` etc. as soon as the tree is ready.
         is_incomplete = roots is None
         logger.warning(
-            "[COMPL] general scope=%r → %d items (incomplete=%s)",
-            scope, len(items), is_incomplete,
+            "[COMPL] general scope=%r → %d items (incomplete=%s itemDefaults=%s)",
+            scope, len(items), is_incomplete, item_defaults_supported,
         )
-        return CompletionList(is_incomplete=is_incomplete, items=items)
+        replace = _replace_range_for_partial()
+        return _build_list(items, replace, is_incomplete=is_incomplete)
 
     # -- rename ----------------------------------------------------------
     @server.feature("textDocument/prepareRename")
@@ -720,6 +783,78 @@ def register(
         return _find_instance_by_name(cached.roots, word, translate)
 
     # -- semantic tokens / formatting / code action / document link ------
+    # Per-URI cache of the last full token array, keyed by result_id, so
+    # `semanticTokens/full/delta` can compute edits against the prior
+    # request. ``result_id`` is the buffer hash so identical text always
+    # produces the same id (and clients see "no change" cheaply).
+    _semtok_cache: dict[str, tuple[str, list[int]]] = {}
+
+    def _semtok_result_id(text: str) -> str:
+        import hashlib
+        return hashlib.sha1(text.encode("utf-8", errors="replace")).hexdigest()[:16]
+
+    def _diff_semantic_tokens(prev: list[int], cur: list[int]) -> list[Any]:
+        """Return a single SemanticTokensEdit covering the changed slice.
+
+        Cheap LCS-like collapse: trim equal prefix and suffix, encode the
+        diff as one edit. Loses some compression vs a multi-edit diff but
+        is cheap to compute and still way smaller than re-shipping the
+        entire token stream on every keystroke.
+        """
+        n = min(len(prev), len(cur))
+        # Token entries are 5 ints — only crop on multiple-of-5 boundaries
+        # so we don't split a single token across the edit.
+        head = 0
+        while head + 5 <= n and prev[head:head + 5] == cur[head:head + 5]:
+            head += 5
+        tail = 0
+        while (
+            tail + 5 <= n - head
+            and prev[len(prev) - tail - 5:len(prev) - tail]
+                == cur[len(cur) - tail - 5:len(cur) - tail]
+        ):
+            tail += 5
+        delete_count = len(prev) - head - tail
+        new_data = cur[head:len(cur) - tail]
+        if delete_count == 0 and not new_data:
+            return []
+        return [SemanticTokensEdit(start=head, delete_count=delete_count, data=[int(x) for x in new_data])]
+
+    def _filter_tokens_in_range(data: list[int], rng: Range) -> list[int]:
+        """Reduce a full token stream to entries overlapping ``rng``.
+
+        Tokens are encoded as relative deltas (deltaLine, deltaStartChar,
+        length, type, mods) — we walk and re-base each kept token's deltas
+        so the trimmed stream is still self-consistent.
+        """
+        out: list[int] = []
+        line = 0
+        col = 0
+        last_emitted_line = 0
+        last_emitted_col = 0
+        for i in range(0, len(data), 5):
+            dl, dc, length, ttype, mods = data[i:i + 5]
+            if dl == 0:
+                col += dc
+            else:
+                line += dl
+                col = dc
+            in_range = (
+                rng.start.line <= line <= rng.end.line
+                and not (line == rng.start.line and col + length <= rng.start.character)
+                and not (line == rng.end.line and col >= rng.end.character)
+            )
+            if in_range:
+                if not out:
+                    out.extend([line, col, length, ttype, mods])
+                    last_emitted_line, last_emitted_col = line, col
+                else:
+                    rel_line = line - last_emitted_line
+                    rel_col = col if rel_line > 0 else col - last_emitted_col
+                    out.extend([rel_line, rel_col, length, ttype, mods])
+                    last_emitted_line, last_emitted_col = line, col
+        return out
+
     @server.feature(
         TEXT_DOCUMENT_SEMANTIC_TOKENS_FULL,
         SemanticTokensLegend(
@@ -731,31 +866,16 @@ def register(
         """Compute semantic tokens for the buffer.
 
         ``params: Any`` (not ``SemanticTokensParams``) is deliberate — pygls
-        2.x inspects the param annotation to decide whether to inject the
-        server as the first argument. With a typed lsprotocol annotation it
-        stripped the ``_ls`` slot and called us with only ``params``,
+        2.x strips the ``_ls`` slot when it sees a typed lsprotocol param,
         producing ``TypeError: missing 1 required positional argument`` on
-        every keystroke (visible as editor-wide lag because VSCode retries
-        the failing request constantly).
-
-        Async + to_thread because the tokenizer walks the entire buffer
-        text; on an 880KB file that pinned the asyncio loop for ~hundreds
-        of ms, blocking concurrent requests like rdl/expandNode.
+        every keystroke. Async + to_thread because the tokenizer walks the
+        entire buffer.
         """
         try:
-            uri: str | None = None
-            td = getattr(params, "text_document", None)
-            if td is not None:
-                uri = getattr(td, "uri", None)
-            if uri is None and isinstance(params, dict):
-                td_dict = params.get("textDocument") or params.get("text_document") or {}
-                uri = td_dict.get("uri") if isinstance(td_dict, dict) else None
+            uri = _semtok_uri_from(params)
             if not uri:
                 return SemanticTokens(data=[])
-            text = read_buffer(uri)
-            if text is None:
-                cached = state.cache.get(uri)
-                text = cached.text if cached is not None else ""
+            text = _semtok_text_for(uri)
             data = await asyncio.to_thread(_semantic_tokens_for_text, text)
             if len(data) % 5 != 0:
                 logger.error(
@@ -763,10 +883,110 @@ def register(
                     len(data),
                 )
                 return SemanticTokens(data=[])
-            return SemanticTokens(data=[int(x) for x in data])
+            data = [int(x) for x in data]
+            rid = _semtok_result_id(text)
+            _semtok_cache[uri] = (rid, data)
+            return SemanticTokens(result_id=rid, data=data)
         except Exception:
             logger.exception("semanticTokens/full handler failed; returning empty")
             return SemanticTokens(data=[])
+
+    def _semtok_uri_from(params: Any) -> str | None:
+        td = getattr(params, "text_document", None)
+        if td is not None:
+            return getattr(td, "uri", None)
+        if isinstance(params, dict):
+            td_dict = params.get("textDocument") or params.get("text_document") or {}
+            return td_dict.get("uri") if isinstance(td_dict, dict) else None
+        return None
+
+    def _semtok_text_for(uri: str) -> str:
+        text = read_buffer(uri)
+        if text is None:
+            cached = state.cache.get(uri)
+            text = cached.text if cached is not None else ""
+        return text
+
+    @server.feature(TEXT_DOCUMENT_SEMANTIC_TOKENS_RANGE)
+    async def _on_semantic_tokens_range(_ls: LanguageServer, params: Any) -> SemanticTokens:
+        """Tokens overlapping a viewport range — VSCode requests this for the
+        visible region instead of the full file when the file is large.
+        """
+        try:
+            uri = _semtok_uri_from(params)
+            rng = getattr(params, "range", None)
+            if not uri or rng is None:
+                return SemanticTokens(data=[])
+            text = _semtok_text_for(uri)
+            full = await asyncio.to_thread(_semantic_tokens_for_text, text)
+            if len(full) % 5 != 0:
+                return SemanticTokens(data=[])
+            data = _filter_tokens_in_range([int(x) for x in full], rng)
+            return SemanticTokens(data=data)
+        except Exception:
+            logger.exception("semanticTokens/range failed")
+            return SemanticTokens(data=[])
+
+    @server.feature(TEXT_DOCUMENT_SEMANTIC_TOKENS_FULL_DELTA)
+    async def _on_semantic_tokens_delta(_ls: LanguageServer, params: Any) -> Any:
+        """Edit-encoded diff against the prior result. Falls back to a full
+        SemanticTokens response when no usable previous snapshot exists.
+        """
+        try:
+            uri = _semtok_uri_from(params)
+            prev_id = getattr(params, "previous_result_id", None)
+            if not uri:
+                return SemanticTokens(data=[])
+            text = _semtok_text_for(uri)
+            new_data = await asyncio.to_thread(_semantic_tokens_for_text, text)
+            if len(new_data) % 5 != 0:
+                return SemanticTokens(data=[])
+            new_data = [int(x) for x in new_data]
+            new_id = _semtok_result_id(text)
+            cached = _semtok_cache.get(uri)
+            _semtok_cache[uri] = (new_id, new_data)
+            if cached is None or cached[0] != prev_id:
+                return SemanticTokens(result_id=new_id, data=new_data)
+            edits = _diff_semantic_tokens(cached[1], new_data)
+            return SemanticTokensDelta(result_id=new_id, edits=edits)
+        except Exception:
+            logger.exception("semanticTokens/full/delta failed")
+            return SemanticTokens(data=[])
+
+    @server.feature(
+        TEXT_DOCUMENT_DIAGNOSTIC,
+        DiagnosticOptions(
+            identifier="systemrdl",
+            inter_file_dependencies=True,  # `\include` graph crosses files.
+            workspace_diagnostics=False,
+        ),
+    )
+    def _on_diagnostic(_ls: LanguageServer, params: Any) -> Any:
+        """LSP 3.17 pull-model diagnostics: client requests current
+        diagnostics for a document on demand.
+
+        We continue to push via ``publishDiagnostics`` from elaborate; this
+        handler just serves the cached snapshot back. Saves a synchronous
+        re-elaborate when the client (e.g. VSCode 1.85+) chooses pull.
+        """
+        uri = params.text_document.uri
+        items = state.last_diagnostics.get(uri, [])
+        return RelatedFullDocumentDiagnosticReport(items=list(items))
+
+    @server.feature("textDocument/willSaveWaitUntil")
+    def _on_will_save_wait_until(_ls: LanguageServer, params: Any) -> list[Any]:
+        """Format-on-save: returns the same edits as ``textDocument/formatting``
+        so VSCode applies them in the save round-trip when the user has
+        ``editor.formatOnSave: true``.
+        """
+        uri = params.text_document.uri
+        text = read_buffer(uri)
+        if text is None:
+            cached = state.cache.get(uri)
+            text = cached.text if cached is not None else ""
+        if not text:
+            return []
+        return _document_formatting_edits(text, 4)
 
     @server.feature("textDocument/formatting")
     def _on_formatting(_ls: LanguageServer, params: Any) -> list[Any]:

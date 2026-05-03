@@ -774,6 +774,7 @@ def build_server() -> LanguageServer:
                         state.include_vars,
                         state.perl_safe_opcodes,
                     )
+                    state.inflight_pool_futures[uri] = pf
                     awaitable = asyncio.wrap_future(pf)
                 else:
                     awaitable = loop.run_in_executor(
@@ -1071,6 +1072,7 @@ def build_server() -> LanguageServer:
         viewer can clear its "re-elaborating" indicator regardless of whether
         the pass succeeded, timed out, or threw. Best-effort.
         """
+        state.inflight_pool_futures.pop(uri, None)
         try:
             server.protocol.notify("rdl/elaborationFinished", {"uri": uri})
         except Exception:
@@ -1273,6 +1275,16 @@ def build_server() -> LanguageServer:
         existing = state.pending.get(uri)
         if existing is not None:
             existing.cancel()
+        # Cascade cancellation into the pool worker if the previous
+        # elaborate hadn't started yet — at least frees a queued slot.
+        # Workers already running keep going (Python's ProcessPool can't
+        # safely kill them), but the awaiter is dropped on parent cancel.
+        prev_pool_fut = state.inflight_pool_futures.pop(uri, None)
+        if prev_pool_fut is not None:
+            try:
+                prev_pool_fut.cancel()
+            except Exception:
+                pass
         state.pending[uri] = asyncio.ensure_future(_debounced_full_pass(uri))
 
     @server.feature(TEXT_DOCUMENT_DID_CLOSE)
@@ -1305,6 +1317,34 @@ def build_server() -> LanguageServer:
         # pygls 2.x logs noisy warnings for cancel notifications that arrive after
         # the request already completed. A no-op handler keeps the channel quiet.
         return None
+
+    @server.feature("shutdown")
+    async def _on_shutdown(_ls: LanguageServer, _params: Any) -> None:
+        """Drain in-flight work before exit so we don't orphan elaborates.
+
+        Cancels every queued debounce, waits up to 2s for the in-flight
+        compiles to finish, and then shuts the subprocess pool with
+        ``wait=True`` so its workers exit cleanly. Without this VSCode's
+        process kill on window close left worker subprocesses briefly
+        stranded.
+        """
+        for task in list(state.pending.values()):
+            task.cancel()
+        if state.pending:
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*state.pending.values(), return_exceptions=True),
+                    timeout=2.0,
+                )
+            except (asyncio.TimeoutError, Exception):
+                pass
+        pool = state.elaborate_pool
+        if pool is not None:
+            state.elaborate_pool = None
+            try:
+                pool.shutdown(wait=True, cancel_futures=True)
+            except Exception:
+                logger.debug("pool drain failed", exc_info=True)
 
     @server.feature("workspace/didChangeWatchedFiles")
     def _on_watched_files_changed(_ls: LanguageServer, _params: Any) -> None:
@@ -1374,5 +1414,8 @@ def build_server() -> LanguageServer:
     server._systemrdl_state = state  # type: ignore[attr-defined]
     server._systemrdl_full_pass_async = _full_pass_async  # type: ignore[attr-defined]
     server._systemrdl_apply_compile_result = _apply_compile_result  # type: ignore[attr-defined]
+    # Shared dict consumed by the pull-diagnostics handler in _handlers_lsp.
+    # Updated as a side-effect of every _publish_diagnostics call.
+    server._systemrdl_last_diagnostics = state.last_diagnostics  # type: ignore[attr-defined]
 
     return server
