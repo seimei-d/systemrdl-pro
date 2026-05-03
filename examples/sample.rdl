@@ -82,7 +82,7 @@ addrmap dma_engine {
     dma_channel_t ch1 @ 0x100;
 };
 
-addrmap uart { 
+addrmap uart {
     name = "UART";
     desc = "Single 16550-style UART. Independent address space — second tab in the viewer.";
     ctrl_reg_t CTRL @ 0x0;

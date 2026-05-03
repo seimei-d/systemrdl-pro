@@ -395,31 +395,46 @@ def build_server() -> LanguageServer:
                 else _fingerprint_roots(roots)
             )
             old = state.cache.get(uri)
-            # T2-B fingerprint short-circuit: if the elaborated tree is byte-
-            # identical (semantically) to the prior one, drop the new tmp_path
-            # (we keep the prior entry's tmp_path so lazy SourceRefs keep
-            # working) and skip the cache.put + notification. Diagnostics
-            # still publish because they may differ across runs (e.g.,
-            # severity tweaked by config) without an AST diff.
+            # AST fingerprint short-circuit: byte-identical elaborated tree
+            # vs the prior one. Don't bump version (no
+            # ``elaboratedTreeChanged`` push), but DO swap in the fresh
+            # roots — their src_refs carry the new line numbers, so
+            # codeLens / inlayHint / hover-link overlays land in the
+            # right place after a formatter run or whitespace edit.
+            # Stale serialized envelopes get cleared so the next
+            # rdl/elaboratedTree fetch re-emits with up-to-date positions.
             if (
                 old is not None
                 and old.ast_fingerprint is not None
                 and old.ast_fingerprint == new_fp
                 and old.roots
             ):
-                tmp_path.unlink(missing_ok=True)
+                if old.temp_path is not None and old.temp_path != tmp_path:
+                    old.temp_path.unlink(missing_ok=True)
+                old.roots = roots
+                old.temp_path = tmp_path
                 old.text = buffer_text
                 old.text_canonical = _canonicalize_for_skip(buffer_text)
                 old.elaborated_at = time.time()
-                # symmetric stale transition (handles both T → F
-                # and F → T). The latter fires when the user introduces
-                # an address conflict in a buffer that produces the same
-                # fingerprint as before — AST is the same but the
-                # diagnostics changed.
+                old.serialized = None
+                old.expanded = None
+                old.node_index = precomputed_node_index or None
                 bumped = _apply_stale_transition(uri, old, has_errors)
                 if bumped is not None:
                     version_after = bumped
                 _update_include_graph(uri, consumed_files)
+                # Force VSCode to re-pull anything tied to source positions
+                # — the AST is the same shape but lines moved.
+                for refresh in (
+                    server.workspace_code_lens_refresh_async,
+                    server.workspace_inlay_hint_refresh_async,
+                    server.workspace_semantic_tokens_refresh_async,
+                    server.workspace_diagnostic_refresh_async,
+                ):
+                    try:
+                        asyncio.create_task(refresh())
+                    except Exception:
+                        logger.debug("workspace refresh %s failed", refresh.__name__, exc_info=True)
             else:
                 # Cache takes ownership of the temp file (it backs lazy
                 # src_ref reads for hover/documentSymbol). Old entry's
