@@ -14,6 +14,7 @@ export type {
   EncodeEntry,
   Field,
   HexU64,
+  ParameterBinding,
   Reg,
   Regfile,
   SourceLoc,

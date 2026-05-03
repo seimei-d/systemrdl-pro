@@ -275,6 +275,49 @@ def _serialize_encode_entries(enc: Any, width_bits: int) -> list[dict[str, Any]]
     return entries
 
 
+def _serialize_parameters(node: Any) -> list[dict[str, Any]]:
+    """Resolved parametrized-type bindings for a single node, or [] if none.
+
+    Returns one entry per parameter with its post-elaboration value so the
+    viewer can render `WIDTH = 16` next to a `parametrized_reg` instance.
+    The walk catches expression errors per-parameter — a single broken
+    binding shouldn't omit the rest of the list.
+    """
+    inst = getattr(node, "inst", None)
+    if inst is None:
+        return []
+    raw = getattr(inst, "parameters", None) or []
+    if not raw:
+        return []
+    out: list[dict[str, Any]] = []
+    for p in raw:
+        name = getattr(p, "name", None)
+        if not name:
+            continue
+        ptype = getattr(p, "param_type", None)
+        type_name = getattr(ptype, "__name__", str(ptype)) if ptype else None
+        value: Any = None
+        try:
+            value = p.get_value()
+        except Exception:
+            value = None
+        # Render to a JSON-safe scalar / string. Ints stringify directly;
+        # set/list values get repr'd as a fallback so the viewer can at
+        # least show *something* for exotic parameter types.
+        if isinstance(value, (int, float, str, bool)) or value is None:
+            rendered: Any = value
+        else:
+            try:
+                rendered = repr(value)
+            except Exception:
+                rendered = "?"
+        entry: dict[str, Any] = {"name": str(name), "value": rendered}
+        if type_name:
+            entry["type"] = type_name
+        out.append(entry)
+    return out
+
+
 def _serialize_reg(
     node: Any,
     cache: _TypeCache,
@@ -374,6 +417,9 @@ def _serialize_reg(
         else _cached_def_src_ref(node, cache, path_translate)
     if src:
         out["source"] = src
+    params = _serialize_parameters(node)
+    if params:
+        out["parameters"] = params
     return out
 
 
@@ -453,6 +499,9 @@ def _serialize_addressable(
             else _cached_def_src_ref(node, cache, path_translate)
         if src:
             out["source"] = src
+        params = _serialize_parameters(node)
+        if params:
+            out["parameters"] = params
         return out
     return None
 
@@ -671,12 +720,3 @@ def expand_node(
     return None
 
 
-# Public alias retained for backwards compatibility with the (private-by-convention)
-# `_safe_get_property` name used elsewhere in the codebase. Not used internally any
-# more — `_cached_prop` supersedes it for serialize.py's hot path.
-def _safe_get_property(node: Any, prop: str) -> Any:
-    """``node.get_property(prop)`` with LookupError + AttributeError swallowed."""
-    try:
-        return node.get_property(prop)
-    except (LookupError, AttributeError):
-        return None

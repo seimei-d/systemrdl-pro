@@ -361,19 +361,19 @@ def test_static_completion_items_carry_documentation():
 
 
 def test_completion_context_detects_sw_assignment():
-    """Cursor right after `sw =` returns 'sw_value' so the handler narrows
+    """Cursor right after `sw =` returns 'value:sw' so the handler narrows
     suggestions to access modes only."""
     # cursor at the very end of the prefix
     text = "    field { sw = "
-    assert _completion_context(text, 0, len(text)) == "sw_value"
+    assert _completion_context(text, 0, len(text)) == "value:sw"
     # extra typed chars after `=` still count
     text2 = "    field { sw = r"
-    assert _completion_context(text2, 0, len(text2)) == "sw_value"
+    assert _completion_context(text2, 0, len(text2)) == "value:sw"
 
 
 def test_completion_context_detects_onwrite_assignment():
     text = "    onwrite = "
-    assert _completion_context(text, 0, len(text)) == "onwrite_value"
+    assert _completion_context(text, 0, len(text)) == "value:onwrite"
 
 
 def test_completion_context_general_outside_assignment():
@@ -384,8 +384,8 @@ def test_completion_context_general_outside_assignment():
 
 
 def test_completion_context_offers_only_rw_values_for_sw():
-    """The whole point — sw_value context must NOT include keywords."""
-    items = _completion_items_for_context("sw_value")
+    """The whole point — value:sw context must NOT include keywords."""
+    items = _completion_items_for_context("value:sw")
     labels = {it.label for it in items}
     assert "rw" in labels and "ro" in labels and "na" in labels
     # Must NOT leak keywords or onwrite/onread values
@@ -394,10 +394,25 @@ def test_completion_context_offers_only_rw_values_for_sw():
 
 
 def test_completion_context_offers_only_onwrite_values():
-    items = _completion_items_for_context("onwrite_value")
+    items = _completion_items_for_context("value:onwrite")
     labels = {it.label for it in items}
     assert "woclr" in labels and "woset" in labels and "wzc" in labels
     assert "rw" not in labels and "addrmap" not in labels
+
+
+def test_completion_context_detects_bool_property():
+    """`rclr = ` → value:rclr → boolean true/false suggestions."""
+    text = "field { rclr = "
+    assert _completion_context(text, 0, len(text)) == "value:rclr"
+    items = _completion_items_for_context("value:rclr")
+    labels = {it.label for it in items}
+    assert labels == {"true", "false"}
+
+
+def test_completion_context_detects_dynamic_property_rhs():
+    """`inst->rclr = ` (dynamic property assignment) gets the same value list."""
+    text = "top.CTRL.enable->rclr = "
+    assert _completion_context(text, 0, len(text)) == "value:rclr"
 
 
 def test_hover_for_word_resolves_keyword():

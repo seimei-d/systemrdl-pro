@@ -388,6 +388,28 @@ html, body { margin: 0; padding: 0; background: var(--rdl-bg); color: var(--rdl-
 .rdl-encode-table td.v { color: var(--rdl-accent); }
 .rdl-encode-table td.d { color: var(--rdl-dim); }
 
+/* Resolved parametrized-type bindings ("WIDTH = 16" etc.) */
+.rdl-parameters { margin: 6px 0 2px; }
+.rdl-parameters-title {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--rdl-dim); font-weight: 600; margin-bottom: 4px;
+}
+.rdl-parameters-table {
+  border-collapse: collapse;
+  font-family: var(--rdl-font-mono); font-size: 11px;
+}
+.rdl-parameters-table th, .rdl-parameters-table td {
+  text-align: left; padding: 2px 8px; border: 1px solid var(--rdl-border);
+}
+.rdl-parameters-table th {
+  background: var(--rdl-chrome); color: var(--rdl-dim);
+  font-weight: 500; font-size: 10px; text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.rdl-parameters-table td.n code { color: var(--rdl-fg); }
+.rdl-parameters-table td.t { color: var(--rdl-dim); font-style: italic; }
+.rdl-parameters-table td.v code { color: var(--rdl-accent); }
+
 .rdl-split-access {
   margin: 6px 0;
   padding: 6px 10px;

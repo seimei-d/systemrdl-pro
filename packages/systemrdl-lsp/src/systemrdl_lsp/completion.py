@@ -166,18 +166,141 @@ SYSTEMRDL_PRECEDENCE_VALUES: dict[str, str] = {
     "hw": "Hardware write wins (default).",
 }
 
+# Boolean properties — `prop = true | false`.
+SYSTEMRDL_BOOL_VALUES: dict[str, str] = {
+    "true":  "Boolean true.",
+    "false": "Boolean false.",
+}
 
+
+def _build_property_metadata() -> tuple[
+    dict[str, dict[str, str]],          # prop → value catalogue
+    dict[str, set[str]],                # component-class-name → dyn-allowed prop names
+    dict[str, set[str]],                # component-class-name → all bindable prop names
+]:
+    """Mine systemrdl-compiler's authoritative property registry.
+
+    Returns three maps used by RHS / `->` completion:
+
+    1. ``prop → catalogue`` — what literal values to suggest after ``prop = ``.
+       Built from each rule's ``valid_types`` so adding a new SystemRDL
+       property type to the compiler propagates here automatically.
+    2. ``component → dyn-allowed`` — only these are valid behind ``inst->``.
+       Mirrors the SystemRDL spec's "dynamic assignment" column (Table 11+).
+    3. ``component → all-bindable`` — for tooling that wants the full set
+       (we don't currently use it but keep the bookkeeping cheap).
+
+    Module-level so we pay the import + walk cost once.
+    """
+    from systemrdl import RDLCompiler
+    import systemrdl.component as _comp
+    from systemrdl.rdltypes import (
+        AccessType, AddressingType, InterruptType,
+        OnReadType, OnWriteType, PrecedenceType,
+    )
+
+    enum_catalogues: dict[type, dict[str, str]] = {}
+    for et, doc_prefix in [
+        (AccessType,     "Access mode"),
+        (OnReadType,     "On-read action"),
+        (OnWriteType,    "On-write action"),
+        (PrecedenceType, "Precedence"),
+        (AddressingType, "Addressing mode"),
+        (InterruptType,  "Interrupt edge type"),
+    ]:
+        enum_catalogues[et] = {m.name: f"{doc_prefix}: {m.name}." for m in et}
+    # ``ro``/``wo`` are SystemRDL spec aliases not surfaced by the compiler
+    # enum (which uses ``r``/``w``); add them so completion matches the
+    # spelling most users actually type.
+    enum_catalogues[AccessType]["ro"] = "Read-only (alias of `r`)."
+    enum_catalogues[AccessType]["wo"] = "Write-only (alias of `w`)."
+
+    rdl = RDLCompiler()
+    rules = rdl.env.property_rules.rdl_properties
+
+    # Filter out names with spaces — they're internal compiler quirks
+    # (e.g. ``"intr type"``) and would break the regex / popup labels.
+    rules = {name: rule for name, rule in rules.items() if " " not in name}
+
+    prop_to_cat: dict[str, dict[str, str]] = {}
+    for name, rule in rules.items():
+        cat: dict[str, str] = {}
+        for vt in rule.valid_types:
+            if not isinstance(vt, type):
+                # ArrayedType / parameterised types — no closed-set of literals.
+                continue
+            if vt is bool:
+                cat.update(SYSTEMRDL_BOOL_VALUES)
+            elif vt in enum_catalogues:
+                cat.update(enum_catalogues[vt])
+            # int / str / Signal / Field / PropertyReference → no closed-set
+            # of legal literals; skip — user types the expression freehand.
+        if cat:
+            prop_to_cat[name] = cat
+
+    classes = {
+        "Field":   _comp.Field,
+        "Reg":     _comp.Reg,
+        "Regfile": _comp.Regfile,
+        "Addrmap": _comp.Addrmap,
+        "Mem":     _comp.Mem,
+        "Signal":  _comp.Signal,
+    }
+    dyn_allowed: dict[str, set[str]] = {cn: set() for cn in classes}
+    all_bindable: dict[str, set[str]] = {cn: set() for cn in classes}
+    for name, rule in rules.items():
+        for cn, cl in classes.items():
+            if cl in rule.bindable_to:
+                all_bindable[cn].add(name)
+                if rule.dyn_assign_allowed:
+                    dyn_allowed[cn].add(name)
+    return prop_to_cat, dyn_allowed, all_bindable
+
+
+_PROP_VALUE_CATALOGUES, _DYN_PROPS_BY_CLASS, _ALL_PROPS_BY_CLASS = _build_property_metadata()
+
+
+# Property docstrings. The bulk catalogue (`SYSTEMRDL_PROPERTIES` above)
+# already has the per-name explanation; we reuse it for `->` popup detail.
+def _prop_doc(name: str) -> str:
+    return SYSTEMRDL_PROPERTIES.get(name, "SystemRDL property.")
+
+
+# Build the assignment regex from every property the compiler knows about
+# (not just the ones with closed value sets — the user might type
+# ``regwidth = 32`` and want VSCode to recognise the context even though
+# we have nothing to suggest). Sort longest-first so e.g. `incrsaturate`
+# wins over `saturate`.
+_ALL_PROP_NAMES = {n for cls in _ALL_PROPS_BY_CLASS.values() for n in cls}
 _COMPLETION_CONTEXT_RE = re.compile(
-    r"\b(sw|hw|onwrite|onread|addressing|precedence)\s*=\s*\w*$"
+    r"\b(" + "|".join(sorted(_ALL_PROP_NAMES, key=len, reverse=True))
+    + r")\s*=\s*\w*$"
+)
+# Member access — `WIDE_REG.<cursor>` or `top.WIDE_REG.<cursor>`. The
+# trailing ``\w*`` lets the popup stay open while the user types a
+# partial member name.
+_MEMBER_ACCESS_RE = re.compile(
+    r"([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\.(\w*)$"
+)
+# Property access — `WIDE_REG->reset` etc. SystemRDL clause 12 dynamic
+# property assignment.
+_PROPERTY_ACCESS_RE = re.compile(
+    r"([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*->\s*(\w*)$"
 )
 
 
 def _completion_context(text: str, line_0b: int, char_0b: int) -> str:
     """Detect what the cursor is right of, so we can narrow the suggestion list.
 
-    Returns ``"sw_value"`` / ``"hw_value"`` / ``"onwrite_value"`` /
-    ``"onread_value"`` for property RHS contexts; ``"general"`` otherwise.
-    Single-line match — SystemRDL property assignments rarely span lines.
+    Returns:
+        - ``"value:<prop>"`` for property RHS contexts (``rclr = `` →
+          ``"value:rclr"``). The caller maps the property name to its
+          legal-value catalogue.
+        - ``"member:<dotted.path>"`` after ``WIDE_REG.`` / ``top.CTRL.``.
+        - ``"property:<dotted.path>"`` after ``WIDE_REG->`` / ``CTRL.enable->``.
+        - ``"general"`` otherwise.
+
+    Single-line match — SystemRDL accessors rarely span lines.
     """
     lines = text.splitlines()
     if line_0b < 0 or line_0b >= len(lines):
@@ -185,7 +308,16 @@ def _completion_context(text: str, line_0b: int, char_0b: int) -> str:
     prefix = lines[line_0b][:char_0b]
     m = _COMPLETION_CONTEXT_RE.search(prefix)
     if m:
-        return f"{m.group(1)}_value"
+        return f"value:{m.group(1)}"
+    # Property access checked BEFORE member: `a->b` starts with `a-` so the
+    # member regex's `\.` wouldn't fire, but explicit ordering keeps intent
+    # clear if either pattern grows.
+    pm = _PROPERTY_ACCESS_RE.search(prefix)
+    if pm:
+        return f"property:{pm.group(1)}"
+    mm = _MEMBER_ACCESS_RE.search(prefix)
+    if mm:
+        return f"member:{mm.group(1)}"
     return "general"
 
 
@@ -215,16 +347,11 @@ def _completion_items_static() -> list[CompletionItem]:
 
 def _completion_items_for_context(context: str) -> list[CompletionItem]:
     """Return the value subset for a property-RHS context, or [] for general."""
-    if context in ("sw_value", "hw_value"):
-        return _make_items(SYSTEMRDL_RW_VALUES, CompletionItemKind.EnumMember)
-    if context == "onwrite_value":
-        return _make_items(SYSTEMRDL_ONWRITE_VALUES, CompletionItemKind.EnumMember)
-    if context == "onread_value":
-        return _make_items(SYSTEMRDL_ONREAD_VALUES, CompletionItemKind.EnumMember)
-    if context == "addressing_value":
-        return _make_items(SYSTEMRDL_ADDRESSING_VALUES, CompletionItemKind.EnumMember)
-    if context == "precedence_value":
-        return _make_items(SYSTEMRDL_PRECEDENCE_VALUES, CompletionItemKind.EnumMember)
+    if context.startswith("value:"):
+        prop = context[len("value:"):]
+        cat = _PROP_VALUE_CATALOGUES.get(prop)
+        if cat:
+            return _make_items(cat, CompletionItemKind.EnumMember)
     return []
 
 
@@ -270,6 +397,420 @@ def _completion_items_for_user_properties(roots: list[RootNode]) -> list[Complet
                     f"User-defined property `{name}` ({valid_name}). "
                     f"Bindable to: {kinds}."
                 ),
+            )
+        )
+    return items
+
+
+def _enclosing_instance_scope(text: str, line_0b: int, char_0b: int) -> str | None:
+    """Best-effort: dotted instance path of the cursor's enclosing addrmap.
+
+    Walks backward through balanced ``{`` / ``}`` (strings + comments
+    stripped to whitespace so braces inside literals don't confuse us) and
+    looks at the token immediately before each enclosing ``{``. When that
+    token is the INSTANCE name of an addrmap or regfile (e.g. the ``top``
+    in ``addrmap top { … }``, NOT the type ``dma_channel_t`` in
+    ``regfile dma_channel_t { … }``), it joins the chain into a dotted
+    prefix the caller can use to scope instance suggestions.
+
+    Returns ``None`` when no enclosing instance is detectable — completion
+    falls back to the unscoped global list.
+    """
+    lines = text.splitlines()
+    if line_0b < 0 or line_0b >= len(lines):
+        return None
+
+    # Cursor offset into the full text.
+    cursor_off = sum(len(L) + 1 for L in lines[:line_0b]) + char_0b
+    if cursor_off > len(text):
+        cursor_off = len(text)
+
+    # Strip strings + comments so braces inside them don't unbalance the scan.
+    cleaned = re.sub(r'"(?:\\.|[^"\\])*"', lambda m: " " * len(m.group(0)), text)
+    cleaned = re.sub(r"//[^\n]*", lambda m: " " * len(m.group(0)), cleaned)
+    cleaned = re.sub(
+        r"/\*[\s\S]*?\*/",
+        lambda m: re.sub(r"[^\n]", " ", m.group(0)),
+        cleaned,
+    )
+
+    # Walk backward from cursor, collecting the token preceding each `{`
+    # that the cursor is inside. We only care about INSTANCE-style scopes;
+    # type definitions (``regfile dma_channel_t {``) intentionally fall
+    # through, since the body is the type's template — completing instance
+    # names there is misleading.
+    chain: list[str] = []
+    depth = 0
+    i = cursor_off - 1
+    while i >= 0:
+        c = cleaned[i]
+        if c == "}":
+            depth += 1
+        elif c == "{":
+            if depth == 0:
+                # Find the token (and its preceding kind keyword) that opens
+                # this brace. Look back skipping whitespace.
+                j = i - 1
+                while j >= 0 and cleaned[j].isspace():
+                    j -= 1
+                # Read a backwards identifier.
+                end = j + 1
+                while j >= 0 and (cleaned[j].isalnum() or cleaned[j] == "_"):
+                    j -= 1
+                ident = cleaned[j + 1:end]
+                # Skip back over whitespace to look for `addrmap`/`regfile`/etc.
+                k = j
+                while k >= 0 and cleaned[k].isspace():
+                    k -= 1
+                kw_end = k + 1
+                while k >= 0 and (cleaned[k].isalnum() or cleaned[k] == "_"):
+                    k -= 1
+                kw = cleaned[k + 1:kw_end]
+                if kw in ("addrmap", "regfile", "reg", "field", "mem"):
+                    # Type definition — `<kw> TYPE_NAME { ... }`. Skip; type
+                    # bodies define a template, instance refs aren't valid here.
+                    pass
+                elif ident:
+                    # Bare identifier before `{` — this is an instance scope
+                    # like `top { ... }` (post-instantiation form) or, more
+                    # commonly, an inline body. Treat as instance.
+                    chain.append(ident)
+                # Anonymous / unrecognised → don't add a scope segment but
+                # keep walking outward.
+                depth = 0
+            else:
+                depth -= 1
+        i -= 1
+
+    if not chain:
+        return None
+    chain.reverse()
+    return ".".join(chain)
+
+
+def _resolve_node_by_path(roots: list[RootNode], dotted: str) -> Any | None:
+    """Resolve ``a.b.c`` against the elaborated tree, returning the node.
+
+    Tries two interpretations: (1) absolute from a root (``top.CTRL.enable``),
+    (2) suffix-match where the last unique instance with that bare name is
+    picked (``WIDE_REG`` works without typing ``top.``). Returns ``None``
+    if ambiguous-no-match.
+    """
+    from systemrdl.node import AddrmapNode, MemNode, RegfileNode, RegNode
+
+    segs = [s for s in dotted.split(".") if s]
+    if not segs:
+        return None
+
+    def descend(node: Any, names: list[str]) -> Any | None:
+        cur = node
+        for nm in names:
+            nxt = None
+            try:
+                for child in cur.children(unroll=False, skip_not_present=False):
+                    if getattr(child, "inst_name", None) == nm:
+                        nxt = child
+                        break
+                if nxt is None and isinstance(cur, RegNode):
+                    for f in cur.fields(skip_not_present=False):
+                        if getattr(f, "inst_name", None) == nm:
+                            nxt = f
+                            break
+            except Exception:
+                return None
+            if nxt is None:
+                return None
+            cur = nxt
+        return cur
+
+    # Absolute from a root.
+    for r in roots:
+        try:
+            for c in r.children(unroll=False, skip_not_present=False):
+                if getattr(c, "inst_name", None) == segs[0]:
+                    found = descend(c, segs[1:])
+                    if found is not None:
+                        return found
+        except Exception:
+            continue
+
+    # Suffix match: walk every node, return the unique one whose inst_name
+    # equals the LAST segment AND whose ancestor names match the leading
+    # segments. ``children()`` on a RegNode already yields fields, so the
+    # walk recurses uniformly without a separate fields() pass.
+    matches: list[Any] = []
+
+    def walk(node: Any, ancestry: list[str]) -> None:
+        try:
+            kids = list(node.children(unroll=False, skip_not_present=False))
+        except Exception:
+            kids = []
+        for c in kids:
+            nm = getattr(c, "inst_name", None) or ""
+            new_anc = ancestry + [nm]
+            if nm == segs[-1]:
+                tail = new_anc[-len(segs):] if len(segs) <= len(new_anc) else None
+                if tail == segs:
+                    matches.append(c)
+            walk(c, new_anc)
+
+    for r in roots:
+        walk(r, [])
+
+    # Dedupe by node identity — two walk paths can hit the same node when
+    # children()/fields() overlap on some compiler versions.
+    unique: list[Any] = []
+    seen_ids: set[int] = set()
+    for m in matches:
+        mid = id(m)
+        if mid in seen_ids:
+            continue
+        seen_ids.add(mid)
+        unique.append(m)
+    if len(unique) == 1:
+        return unique[0]
+    if len(unique) > 1:
+        # Ambiguous bare name (e.g. ``DMA_BASE_ADDR`` instantiated under 4
+        # channels). When every match is an instance of the same type the
+        # structure is identical, so for completion purposes any one of
+        # them works — return the first. Distinct types stay ambiguous.
+        type_names = set()
+        for m in unique:
+            inst = getattr(m, "inst", None)
+            tn = getattr(inst, "type_name", None) if inst is not None else None
+            type_names.add(tn or type(m).__name__)
+        if len(type_names) == 1:
+            return unique[0]
+    return None
+
+
+_FIELD_BUILTIN_REFS: dict[str, str] = {
+    # Reduction operators (SystemRDL 2.0 §11.1.2): bitwise reductions of
+    # all bits in the field. Most commonly used to wire status outputs.
+    "anded": "Bitwise AND of all field bits.",
+    "ored":  "Bitwise OR of all field bits.",
+    "xored": "Bitwise XOR (parity) of all field bits.",
+    # Interrupt-field references (§9.7).
+    "intr": "Interrupt-pending output (only on `intr` fields).",
+    "halt": "Halt-pending output (only on `halt`-style intr fields).",
+}
+
+
+def _completion_items_for_members(roots: list[RootNode], dotted: str) -> list[CompletionItem]:
+    """Children of the node at ``dotted``. For fields: built-in references
+    (``.anded``/``.ored``/``.xored``/``.intr``/``.halt``). Empty if path
+    didn't resolve.
+
+    ``RegNode.children()`` already yields fields, so a single walk covers
+    both addressable children and field leaves of regs.
+    """
+    from systemrdl.node import (
+        AddrmapNode,
+        FieldNode,
+        MemNode,
+        RegfileNode,
+        RegNode,
+    )
+
+    node = _resolve_node_by_path(roots, dotted)
+    if node is None:
+        return []
+    if isinstance(node, FieldNode):
+        # Field is a leaf in the instance hierarchy, but `.<builtin>` is
+        # still valid syntax — surface the reduction + intr references.
+        items_field = _make_items(_FIELD_BUILTIN_REFS, CompletionItemKind.Property)
+        for it in items_field:
+            it.detail = "field reference"
+        return items_field
+    items: list[CompletionItem] = []
+
+    def kind_for(c: Any) -> CompletionItemKind:
+        if isinstance(c, FieldNode):
+            return CompletionItemKind.Field
+        if isinstance(c, RegNode):
+            return CompletionItemKind.Variable
+        if isinstance(c, RegfileNode):
+            return CompletionItemKind.Module
+        return CompletionItemKind.Class
+
+    seen: set[str] = set()
+    try:
+        for c in node.children(unroll=False, skip_not_present=False):
+            nm = getattr(c, "inst_name", None)
+            if not nm or nm in seen:
+                continue
+            seen.add(nm)
+            type_label = type(c).__name__.replace("Node", "").lower()
+            bits = ""
+            if isinstance(c, FieldNode):
+                try:
+                    bits = f" [{c.msb}:{c.lsb}]"
+                except Exception:
+                    pass
+            items.append(
+                CompletionItem(
+                    label=nm,
+                    kind=kind_for(c),
+                    detail=f"{type_label}{bits}",
+                    documentation=f"`{dotted}.{nm}` ({type_label}{bits})",
+                    filter_text=nm,
+                )
+            )
+    except Exception:
+        pass
+    return items
+
+
+def _completion_items_for_properties_of(
+    roots: list[RootNode], dotted: str,
+) -> list[CompletionItem]:
+    """SystemRDL properties **valid behind ``->``** for the node at ``dotted``.
+
+    Filtered through systemrdl-compiler's ``dyn_assign_allowed`` flag —
+    properties like ``regwidth`` / ``accesswidth`` / ``shared`` / ``bridge``
+    cannot be assigned dynamically (they're structural / locked at
+    elaboration time), so they're omitted from the popup. Otherwise the
+    user gets misleading suggestions that the compiler will reject.
+    """
+    from systemrdl.node import (
+        AddrmapNode,
+        FieldNode,
+        MemNode,
+        RegfileNode,
+        RegNode,
+        SignalNode,
+    )
+
+    node = _resolve_node_by_path(roots, dotted)
+    if node is None:
+        return []
+    cls_lookup = [
+        (FieldNode,   "Field"),
+        (RegNode,     "Reg"),
+        (RegfileNode, "Regfile"),
+        (AddrmapNode, "Addrmap"),
+        (MemNode,     "Mem"),
+        (SignalNode,  "Signal"),
+    ]
+    cls_name = next((cn for nc, cn in cls_lookup if isinstance(node, nc)), None)
+    if cls_name is None:
+        return []
+    allowed = _DYN_PROPS_BY_CLASS.get(cls_name, set())
+    catalogue = {n: _prop_doc(n) for n in sorted(allowed)}
+    return _make_items(catalogue, CompletionItemKind.Property)
+
+
+def _completion_items_for_instances(
+    roots: list[RootNode], scope_prefix: str | None = None,
+) -> list[CompletionItem]:
+    """Walk the elaborated tree, surface reg/field/container instance names.
+
+    Dedupe by short name: when the same name (e.g. ``DMA_BASE_ADDR``) is
+    instantiated multiple times via a shared regfile type, the popup gets
+    one entry whose detail shows the instance count and a sample path.
+    Documentation lists every full path so the user can disambiguate.
+
+    ``scope_prefix`` (if provided) restricts the walk to instances whose
+    full dotted path begins with that prefix — used by the editor-side
+    scope filter (``addrmap top { … cursor … }`` only suggests names
+    actually visible in ``top.``).
+    """
+    from systemrdl.node import (
+        AddrmapNode,
+        FieldNode,
+        MemNode,
+        RegfileNode,
+        RegNode,
+    )
+
+    def kind_for(node: Any) -> CompletionItemKind:
+        if isinstance(node, FieldNode):
+            return CompletionItemKind.Field
+        if isinstance(node, RegNode):
+            return CompletionItemKind.Variable
+        if isinstance(node, RegfileNode):
+            return CompletionItemKind.Module
+        if isinstance(node, (AddrmapNode, MemNode)):
+            return CompletionItemKind.Class
+        return CompletionItemKind.Reference
+
+    # name → (kind, type_label, [paths], first_addr_str)
+    grouped: dict[str, dict[str, Any]] = {}
+
+    def remember(name: str, node: Any, path: str) -> None:
+        type_label = type(node).__name__.replace("Node", "").lower()
+        try:
+            addr = getattr(node, "absolute_address", None)
+            addr_str = f" @ 0x{addr:x}" if isinstance(addr, int) else ""
+        except Exception:
+            addr_str = ""
+        entry = grouped.get(name)
+        if entry is None:
+            grouped[name] = {
+                "kind": kind_for(node),
+                "type_label": type_label,
+                "paths": [path],
+                "addr_str": addr_str,
+            }
+        else:
+            entry["paths"].append(path)
+
+    def walk(node: Any, segs: list[str]) -> None:
+        for child in node.children(unroll=False, skip_not_present=False):
+            name = getattr(child, "inst_name", None)
+            if not name:
+                continue
+            path = ".".join(segs + [name])
+            if scope_prefix is None or path.startswith(scope_prefix):
+                remember(name, child, path)
+            if isinstance(child, (AddrmapNode, RegfileNode, MemNode)):
+                walk(child, segs + [name])
+            elif isinstance(child, RegNode):
+                # Surface field names too — `field.bitfield` references appear
+                # in counter / dynamic property contexts.
+                for f in child.fields(skip_not_present=False):
+                    fname = getattr(f, "inst_name", None)
+                    if not fname:
+                        continue
+                    fpath = ".".join(segs + [name, fname])
+                    if scope_prefix is None or fpath.startswith(scope_prefix):
+                        remember(fname, f, fpath)
+
+    for r in roots:
+        try:
+            walk(r, [])
+        except Exception:
+            # systemrdl-compiler can raise on traversal of partially-constructed
+            # trees during a stale-cache window. Skip the root rather than crash
+            # the whole completion request.
+            continue
+
+    items: list[CompletionItem] = []
+    for name, entry in grouped.items():
+        paths: list[str] = entry["paths"]
+        count = len(paths)
+        first_path = paths[0]
+        if count == 1:
+            detail = f"{entry['type_label']}{entry['addr_str']} · {first_path}"
+            doc = f"`{first_path}` ({entry['type_label']})"
+        else:
+            detail = f"{entry['type_label']} · {count} instances"
+            # List up to first 8 paths in docs so big designs don't dump 25k
+            # lines into the side panel; a one-liner footer flags the rest.
+            shown = paths[:8]
+            extra = "" if count <= 8 else f"\n…and {count - 8} more"
+            doc = (
+                f"{count} instances of `{name}` ({entry['type_label']}):\n"
+                + "\n".join(f"- `{p}`" for p in shown)
+                + extra
+            )
+        items.append(
+            CompletionItem(
+                label=name,
+                kind=entry["kind"],
+                detail=detail,
+                documentation=doc,
+                filter_text=name,
             )
         )
     return items

@@ -1,5 +1,5 @@
 import { memo, useMemo, useState } from 'react';
-import type { EncodeEntry, Field, Reg, SourceLoc, Transport } from './types';
+import type { EncodeEntry, Field, ParameterBinding, Reg, SourceLoc, Transport } from './types';
 import { BitGrid } from './BitGrid';
 
 type Props = {
@@ -48,6 +48,9 @@ function DetailInner({ reg, path, transport }: Props) {
         <span className="k">Access</span><span className="v">{reg.accessSummary || '—'}</span>
       </div>
       {reg.desc && <div className="desc">{reg.desc}</div>}
+      {reg.parameters && reg.parameters.length > 0 && (
+        <ParametersTable parameters={reg.parameters} />
+      )}
       {reg.accessWidth && reg.accessWidth !== reg.width && (
         <div className="rdl-split-access">
           <strong>Split access:</strong>{' '}
@@ -229,6 +232,40 @@ function FieldRow({
       )}
     </div>
   );
+}
+
+function ParametersTable({ parameters }: { parameters: ParameterBinding[] }) {
+  return (
+    <div className="rdl-parameters" onClick={e => e.stopPropagation()}>
+      <div className="rdl-parameters-title">Parameters</div>
+      <table className="rdl-parameters-table">
+        <thead>
+          <tr><th>Name</th><th>Type</th><th>Value</th></tr>
+        </thead>
+        <tbody>
+          {parameters.map((p, i) => (
+            <tr key={i}>
+              <td className="n"><code>{p.name}</code></td>
+              <td className="t">{p.type ?? '—'}</td>
+              <td className="v"><code>{renderParamValue(p.value)}</code></td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function renderParamValue(v: unknown): string {
+  if (v === null || v === undefined) return '—';
+  if (typeof v === 'number' && Number.isInteger(v)) {
+    // Integers render in both decimal and hex when non-trivial — matches the
+    // muscle memory of register people who think in both bases.
+    return v >= 16 ? `${v} (0x${v.toString(16)})` : String(v);
+  }
+  if (typeof v === 'boolean' || typeof v === 'number') return String(v);
+  if (typeof v === 'string') return v;
+  return String(v);
 }
 
 function EncodeTable({ entries }: { entries: EncodeEntry[] }) {

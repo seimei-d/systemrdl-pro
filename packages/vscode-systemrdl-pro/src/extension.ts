@@ -352,11 +352,10 @@ async function startServer(context: vscode.ExtensionContext): Promise<void> {
     outputChannel?.info(`LSP started via ${python}`);
     signalClientReady();
 
-    // TODO-1: server-pushed "tree changed" notifications eliminate the wait
-    // for didSaveTextDocument. The payload is metadata-only (uri + version);
-    // refreshMemoryMap then asks for the body only when our cached version
-    // is older. Skip the refresh when no panel is open for that URI — no
-    // point re-fetching a tree nobody is rendering.
+    // Server-pushed "tree changed" — metadata-only payload (uri + version).
+    // refreshMemoryMap fetches the body only if our cached version is older.
+    // Skip when no panel is open for that URI — no point re-fetching a tree
+    // nobody is rendering.
     lifecycleDisposables.push(
       client.onNotification('rdl/elaboratedTreeChanged', (params: { uri: string; version: number }) => {
         if (!params || typeof params.uri !== 'string') return;
@@ -533,7 +532,7 @@ function showRestartBanner(): void {
 }
 
 // ---------------------------------------------------------------------------
-// Memory Map webview (Week 4 walking skeleton)
+// Memory Map webview
 // ---------------------------------------------------------------------------
 
 async function showMemoryMap(context: vscode.ExtensionContext): Promise<void> {
@@ -604,7 +603,15 @@ function attachMemoryMapPanel(
     context.subscriptions,
   );
   panel.webview.onDidReceiveMessage(
-    (msg: WebviewMessage) => handleWebviewMessage(msg, uri),
+    (msg: WebviewMessage) => {
+      // handleWebviewMessage is async; the listener slot is sync. Without
+      // an explicit catch, rejections from `revealLocation` /
+      // `clipboard.writeText` / etc. surface as unhandled promise rejections
+      // in the extension host log.
+      handleWebviewMessage(msg, uri).catch(err =>
+        outputChannel?.warn(`webview message handler failed (${msg.type}): ${err}`),
+      );
+    },
     undefined,
     context.subscriptions,
   );
@@ -771,7 +778,15 @@ async function refreshMemoryMap(uri: string): Promise<void> {
   // if anything was dropped.
   if (entry.refreshing) {
     entry.refreshQueued = true;
-    return entry.refreshing;
+    // Drain the entire chain, not just the in-flight: when the current
+    // run's `finally` fires, it triggers the queued follow-up which
+    // re-assigns `entry.refreshing`. Returning `entry.refreshing`
+    // resolved at the END of the original run, before the queued one
+    // started — callers gating on "fresh tree available" got a
+    // stale-positive signal. Loop until the chain drains so the awaited
+    // promise reflects the actual freshest state.
+    while (entry.refreshing) await entry.refreshing;
+    return;
   }
   const run = () => {
     const p = doRefreshMemoryMap(uri, entry).finally(() => {

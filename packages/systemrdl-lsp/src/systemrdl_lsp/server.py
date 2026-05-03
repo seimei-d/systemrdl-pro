@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import asyncio
 import atexit
-import dataclasses
 import logging
 import multiprocessing as mp
 import pathlib
@@ -63,7 +62,6 @@ from pygls.lsp.server import LanguageServer
 from systemrdl.messages import Severity
 
 from ._uri import _path_to_uri, _uri_to_path
-from .cache import DiskCache, make_key
 from .code_actions import _code_actions_for_range
 from .compile import (
     CachedElaboration,
@@ -119,7 +117,6 @@ from .diagnostics import (
 )
 from .formatting import _document_formatting_edits, _format_text
 from .hover import (
-    _format_hex,
     _hover_for_word,
     _hover_text_for_node,
     _node_at_position,
@@ -141,7 +138,6 @@ from .serialize import (
     ELABORATED_TREE_SCHEMA_VERSION,
     _field_access_token,
     _hex,
-    _safe_get_property,
     _serialize_addressable,
     _serialize_field,
     _serialize_reg,
@@ -152,6 +148,23 @@ from .serialize import (
     _build_node_index,
     expand_node,
 )
+from ._handlers_lsp import register as register_lsp_handlers
+from ._handlers_rdl import (
+    handle_elaborated_tree,
+    handle_expand_node,
+    handle_include_paths,
+)
+from ._state import (
+    ELABORATION_TIMEOUT_SECONDS,
+    ELABORATION_TIMEOUT_SECONDS_MAX,
+    ELABORATION_TIMEOUT_SECONDS_MIN,
+    ServerState,
+)
+from ._text_utils import (
+    _build_selection_ranges,
+    _is_valid_identifier,
+    _iter_rdl_files,
+)
 
 if TYPE_CHECKING:
     from systemrdl.node import RootNode
@@ -161,138 +174,7 @@ logger = logging.getLogger(__name__)
 from systemrdl_lsp import __version__ as SERVER_VERSION  # noqa: E402  pulled from package __init__
 
 
-def _iter_rdl_files(root: pathlib.Path, exclude_dirs: set[str]):
-    """Yield every ``.rdl`` file under ``root``, skipping noisy directory names.
-
-    Used by the workspace pre-index. Errors during traversal (permission denied,
-    broken symlinks) are silently skipped — the pre-index is best-effort, not
-    a hard guarantee.
-    """
-    try:
-        for entry in root.iterdir():
-            if entry.is_dir():
-                if entry.name in exclude_dirs or entry.name.startswith("."):
-                    continue
-                yield from _iter_rdl_files(entry, exclude_dirs)
-            elif entry.is_file() and entry.suffix.lower() == ".rdl":
-                yield entry
-    except (PermissionError, OSError):
-        return
-
-
-def _build_selection_ranges(
-    text: str, lines: list[str], line_0b: int, char_0b: int
-) -> list[Any]:
-    """Walk outward from the cursor position through enclosing `{...}` blocks.
-
-    Returns a list of LSP ``Range`` objects, **innermost first**. Caller links
-    them parent-pointer-style for ``textDocument/selectionRange``. Pure textual
-    scan — strings/comments are stripped to whitespace so braces inside them
-    don't confuse the matcher (same trick as folding ranges).
-    """
-    import re as _re
-
-    if line_0b < 0 or line_0b >= len(lines):
-        return []
-    line = lines[line_0b]
-    if char_0b < 0 or char_0b > len(line):
-        return []
-
-    # Innermost: the word under cursor.
-    word = _word_at_position(text, line_0b, char_0b)
-    word_range: Range | None = None
-    if word:
-        m = _re.search(rf"\b{_re.escape(word)}\b", line)
-        if m and m.start() <= char_0b <= m.end():
-            word_range = Range(
-                start=Position(line=line_0b, character=m.start()),
-                end=Position(line=line_0b, character=m.end()),
-            )
-
-    # Strip strings/comments to neutral whitespace so brace counting doesn't
-    # see literals or block-comment braces.
-    cleaned = _re.sub(r'"(?:\\.|[^"\\])*"', lambda m: " " * len(m.group(0)), text)
-    cleaned = _re.sub(r"//[^\n]*", lambda m: " " * len(m.group(0)), cleaned)
-    cleaned = _re.sub(
-        r"/\*[\s\S]*?\*/",
-        lambda m: _re.sub(r"[^\n]", " ", m.group(0)),
-        cleaned,
-    )
-
-    # Prefix-sum of line start offsets so both offset_of and pos_of
-    # are O(1) / O(log n) instead of O(n) per call. pos_of is called
-    # 2x per enclosing brace pair, so deep nesting in a 10k-line file
-    # used to be O(K*N) where K is nesting depth.
-    line_starts: list[int] = [0]
-    for ln in lines:
-        line_starts.append(line_starts[-1] + len(ln) + 1)
-
-    def offset_of(li: int, co: int) -> int:
-        if li < 0:
-            return co
-        if li >= len(lines):
-            return line_starts[-1]
-        return line_starts[li] + co
-
-    import bisect as _bisect
-
-    def pos_of(off: int) -> Position:
-        # bisect_right gives the index of the line whose start is > off,
-        # so the line containing off is at idx-1.
-        idx = _bisect.bisect_right(line_starts, off) - 1
-        if idx < 0:
-            return Position(line=0, character=0)
-        if idx >= len(lines):
-            return Position(line=len(lines), character=0)
-        return Position(line=idx, character=off - line_starts[idx])
-
-    cursor_off = offset_of(line_0b, char_0b)
-    ranges: list[Range] = []
-    if word_range is not None:
-        ranges.append(word_range)
-
-    # Walk outward through balanced `{...}` pairs that contain the cursor.
-    # Strategy: scan all `{` `}` pairs in the file, keep those whose span
-    # includes the cursor offset, sort by span size ascending → innermost first.
-    stack: list[int] = []
-    pairs: list[tuple[int, int]] = []
-    for i, ch in enumerate(cleaned):
-        if ch == "{":
-            stack.append(i)
-        elif ch == "}" and stack:
-            start = stack.pop()
-            pairs.append((start, i + 1))
-    enclosing = [(s, e) for s, e in pairs if s <= cursor_off <= e]
-    enclosing.sort(key=lambda t: t[1] - t[0])
-    for s, e in enclosing:
-        ranges.append(Range(start=pos_of(s), end=pos_of(e)))
-
-    # Outermost: whole file.
-    last_line = max(0, len(lines) - 1)
-    ranges.append(Range(
-        start=Position(line=0, character=0),
-        end=Position(line=last_line, character=len(lines[last_line]) if lines else 0),
-    ))
-    return ranges
-
-
-def _is_valid_identifier(name: str) -> bool:
-    """Match SystemRDL identifier syntax: ``[A-Za-z_][A-Za-z0-9_]*``.
-
-    Used by rename to reject input that would corrupt the buffer.
-    """
-    import re as _re
-    return bool(_re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name))
-
-
 DEBOUNCE_SECONDS = 0.3
-# Eng-review safety net #3: cap a single elaborate pass at 60s wall-clock by default.
-# Past that we keep last-good (D7) and surface a synthetic diagnostic. A pathological
-# Perl-style include cycle in a third-party RDL pack should NOT freeze the editor.
-# Override per-workspace via systemrdl-pro.elaborationTimeoutMs (state.elaboration_timeout_s).
-ELABORATION_TIMEOUT_SECONDS = 120.0
-ELABORATION_TIMEOUT_SECONDS_MIN = 1.0
-ELABORATION_TIMEOUT_SECONDS_MAX = 600.0
 
 
 # Re-exports for backwards-compat — tests import several private helpers
@@ -335,7 +217,6 @@ __all__ = [
     "_field_access_token",
     "_fingerprint_roots",
     "_folding_ranges_from_text",
-    "_format_hex",
     "_format_text",
     "_hex",
     "_hover_for_word",
@@ -351,7 +232,6 @@ __all__ = [
     "_references_to_type",
     "_rename_locations",
     "_resolve_search_paths",
-    "_safe_get_property",
     "_semantic_tokens_for_text",
     "_serialize_addressable",
     "_serialize_field",
@@ -366,119 +246,6 @@ __all__ = [
     "_workspace_symbols_for_uri",
     "build_server",
 ]
-
-
-# ---------------------------------------------------------------------------
-# Server state
-# ---------------------------------------------------------------------------
-
-
-@dataclasses.dataclass
-class ServerState:
-    cache: ElaborationCache = dataclasses.field(default_factory=ElaborationCache)
-    pending: dict[str, asyncio.Task] = dataclasses.field(default_factory=dict)
-    include_paths: list[str] = dataclasses.field(default_factory=list)
-    # T2-A: forward and reverse maps over the include graph, populated from
-    # the set of source files the compiler actually opened on each successful
-    # elaborate (see ``compile._harvest_consumed_files``). Used to proactively
-    # re-elaborate any open consumer when a library file changes — the user
-    # no longer has to close-and-reopen ``stress_25k.rdl`` after editing
-    # ``types.rdl``. Both maps key on URIs.
-    include_graph: dict[str, set[str]] = dataclasses.field(default_factory=dict)
-    includee_to_includers: dict[str, set[str]] = dataclasses.field(default_factory=dict)
-    # T2-C: per-URI elaboration mutex. Replaces the TODO(T2) marker that used
-    # to live above ``_full_pass_async``. Same-URI didOpen+didSave races
-    # serialize through this lock so the second call sees the first call's
-    # cache.put before short-circuiting on buffer-equality. Different URIs
-    # still elaborate concurrently (subject to GIL contention).
-    uri_elab_locks: dict[str, asyncio.Lock] = dataclasses.field(default_factory=dict)
-    # Test-only override that stands in for the pygls workspace. When
-    # non-None, ``_is_open(uri)`` returns ``uri in self`` and
-    # ``_read_buffer(uri)`` returns ``self.get(uri)`` instead of going
-    # through ``server.workspace`` (which is not initialized in unit
-    # tests). Production code never sets this. Map: URI → buffer text.
-    test_open_buffers: dict[str, str] | None = None
-    # Substitution map for ``$VAR`` / ``${VAR}`` inside ```include "..."`` paths.
-    # Read from systemrdl-pro.includeVars; falls back to os.environ during expansion.
-    include_vars: dict[str, str] = dataclasses.field(default_factory=dict)
-    # URIs whose latest parse attempt failed but for which we still have a last-good
-    # cache entry. The viewer renders a stale-bar when a URI is in this set (D7).
-    stale_uris: set[str] = dataclasses.field(default_factory=set)
-    # URIs that need to skip the buffer-equality / canonicalize-skip
-    # short-circuits on the next elaborate (typically because a cascade
-    # trigger needs to re-elaborate the file even though its own buffer
-    # didn't change — an includee changed). Cleared the moment the
-    # bypass actually fires. Separate from ``stale_uris`` so the stale-
-    # transition logic in ``_apply_compile_result`` can detect a
-    # genuine False → True (or T → F) move; if cascade overloaded
-    # stale_uris like it used to, ``was_stale`` would always be True
-    # on the cascade path and the viewer would miss the new failure.
-    force_re_elaborate: set[str] = dataclasses.field(default_factory=set)
-    # Forwarded to RDLCompiler(perl_safe_opcodes=...). Empty list keeps the
-    # compiler's safe default. Power users adding `:base_io` for `print`-based
-    # codegen go through this setting.
-    perl_safe_opcodes: list[str] = dataclasses.field(default_factory=list)
-    # One-shot guard for the "Perl is not on PATH" notification. The diagnostic
-    # itself comes from systemrdl-compiler on every compile, so we only nag with
-    # the modal banner once per session.
-    perl_warning_shown: bool = False
-    # Per-primary-URI snapshot of which cross-file URIs we last published
-    # non-empty diagnostics to. Drives the clear-on-resolve cycle for
-    # `\`include`d files (a fixed error in common.rdl publishes [] there next
-    # compile so the stale squiggle disappears).
-    diag_affected: dict[str, set[str]] = dataclasses.field(default_factory=dict)
-    # Background pre-index toggles. workspace/symbol only sees files the user
-    # has opened; pre-warming the cache fixes Ctrl+T against unfamiliar trees.
-    # Default off — on a multi-window workspace each VSCode window starts its
-    # own LSP and the parallel pre-indexes pegged the CPU. Users who want
-    # workspace-wide search opt in via settings.json.
-    preindex_enabled: bool = False
-    preindex_max_files: int = 200
-    # Per-workspace override for ELABORATION_TIMEOUT_SECONDS. systemrdl-pro.elaborationTimeoutMs
-    # surfaces this so big chip designs (multi-subsystem aggregates in the 10-25k+ register
-    # range) can lift the 10s cap when their elaboration legitimately takes longer.
-    elaboration_timeout_s: float = ELABORATION_TIMEOUT_SECONDS
-    # T1.4: lazy-tree capability gate. Set in INITIALIZED handler from
-    # client.capabilities.experimental.systemrdlLazyTree. When True the LSP
-    # serves spine envelopes (Reg.loadState='placeholder') and answers
-    # rdl/expandNode requests; when False it serves full trees as before.
-    lazy_supported: bool = False
-    # T1.4: on-disk cache for spine envelopes. Survives window reload; second
-    # window in a multi-root workspace shares the cache via content key.
-    # Constructed lazily by the build_server() helper so tests can swap it.
-    disk_cache: DiskCache = dataclasses.field(default_factory=DiskCache)
-    # T3: ProcessPoolExecutor for cross-URI parallel elaborate. ``None``
-    # means in-thread (legacy/fallback). Initialized on INITIALIZED based
-    # on systemrdl-pro.elaborateInProcess; defaults to subprocess mode.
-    # Workers pre-warm via _pool_warmup_noop so the first real elaborate
-    # doesn't pay spawn + import cost on the user's typing latency.
-    elaborate_pool: Any = None  # ProcessPoolExecutor when active
-    # systemrdl-pro.elaborateInProcess setting. False (default) = use
-    # the subprocess pool. True = run in the asyncio default
-    # ThreadPoolExecutor as before T3 — kept as an escape hatch in
-    # case a future systemrdl-compiler upgrade breaks RootNode pickle
-    # compatibility, or for diagnosing pool-related issues in the field.
-    elaborate_in_process: bool = False
-    # Pool size cap. 2 covers the documented pain (small file behind
-    # one big elaborate). Bumping higher is fine but each worker holds
-    # ~150 MB resident at idle plus the in-flight tree, so 2-4 is the
-    # sweet spot for a developer machine. Surfaced as a setting if a
-    # future user reports needing more.
-    elaborate_pool_workers: int = 2
-    # T3-G: worker recycle threshold. Mitigates the upstream
-    # systemrdl-compiler memory leak (~5 MB per elaborate of a
-    # 40-reg fixture, observed in test_memory_growth_bounded). After
-    # this many successful subprocess elaborates we tear down the
-    # pool and spawn a fresh one — RSS comes back to baseline. 50
-    # gives a few minutes of editing on big designs before the
-    # next recycle, recycling itself is ~150 ms (worker spawn +
-    # _pool_worker_init), barely visible during a typing pause.
-    pool_max_elaborates: int = 50
-    # Counts successful subprocess elaborates since the current pool
-    # was spawned. Reset to 0 in ``_ensure_elaborate_pool``. When it
-    # hits ``pool_max_elaborates`` the elaborate-finished bookkeeping
-    # schedules a recycle and resets the counter.
-    pool_elaborate_count: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -683,13 +450,11 @@ def build_server() -> LanguageServer:
                 # Cache takes ownership of the temp file (it backs lazy
                 # src_ref reads for hover/documentSymbol). Old entry's
                 # temp file is unlinked there.
-                # Patch placeholder fields the pool worker couldn't know.
                 # Compute target version inline so we can stuff index + spine
                 # into the entry atomically through cache.put — without this,
                 # an expand request landing between cache.put and the field
                 # assignment sees node_index=None and triggers the slow
                 # fallback walk on the main process loop.
-                old = state.cache.get(uri)
                 target_version = (old.version if old else 0) + 1
                 if precomputed_spine is not None:
                     precomputed_spine["version"] = target_version
@@ -752,13 +517,10 @@ def build_server() -> LanguageServer:
             server, uri, messages, previously_affected
         )
 
-        # TODO-1 push: notify the client that a fresh elaborated tree is ready.
-        # Payload is metadata-only ({uri, version}); the client decides whether
-        # to fetch the full tree (rdl/elaboratedTree with sinceVersion). This
-        # eliminates the user-perceptible refresh delay on save (extension
-        # used to wait for didSaveTextDocument before pulling a fresh tree).
-        # T2-B: only fire when ast_changed — a fingerprint-skip path leaves
-        # cache.version untouched so the viewer's existing tree is current.
+        # Server-push of "fresh tree ready". Metadata-only payload; the client
+        # decides whether to fetch the body (rdl/elaboratedTree with
+        # sinceVersion). Skip when the fingerprint short-circuit kept
+        # ``cache.version`` untouched — there is nothing new to fetch.
         if version_after is not None:
             try:
                 server.protocol.notify(
@@ -1567,119 +1329,14 @@ def build_server() -> LanguageServer:
 
         asyncio.ensure_future(refresh())
 
-    @server.feature("textDocument/hover")
-    def _on_hover(_ls: LanguageServer, params: Any) -> Any | None:
-        from lsprotocol.types import Hover, MarkupContent, MarkupKind
-
-        cached = state.cache.get(params.text_document.uri)
-        if cached is None or not cached.roots:
-            return None
-
-        line, char = params.position.line, params.position.character
-
-        # 1. Instance lookup first — gives the richest answer when it hits.
-        # pass the LSP buffer-cache line reader through so
-        # _property_origin_hint avoids the synchronous disk read on the
-        # event loop. Falls back to disk inside hover.py if the reader
-        # comes up empty.
-        node = _node_at_position(cached.roots, line, char)
-        markdown = (
-            _hover_text_for_node(node, _file_line_reader)
-            if node is not None else None
-        )
-
-        # 2-3. Word-based catalogue lookup for keywords / properties / access values / type names.
-        if markdown is None:
-            word = _word_at_position(cached.text, line, char)
-            if word:
-                markdown = _hover_for_word(word, cached.roots)
-
-        if markdown is None:
-            return None
-        return Hover(contents=MarkupContent(kind=MarkupKind.Markdown, value=markdown))
-
-    # NOTE: these handlers used to be sync `def`. Pygls calls sync handlers
-    # directly on the asyncio event loop, blocking it for the full handler
-    # duration. On a 25k-reg design that meant `documentSymbol`, `foldingRange`,
-    # `inlayHint`, `codeLens`, and `workspace/symbol` each held the loop
-    # for several seconds — and any concurrent request (including expand)
-    # waited that whole time. Field-reported as "click reg in features
-    # waits 8+ seconds because LSP is busy walking stress's tree". Async
-    # wrappers + asyncio.to_thread offload the CPU walk so the loop stays
-    # responsive.
-    @server.feature("textDocument/documentSymbol")
-    async def _on_document_symbol(_ls: LanguageServer, params: Any) -> list[Any]:
-        cached = state.cache.get(params.text_document.uri)
-        if cached is None or not cached.roots:
-            return []
-        return await asyncio.to_thread(_document_symbols, cached.roots)
-
-    @server.feature("textDocument/foldingRange")
-    async def _on_folding(_ls: LanguageServer, params: Any) -> list[FoldingRange]:
-        cached = state.cache.get(params.text_document.uri)
-        text = cached.text if cached is not None else _read_buffer(params.text_document.uri) or ""
-        return await asyncio.to_thread(_folding_ranges_from_text, text)
-
-    @server.feature("textDocument/inlayHint")
-    async def _on_inlay_hint(_ls: LanguageServer, params: Any) -> list[InlayHint]:
-        cached = state.cache.get(params.text_document.uri)
-        if cached is None or not cached.roots:
-            return []
-        try:
-            target_path = _uri_to_path(params.text_document.uri)
-        except ValueError:
-            return []
-        path = cached.temp_path or target_path
-        return await asyncio.to_thread(
-            _inlay_hints_for_addressables, cached.roots, path, cached.text,
-        )
-
-    @server.feature("textDocument/codeLens")
-    async def _on_code_lens(_ls: LanguageServer, params: Any) -> list[CodeLens]:
-        cached = state.cache.get(params.text_document.uri)
-        if cached is None or not cached.roots:
-            return []
-        path = cached.temp_path or _uri_to_path(params.text_document.uri)
-        return await asyncio.to_thread(_code_lenses_for_addrmaps, cached.roots, path)
-
-    @server.feature("workspace/symbol")
-    async def _on_workspace_symbol(_ls: LanguageServer, params: Any) -> list[SymbolInformation]:
-        query = getattr(params, "query", "") or ""
-        entries = list(state.cache._entries.items())
-        def collect() -> list[SymbolInformation]:
-            out: list[SymbolInformation] = []
-            for uri, entry in entries:
-                if entry.roots:
-                    out.extend(_workspace_symbols_for_uri(uri, entry.roots, query))
-            return out
-        return await asyncio.to_thread(collect)
-
-    @server.feature("textDocument/completion")
-    def _on_completion(_ls: LanguageServer, params: Any) -> Any:
-        from lsprotocol.types import CompletionList
-
-        cached = state.cache.get(params.text_document.uri)
-        text = cached.text if cached is not None else _read_buffer(params.text_document.uri) or ""
-        ctx = _completion_context(text, params.position.line, params.position.character)
-        if ctx != "general":
-            return CompletionList(is_incomplete=False, items=_completion_items_for_context(ctx))
-        items = _completion_items_static()
-        if cached is not None and cached.roots:
-            items.extend(_completion_items_for_types(cached.roots))
-            items.extend(_completion_items_for_user_properties(cached.roots))
-        return CompletionList(is_incomplete=False, items=items)
-
     def _file_line_reader(path: pathlib.Path, line_idx: int) -> str | None:
         """Read line N from a workspace file, preferring the LSP buffer cache.
 
-        If the user has the file open with unsaved edits, the LSP's text-document
-        cache reflects those edits — use it so rename operates on what the user
-        actually sees. Falls back to disk for files not currently open.
+        If the user has the file open with unsaved edits, the LSP's text-
+        document cache reflects those edits — use it so rename operates on
+        what the user actually sees. Falls back to disk for files not
+        currently open.
         """
-        # Try LSP buffer cache first (active edit). The cache may carry the
-        # primary URI for an in-flight compile, but other files we read from
-        # disk; that's fine because rename's scope is single-document edits
-        # plus cross-file edits to disk-resident `\\\`include`d files.
         target_uri = path.resolve().as_uri()
         text = _read_buffer(target_uri)
         if text is None:
@@ -1692,762 +1349,23 @@ def build_server() -> LanguageServer:
             return lines[line_idx]
         return None
 
-    @server.feature("textDocument/prepareRename")
-    def _on_prepare_rename(_ls: LanguageServer, params: Any) -> Any | None:
-        """Validate that the cursor is on a renameable identifier.
-
-        We only rename top-level component type names — instance names and
-        keywords return None so VSCode shows "You cannot rename this element".
-        """
-        from lsprotocol.types import Position
-        from lsprotocol.types import Range as LSPRange
-
-        uri = params.text_document.uri
-        cached = state.cache.get(uri)
-        if cached is None or not cached.roots:
-            return None
-        word = _word_at_position(cached.text, params.position.line, params.position.character)
-        if not word:
-            return None
-        defs = _comp_defs_from_cached(cached.roots)
-        if word not in defs:
-            return None
-        # Return the cursor-line range of the word so VSCode anchors its
-        # rename input box correctly. The actual edits get computed in
-        # textDocument/rename below.
-        line = cached.text.splitlines()[params.position.line] if params.position.line < len(
-            cached.text.splitlines()
-        ) else ""
-        import re as _re
-        m = _re.search(rf"\b{_re.escape(word)}\b", line)
-        if m is None:
-            return None
-        return LSPRange(
-            start=Position(line=params.position.line, character=m.start()),
-            end=Position(line=params.position.line, character=m.end()),
-        )
-
-    @server.feature("textDocument/rename")
-    def _on_rename(_ls: LanguageServer, params: Any) -> Any | None:
-        """Compute a workspace edit that renames a type across declaration + uses."""
-        from lsprotocol.types import TextEdit, WorkspaceEdit
-
-        uri = params.text_document.uri
-        cached = state.cache.get(uri)
-        if cached is None or not cached.roots:
-            return None
-        word = _word_at_position(cached.text, params.position.line, params.position.character)
-        if not word:
-            return None
-        new_name = getattr(params, "new_name", None) or ""
-        # SystemRDL identifiers: [A-Za-z_][A-Za-z0-9_]*. Reject anything else
-        # so the user gets the standard VSCode "Can't rename" hint instead of
-        # a corrupt buffer.
-        if not new_name or not _is_valid_identifier(new_name):
-            return None
-
-        defs = _comp_defs_from_cached(cached.roots)
-        if word not in defs:
-            return None
-        if new_name in defs:
-            # Collision with another existing type — refuse rather than
-            # silently shadow.
-            return None
-
-        try:
-            original_path = _uri_to_path(uri)
-        except ValueError:
-            original_path = None
-        translate = (
-            {cached.temp_path: original_path}
-            if cached.temp_path is not None and original_path is not None
-            else None
-        )
-        locs = _rename_locations(word, cached.roots, translate, _file_line_reader)
-        if not locs:
-            return None
-
-        # Bucket edits by URI; LSP WorkspaceEdit.changes is a map[uri, TextEdit[]].
-        per_uri: dict[str, list[TextEdit]] = {}
-        for loc in locs:
-            per_uri.setdefault(loc.uri, []).append(
-                TextEdit(range=loc.range, new_text=new_name)
-            )
-        return WorkspaceEdit(changes=per_uri)
-
-    @server.feature("textDocument/documentHighlight")
-    def _on_document_highlight(_ls: LanguageServer, params: Any) -> list[Any]:
-        """Highlight every textual occurrence of the identifier under the cursor.
-
-        Implementation: regex-find every `\\b<word>\\b` match in the buffer.
-        Cheap and matches user expectation (highlight = same lexical token).
-        """
-        from lsprotocol.types import DocumentHighlight, DocumentHighlightKind
-
-        uri = params.text_document.uri
-        cached = state.cache.get(uri)
-        text = cached.text if cached is not None else _read_buffer(uri) or ""
-        word = _word_at_position(text, params.position.line, params.position.character)
-        if not word:
-            return []
-        import re as _re
-        pattern = _re.compile(rf"\b{_re.escape(word)}\b")
-        out: list[DocumentHighlight] = []
-        for line_idx, line in enumerate(text.splitlines()):
-            for m in pattern.finditer(line):
-                out.append(
-                    DocumentHighlight(
-                        range=Range(
-                            start=Position(line=line_idx, character=m.start()),
-                            end=Position(line=line_idx, character=m.end()),
-                        ),
-                        kind=DocumentHighlightKind.Text,
-                    )
-                )
-        return out
-
-    @server.feature("textDocument/selectionRange")
-    def _on_selection_range(_ls: LanguageServer, params: Any) -> list[Any]:
-        """Smart selection: expand cursor → word → enclosing `{...}` block(s) → file.
-
-        Pure textual implementation walks outward through brace pairs, no
-        elaboration dependency. Lets the user expand a selection from a
-        field name through its containing reg, regfile, addrmap, etc. with
-        Shift+Alt+Right.
-        """
-        from lsprotocol.types import SelectionRange as LSPSelectionRange
-
-        uri = params.text_document.uri
-        cached = state.cache.get(uri)
-        text = cached.text if cached is not None else _read_buffer(uri) or ""
-        if not text:
-            return []
-        lines = text.splitlines()
-        out: list[Any] = []
-        for pos in params.positions:
-            ranges = _build_selection_ranges(text, lines, pos.line, pos.character)
-            if not ranges:
-                out.append(LSPSelectionRange(
-                    range=Range(start=pos, end=pos),
-                    parent=None,
-                ))
-                continue
-            # Build LSP linked list: innermost first, parent pointers up.
-            parent: Any = None
-            for rng in ranges:
-                parent = LSPSelectionRange(range=rng, parent=parent)
-            out.append(parent)
-        return out
-
-    @server.feature(
-        "textDocument/signatureHelp",
-        SignatureHelpOptions(trigger_characters=["#", "("]),
+    register_lsp_handlers(
+        server, state,
+        read_buffer=_read_buffer,
+        file_line_reader=_file_line_reader,
     )
-    def _on_signature_help(_ls: LanguageServer, params: Any) -> Any | None:
-        """Signature help inside `#(...)` parametrized type instantiation.
-
-        Lightweight: when the cursor is inside a ``#(...)`` after a known
-        parametrized type, show its parameter names as the signature label.
-        Returns None for non-matching contexts, no error.
-        """
-        try:
-            uri = params.text_document.uri
-            cached = state.cache.get(uri)
-            text = cached.text if cached is not None else _read_buffer(uri) or ""
-            if not text:
-                return None
-            split_lines = text.splitlines()
-            line_text = (
-                split_lines[params.position.line]
-                if params.position.line < len(split_lines)
-                else ""
-            )
-            prefix = line_text[: params.position.character]
-            # Match `<TYPE> #(` immediately before the cursor (allowing stuff inside the parens).
-            import re as _re
-            m = _re.search(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*#\s*\([^)]*$", prefix)
-            if not m:
-                return None
-            type_name = m.group(1)
-            if cached is None or not cached.roots:
-                return None
-            defs = _comp_defs_from_cached(cached.roots)
-            comp = defs.get(type_name)
-            if comp is None:
-                return None
-            params_list = list(getattr(comp, "parameters", []) or [])
-            if not params_list:
-                return None
-            sig_label = f"{type_name} #({', '.join(p.name for p in params_list)})"
-            return SignatureHelp(
-                signatures=[
-                    SignatureInformation(
-                        label=sig_label,
-                        parameters=[
-                            ParameterInformation(label=p.name)
-                            for p in params_list
-                        ],
-                    )
-                ],
-                active_signature=0,
-                active_parameter=0,
-            )
-        except Exception:
-            logger.debug("signatureHelp handler failed", exc_info=True)
-            return None
-
-    @server.feature("textDocument/prepareTypeHierarchy")
-    def _on_prepare_type_hierarchy(_ls: LanguageServer, params: Any) -> list[Any] | None:
-        """Anchor for a type-hierarchy request — returns the item the user picked.
-
-        SystemRDL has no inheritance chain, so we treat "subtypes" as
-        "instantiations" (where this type is used). The anchor is the type's
-        declaration; subtypes is the list of instance source locations.
-        """
-        from lsprotocol.types import SymbolKind, TypeHierarchyItem
-
-        uri = params.text_document.uri
-        cached = state.cache.get(uri)
-        if cached is None or not cached.roots:
-            return None
-        word = _word_at_position(cached.text, params.position.line, params.position.character)
-        if not word:
-            return None
-        defs = _comp_defs_from_cached(cached.roots)
-        comp = defs.get(word)
-        if comp is None:
-            return None
-        try:
-            original_path = _uri_to_path(uri)
-        except ValueError:
-            original_path = None
-        translate = (
-            {cached.temp_path: original_path}
-            if cached.temp_path is not None and original_path is not None
-            else None
-        )
-        loc = _definition_location(comp, translate)
-        if loc is None:
-            return None
-        kind_label = type(comp).__name__.lower()
-        return [
-            TypeHierarchyItem(
-                name=word,
-                kind=SymbolKind.Class,
-                uri=loc.uri,
-                range=loc.range,
-                selection_range=loc.range,
-                detail=kind_label,
-                data={"typeName": word, "uri": uri},
-            )
-        ]
-
-    @server.feature("typeHierarchy/subtypes")
-    def _on_type_hierarchy_subtypes(_ls: LanguageServer, params: Any) -> list[Any]:
-        """Subtypes ≡ instances of the type. Reuses `_references_to_type`."""
-        from lsprotocol.types import SymbolKind, TypeHierarchyItem
-
-        item = getattr(params, "item", None)
-        if item is None:
-            return []
-        data = getattr(item, "data", None) or {}
-        type_name = data.get("typeName") if isinstance(data, dict) else None
-        cached_uri = data.get("uri") if isinstance(data, dict) else None
-        if not type_name or not cached_uri:
-            return []
-        cached = state.cache.get(cached_uri)
-        if cached is None or not cached.roots:
-            return []
-        try:
-            original_path = _uri_to_path(cached_uri)
-        except ValueError:
-            original_path = None
-        translate = (
-            {cached.temp_path: original_path}
-            if cached.temp_path is not None and original_path is not None
-            else None
-        )
-        refs = _references_to_type(type_name, cached.roots, False, translate)
-        return [
-            TypeHierarchyItem(
-                name=type_name,
-                kind=SymbolKind.Variable,
-                uri=ref.uri,
-                range=ref.range,
-                selection_range=ref.range,
-                detail="instance",
-            )
-            for ref in refs
-        ]
-
-    @server.feature("typeHierarchy/supertypes")
-    def _on_type_hierarchy_supertypes(_ls: LanguageServer, _params: Any) -> list[Any]:
-        """SystemRDL has no inheritance — no supertypes ever."""
-        return []
-
-    @server.feature("textDocument/references")
-    def _on_references(_ls: LanguageServer, params: Any) -> list[Location]:
-        """Find all instantiation sites of the type under the cursor.
-
-        Word-based: identifier at cursor → look up in comp_defs → walk every
-        cached elaborated tree for instances whose ``original_def`` matches.
-        Cross-file: instances in `\\`include`d files are reported with their
-        true URIs (same path-translate logic as goto-def).
-        """
-        uri = params.text_document.uri
-        cached = state.cache.get(uri)
-        if cached is None or not cached.roots:
-            return []
-        word = _word_at_position(cached.text, params.position.line, params.position.character)
-        if not word:
-            return []
-        defs = _comp_defs_from_cached(cached.roots)
-        if word not in defs:
-            return []
-        try:
-            original_path = _uri_to_path(uri)
-        except ValueError:
-            original_path = None
-        translate = (
-            {cached.temp_path: original_path}
-            if cached.temp_path is not None and original_path is not None
-            else None
-        )
-        include_decl = bool(getattr(params, "context", None) and params.context.include_declaration)
-        return _references_to_type(word, cached.roots, include_decl, translate)
-
-    @server.feature("textDocument/definition")
-    def _on_definition(_ls: LanguageServer, params: Any) -> list[Location] | Location | None:
-        uri = params.text_document.uri
-        cached = state.cache.get(uri)
-        if cached is None or not cached.roots:
-            return None
-        word = _word_at_position(cached.text, params.position.line, params.position.character)
-        if not word:
-            return None
-        try:
-            original_path = _uri_to_path(uri)
-        except ValueError:
-            original_path = None
-        translate = (
-            {cached.temp_path: original_path}
-            if cached.temp_path is not None and original_path is not None
-            else None
-        )
-        # Try multi-segment path first — `top.CTRL.enable` walks the elaborated
-        # tree segment-by-segment. Falls through to single-word lookup when
-        # the path has no dots.
-        path = _path_at_position(cached.text, params.position.line, params.position.character)
-        if path and "." in path:
-            loc = _resolve_path(cached.roots, path, translate)
-            if loc is not None:
-                return loc
-        defs = _comp_defs_from_cached(cached.roots)
-        comp = defs.get(word)
-        if comp is not None:
-            return _definition_location(comp, translate)
-        # Fallback: instance-name lookup. Catches signals (e.g. `resetsignal =
-        # my_rst;` jumps to `signal { ... } my_rst;`) and named registers /
-        # fields that aren't top-level type defs.
-        return _find_instance_by_name(cached.roots, word, translate)
-
-    @server.feature(
-        TEXT_DOCUMENT_SEMANTIC_TOKENS_FULL,
-        SemanticTokensLegend(
-            token_types=TOKEN_TYPES,
-            token_modifiers=TOKEN_MODIFIERS,
-        ),
-    )
-    async def _on_semantic_tokens(_ls: LanguageServer, params: Any) -> SemanticTokens:
-        """Compute semantic tokens for the buffer.
-
-        ``params: Any`` (not ``SemanticTokensParams``) is deliberate — pygls
-        2.x inspects the param annotation to decide whether to inject the
-        server as the first argument. With a typed lsprotocol annotation it
-        stripped the ``_ls`` slot and called us with only ``params``,
-        producing ``TypeError: missing 1 required positional argument``
-        on every keystroke (visible as editor-wide lag because VSCode
-        retries the failing request constantly).
-
-        Async + to_thread because the tokenizer walks the entire buffer
-        text; on an 880KB file that pinned the asyncio loop for ~hundreds
-        of ms, blocking concurrent requests like rdl/expandNode.
-        """
-        try:
-            uri: str | None = None
-            td = getattr(params, "text_document", None)
-            if td is not None:
-                uri = getattr(td, "uri", None)
-            if uri is None and isinstance(params, dict):
-                td_dict = params.get("textDocument") or params.get("text_document") or {}
-                uri = td_dict.get("uri") if isinstance(td_dict, dict) else None
-            if not uri:
-                return SemanticTokens(data=[])
-            text = _read_buffer(uri)
-            if text is None:
-                cached = state.cache.get(uri)
-                text = cached.text if cached is not None else ""
-            data = await asyncio.to_thread(_semantic_tokens_for_text, text)
-            if len(data) % 5 != 0:
-                logger.error(
-                    "semanticTokens/full: encoder produced %d ints (not a multiple of 5)",
-                    len(data),
-                )
-                return SemanticTokens(data=[])
-            return SemanticTokens(data=[int(x) for x in data])
-        except Exception:
-            logger.exception("semanticTokens/full handler failed; returning empty")
-            return SemanticTokens(data=[])
-
-    @server.feature("textDocument/formatting")
-    def _on_formatting(_ls: LanguageServer, params: Any) -> list[Any]:
-        """Conservative whitespace formatter.
-
-        Trims trailing whitespace, expands tabs to 4 spaces, ensures a single
-        trailing newline. Skips opinionated changes (alignment, brace style)
-        so the formatter never fights user style choices.
-        """
-        uri = params.text_document.uri
-        text = _read_buffer(uri)
-        if text is None:
-            cached = state.cache.get(uri)
-            text = cached.text if cached is not None else ""
-        if not text:
-            return []
-        tab_size = 4
-        opts = getattr(params, "options", None)
-        if opts is not None:
-            ts = getattr(opts, "tab_size", None)
-            if isinstance(ts, int) and ts > 0:
-                tab_size = ts
-        return _document_formatting_edits(text, tab_size)
-
-    @server.feature("textDocument/codeAction")
-    def _on_code_action(_ls: LanguageServer, params: Any) -> list[Any]:
-        """Surface quick fixes from the lightbulb.
-
-        Currently: "Add `= 0` reset value" for field instantiations missing
-        an explicit reset. Pure textual scan — no elaboration dependency, so
-        the action shows up even on broken files where the user is mid-edit.
-        """
-        uri = params.text_document.uri
-        text = _read_buffer(uri)
-        if text is None:
-            cached = state.cache.get(uri)
-            text = cached.text if cached is not None else ""
-        if not text:
-            return []
-        return _code_actions_for_range(uri, text, params.range)
-
-    @server.feature("textDocument/documentLink")
-    def _on_document_link(_ls: LanguageServer, params: Any) -> list[Any]:
-        """Resolve `\\`include` paths into clickable documentLinks.
-
-        Independent of elaboration — works even when the file has parse errors,
-        so the user can navigate around a broken file to fix it.
-        """
-        uri = params.text_document.uri
-        text = _read_buffer(uri)
-        if not text:
-            cached = state.cache.get(uri)
-            text = cached.text if cached is not None else ""
-        try:
-            primary_path = _uri_to_path(uri)
-        except ValueError:
-            return []
-        search_paths = [p for p, _src in _resolve_search_paths(uri, state.include_paths)]
-        return _document_links(text, primary_path, search_paths, state.include_vars)
 
     @server.feature("rdl/includePaths")
     def _on_include_paths(_ls: LanguageServer, params: Any) -> dict[str, Any]:
-        """Return the deduped, source-labeled include search path list for a URI.
-
-        Powers the "SystemRDL: Show effective include paths" command. Lets the
-        user see exactly which paths are in effect — formerly opaque, especially
-        with multiple sources (settings.json + peakrdl.toml + sibling-dir).
-        """
-        uri = None
-        if isinstance(params, dict):
-            uri = params.get("uri") or params.get("textDocument", {}).get("uri")
-        else:
-            uri = getattr(params, "uri", None)
-            if uri is None and hasattr(params, "text_document"):
-                uri = params.text_document.uri
-        if not uri:
-            return {"uri": None, "paths": []}
-        try:
-            resolved = _resolve_search_paths(uri, state.include_paths)
-        except (ValueError, OSError):
-            resolved = []
-        return {
-            "uri": uri,
-            "paths": [{"path": p, "source": src} for p, src in resolved],
-        }
-
-    def _disk_cache_key(uri: str) -> str | None:
-        """Compute the on-disk cache key for ``uri``.
-
-        Returns ``None`` if the URI doesn't correspond to a real file (in
-        which case we just skip the disk cache entirely — the in-memory
-        cache still works). Folds the systemrdl-compiler version so a
-        compiler upgrade auto-invalidates every cached envelope.
-        """
-        try:
-            path = _uri_to_path(uri)
-        except ValueError:
-            return None
-        try:
-            mtime_ns = path.stat().st_mtime_ns
-        except OSError:
-            return None
-        try:
-            import systemrdl as _systemrdl
-            compiler_version = getattr(_systemrdl, "__version__", "unknown")
-        except Exception:
-            compiler_version = "unknown"
-        # include_vars is part of the cache key. Same file with
-        # a different $VAR substitution map produces a different include
-        # graph and therefore a different elaborated tree.
-        return make_key(
-            path, mtime_ns, state.include_paths, compiler_version,
-            include_vars=state.include_vars,
-        )
+        return handle_include_paths(state, params)
 
     @server.feature("rdl/elaboratedTree")
     async def _on_elaborated_tree(_ls: LanguageServer, params: Any) -> dict[str, Any]:
-        """Custom JSON-RPC: viewer fetches the latest elaborated tree for a URI.
-
-        T1.4: now ``async`` and runs the (potentially multi-second) serialize
-        in ``asyncio.to_thread`` so the LSP event loop is never blocked.
-        Big designs no longer freeze hover / completion / diagnostics while
-        the spine is being built.
-
-        T1.4: when the client advertised ``experimental.systemrdlLazyTree``
-        capability the server returns a spine envelope (``Reg.loadState =
-        'placeholder'``, fields fetched on demand via ``rdl/expandNode``).
-        Old clients keep getting the full tree.
-
-        T1.4: spine envelopes are also persisted to ``DiskCache`` so a
-        VSCode window reload skips parse + elaborate + serialize for an
-        unchanged file. Cache key folds in mtime + include paths +
-        compiler version. Disk cache is only consulted for the lazy path
-        because spine envelopes are small (~10 MB even for 25k regs)
-        while full envelopes can hit 200 MB and aren't worth caching.
-
-        TODO-1 contract preserved:
-
-        - Request may include ``sinceVersion: int``. If it matches the LSP's
-          cached version, the response is a tiny ``{unchanged: true, version}``
-          envelope and the client keeps its previously-rendered tree intact.
-        - First request (no ``sinceVersion`` or stale value) returns the
-          serialized tree, cached on the LSP side keyed by ``(uri, version)``.
-
-        Schema: ``schemas/elaborated-tree.json`` v0.2.0. Returns the cached
-        last-good tree when the current parse has failed (design D7).
-        """
-        uri = None
-        since_version: int | None = None
-        if isinstance(params, dict):
-            uri = params.get("uri") or params.get("textDocument", {}).get("uri")
-            raw = params.get("sinceVersion")
-            if isinstance(raw, int):
-                since_version = raw
-        else:
-            uri = getattr(params, "uri", None)
-            if uri is None and hasattr(params, "text_document"):
-                uri = params.text_document.uri
-            raw = getattr(params, "sinceVersion", None)
-            if isinstance(raw, int):
-                since_version = raw
-
-        if not uri:
-            return _serialize_root([], stale=False, version=0)
-        cached = state.cache.get(uri)
-        if cached is None:
-            return _serialize_root([], stale=False, version=0)
-
-        # Version-gated fast path: client already has this version, skip both
-        # serialization and transport of the (potentially huge) tree body.
-        if since_version is not None and since_version == cached.version:
-            return _unchanged_envelope(cached.version)
-
-        # In-memory fast path: same-version re-fetch returns the memoized dict.
-        if cached.serialized is not None:
-            return cached.serialized
-
-        # Disk cache fast path (lazy mode only — see docstring above).
-        if state.lazy_supported:
-            disk_key = _disk_cache_key(uri)
-            if disk_key is not None:
-                disk_envelope = await asyncio.to_thread(state.disk_cache.get, disk_key)
-                # The cache is content-addressed (sha256 of abs path + mtime +
-                # include paths + compiler version). A hit means the envelope's
-                # *content* is byte-equivalent to what a fresh serialize would
-                # produce — that's the whole point of the key. The envelope's
-                # `version` field is a per-process monotonic counter for the
-                # client's sinceVersion gating; the disk copy carries whatever
-                # counter the previous LSP run had, which is rarely == the
-                # current run's counter. Rewrite the field to the current
-                # in-memory version so client sinceVersion checks stay
-                # coherent, then return. Without this rewrite the disk cache
-                # was effectively dead — every cold start re-serialized.
-                if isinstance(disk_envelope, dict):
-                    disk_envelope["version"] = cached.version
-                    # Stale flag is per-process runtime state, NOT part
-                    # of the content-addressed disk key — a hit may
-                    # carry whatever ``stale`` value was true when the
-                    # entry was written, which is unrelated to whether
-                    # the latest parse succeeded. Override with the
-                    # current state so a "valid → fetched → broken"
-                    # flow doesn't keep serving the non-stale envelope
-                    # from disk after the in-memory invalidation.
-                    # Field-reported as "broke the file, editor shows
-                    # error, webview shows nothing wrong".
-                    disk_envelope["stale"] = uri in state.stale_uris
-                    cached.serialized = disk_envelope
-                    # Disk hit skips the spine build path that populates
-                    # the expand-index. Build it in the background so
-                    # first-click expand stays O(1).
-                    if cached.node_index is None:
-                        async def _bg_build_index(c: Any = cached) -> None:
-                            try:
-                                idx = await asyncio.to_thread(
-                                    _build_node_index, c.roots
-                                )
-                                if c.node_index is None:
-                                    c.node_index = idx
-                            except Exception:
-                                logger.debug(
-                                    "background node-index build failed",
-                                    exc_info=True,
-                                )
-                        asyncio.create_task(_bg_build_index())
-                    return disk_envelope
-
-        try:
-            original_path = _uri_to_path(uri)
-        except ValueError:
-            original_path = None
-        translate = (
-            {cached.temp_path: original_path}
-            if cached.temp_path is not None and original_path is not None
-            else None
-        )
-        # Spine vs full per client capability. Threaded so the loop stays
-        # responsive during the ~1s/~6s walk on 25k regs. Build the
-        # expand-index on the same DFS pass when the cache doesn't have
-        # one yet (zero extra walk cost; pool worker normally fills it).
-        serialize_fn = _serialize_spine if state.lazy_supported else _serialize_root
-        index_out: dict[str, Any] | None = (
-            {} if state.lazy_supported and cached.node_index is None else None
-        )
-        envelope = await asyncio.to_thread(
-            serialize_fn,
-            cached.roots,
-            uri in state.stale_uris,
-            path_translate=translate,
-            version=cached.version,
-            out_index=index_out,
-        )
-        cached.serialized = envelope
-        if index_out is not None:
-            cached.node_index = index_out
-
-        # Persist spine to disk (best-effort, fire-and-forget) for window-reload
-        # speed. Full trees are too big to be worth caching to disk.
-        if state.lazy_supported:
-            disk_key = _disk_cache_key(uri)
-            if disk_key is not None:
-                # Don't await — disk write is independent of the response.
-                asyncio.create_task(
-                    asyncio.to_thread(state.disk_cache.put, disk_key, envelope)
-                )
-        return envelope
+        return await handle_elaborated_tree(state, params)
 
     @server.feature("rdl/expandNode")
     async def _on_expand_node(_ls: LanguageServer, params: Any) -> dict[str, Any]:
-        """Custom JSON-RPC: lazy-mode client requests details for a placeholder Reg.
-
-        T1.5. Request: ``{uri, version, nodeId}``. Response: a single ``Reg``
-        dict with ``fields[]`` populated and ``loadState`` absent. The
-        ``nodeId`` is the opaque base-36 string the client got from the
-        spine; it's only valid within the (uri, version) pair the spine
-        was emitted for.
-
-        Errors raised as JSON-RPC error responses:
-        - -32001 ``NodeNotFound`` — nodeId doesn't name any reg (or names
-          a container, which can't be expanded — containers are always
-          fully present in the spine).
-        - -32002 ``VersionMismatch`` — version doesn't match the LSP's
-          current cached version. Client should re-fetch the spine.
-        """
-        from pygls.exceptions import JsonRpcException
-
-        uri = None
-        version: int | None = None
-        node_id: str | None = None
-        if isinstance(params, dict):
-            uri = params.get("uri") or params.get("textDocument", {}).get("uri")
-            v = params.get("version")
-            if isinstance(v, int):
-                version = v
-            n = params.get("nodeId")
-            if isinstance(n, str):
-                node_id = n
-        else:
-            uri = getattr(params, "uri", None)
-            v = getattr(params, "version", None)
-            if isinstance(v, int):
-                version = v
-            n = getattr(params, "nodeId", None)
-            if isinstance(n, str):
-                node_id = n
-
-        if not uri or version is None or not node_id:
-            raise JsonRpcException(
-                code=-32602, message="invalid expandNode params"
-            )
-        cached = state.cache.get(uri)
-        if cached is None:
-            # Soft signal — viewer asked before first elaboration landed (or
-            # after the cache was evicted). Returning a sentinel keeps this
-            # off the JSON-RPC error channel: pygls auto-logs unhandled
-            # JsonRpcException as [ERROR] with a traceback, and a normal race
-            # shouldn't look like a server fault. The viewer's onTreeUpdate
-            # will deliver a fresh tree and useEffect will retry.
-            return {"outdated": True, "currentVersion": None}
-        if cached.version != version:
-            return {"outdated": True, "currentVersion": cached.version}
-
-        # Memoize per node so repeat fetches of the same reg cost a dict ref.
-        if cached.expanded is None:
-            cached.expanded = {}
-        if node_id in cached.expanded:
-            return cached.expanded[node_id]
-
-        try:
-            original_path = _uri_to_path(uri)
-        except ValueError:
-            original_path = None
-        translate = (
-            {cached.temp_path: original_path}
-            if cached.temp_path is not None and original_path is not None
-            else None
-        )
-        # Fallback build — pool worker / spine path normally fills this.
-        if cached.node_index is None:
-            cached.node_index = await asyncio.to_thread(
-                _build_node_index, cached.roots
-            )
-        result = await asyncio.to_thread(
-            expand_node, cached.roots, node_id, translate, cached.node_index
-        )
-        if result is None:
-            raise JsonRpcException(
-                code=-32001, message=f"NodeNotFound (nodeId={node_id})"
-            )
-        cached.expanded[node_id] = result
-        return result
+        return await handle_expand_node(state, params)
 
     # Test hook: expose ServerState + the closures the integration suite
     # needs to drive elaborate paths without spinning up real stdio.

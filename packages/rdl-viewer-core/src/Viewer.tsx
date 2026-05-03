@@ -60,12 +60,51 @@ export function Viewer({ transport }: Props) {
     return transport.onElaborating(setIsElaborating);
   }, [transport]);
 
+  const roots = tree?.roots ?? [];
+  const root = roots[activeRoot];
+
+  // line → location index, built once per tree. Replaces the per-cursor-move
+  // O(N) walk through every root + reg + field that previously fired on
+  // every editor cursor change. Same idea as `regIndex` for clicks: do the
+  // O(N) walk once at build time, do O(1) lookups on the hot path. Cursor
+  // sync fires for every keystroke in the host editor, so this matters on
+  // 25k-reg designs.
+  const lineIndex = useMemo(() => {
+    const m = new Map<number, { kind: 'tab'; index: number } | { kind: 'reg'; key: string }>();
+    if (!tree) return m;
+    const rs = tree.roots ?? [];
+    // Tabs first so root-line entries take precedence over a same-line reg.
+    for (let i = 0; i < rs.length; i++) {
+      const ln = rs[i].source?.line;
+      if (ln !== undefined && !m.has(ln)) m.set(ln, { kind: 'tab', index: i });
+    }
+    function walk(node: TreeNode, segs: string[]): void {
+      if (node.kind === 'reg') {
+        const key = segs.join('.');
+        for (const f of node.fields || []) {
+          const fl = f.source?.line;
+          if (fl !== undefined && !m.has(fl)) m.set(fl, { kind: 'reg', key });
+        }
+        const rl = node.source?.line;
+        if (rl !== undefined && !m.has(rl)) m.set(rl, { kind: 'reg', key });
+        return;
+      }
+      // For containers we do NOT register the container line — the original
+      // walk explicitly returned null on container hits so the outer loop
+      // could route to a tab match instead. We've already pre-seeded tabs
+      // above; container interior keeps walking into children.
+      for (const c of node.children || []) walk(c, segs.concat([c.name]));
+    }
+    for (const r of rs) walk(r, [r.name]);
+    return m;
+  }, [tree]);
+
   // Optional editor cursor sync.
   useEffect(() => {
     if (!transport.onCursorMove) return;
     return transport.onCursorMove(line0b => {
       if (!tree) return;
-      const result = locateByCursorLine(tree.roots, line0b);
+      const result = lineIndex.get(line0b);
       if (!result) return;
       if (result.kind === 'tab' && activeRoot !== result.index) {
         setActiveRoot(result.index);
@@ -75,10 +114,7 @@ export function Viewer({ transport }: Props) {
         setSelectedKey(result.key);
       }
     });
-  }, [tree, activeRoot, transport]);
-
-  const roots = tree?.roots ?? [];
-  const root = roots[activeRoot];
+  }, [tree, activeRoot, transport, lineIndex]);
 
   // Compute flat list once per render — drives Tree and keyboard handler.
   const flatRows = useMemo<FlatRow[]>(
@@ -441,38 +477,3 @@ function filterScopePlaceholder(scope: FilterScope): string {
   }
 }
 
-/**
- * Walk roots looking for a node whose source line matches `line0b`. Used by
- * the editor → viewer cursor sync (Decision D10). Returns either:
- *   - { kind: 'tab', index } — top-level addrmap → switch tabs
- *   - { kind: 'reg', key } — matched a reg or one of its fields → select it
- */
-function locateByCursorLine(roots: TreeNode[], line0b: number):
-  | { kind: 'tab'; index: number }
-  | { kind: 'reg'; key: string }
-  | null {
-  for (let i = 0; i < roots.length; i++) {
-    const r = roots[i];
-    if (r.source?.line === line0b) return { kind: 'tab', index: i };
-  }
-  for (let i = 0; i < roots.length; i++) {
-    const found = walk(roots[i], [roots[i].name]);
-    if (found) return { kind: 'reg', key: found };
-  }
-  return null;
-  function walk(node: TreeNode, segs: string[]): string | null {
-    if (node.kind === 'reg') {
-      for (const f of node.fields || []) {
-        if (f.source?.line === line0b) return segs.join('.');
-      }
-      if (node.source?.line === line0b) return segs.join('.');
-      return null;
-    }
-    if (node.source?.line === line0b) return null; // container line — let outer logic handle
-    for (const c of node.children || []) {
-      const r = walk(c, segs.concat([c.name]));
-      if (r) return r;
-    }
-    return null;
-  }
-}

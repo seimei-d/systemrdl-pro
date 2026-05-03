@@ -30,6 +30,12 @@
         "configuration": "./language-configuration.json"
       }
     ],
+    "configurationDefaults": {
+      "[systemrdl-pro]": {
+        "editor.wordBasedSuggestions": "off",
+        "editor.suggest.showWords": false
+      }
+    },
     "grammars": [
       {
         "language": "systemrdl-pro",
