@@ -424,7 +424,9 @@ def build_server() -> LanguageServer:
                     version_after = bumped
                 _update_include_graph(uri, consumed_files)
                 # Force VSCode to re-pull anything tied to source positions
-                # — the AST is the same shape but lines moved.
+                # — the AST is the same shape but lines moved. pygls'
+                # refresh helpers all take a single ``None`` params arg
+                # (LSP-spec shape) and return a coroutine.
                 for refresh in (
                     server.workspace_code_lens_refresh_async,
                     server.workspace_inlay_hint_refresh_async,
@@ -432,9 +434,12 @@ def build_server() -> LanguageServer:
                     server.workspace_diagnostic_refresh_async,
                 ):
                     try:
-                        asyncio.create_task(refresh())
+                        asyncio.create_task(refresh(None))
                     except Exception:
-                        logger.debug("workspace refresh %s failed", refresh.__name__, exc_info=True)
+                        logger.warning(
+                            "workspace refresh %s failed",
+                            refresh.__name__, exc_info=True,
+                        )
             else:
                 # Cache takes ownership of the temp file (it backs lazy
                 # src_ref reads for hover/documentSymbol). Old entry's
@@ -518,9 +523,9 @@ def build_server() -> LanguageServer:
                 )
             except Exception:
                 logger.debug("could not send elaboratedTreeChanged notification", exc_info=True)
-            # Refresh server→client requests (LSP 3.16/3.17) for everything
-            # that ties UI overlays to source-line positions. Fire-and-forget;
-            # VSCode re-asks with the fresh src_refs.
+            # Refresh server→client requests (LSP 3.16/3.17) for overlays
+            # tied to source-line positions. Fire-and-forget. Each helper
+            # takes a single ``None`` params arg per pygls' signature.
             for refresh in (
                 server.workspace_code_lens_refresh_async,
                 server.workspace_inlay_hint_refresh_async,
@@ -528,9 +533,9 @@ def build_server() -> LanguageServer:
                 server.workspace_diagnostic_refresh_async,
             ):
                 try:
-                    asyncio.create_task(refresh())
+                    asyncio.create_task(refresh(None))
                 except Exception:
-                    logger.debug("workspace refresh %s failed", refresh.__name__, exc_info=True)
+                    logger.warning("workspace refresh %s failed", refresh.__name__, exc_info=True)
 
         return ast_changed
 
