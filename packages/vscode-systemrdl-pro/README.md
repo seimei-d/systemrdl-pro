@@ -17,9 +17,10 @@ Powered by [`systemrdl-lsp`](https://pypi.org/project/systemrdl-lsp/) +
 
 ### In the editor (LSP)
 
-- 🔴 **Live diagnostics** on every keystroke — 300 ms debounce, 10 s
-  timeout fallback, last-good cache, per-URI bucketing for `` `include ``d
-  files (clear-on-resolve cycle).
+- 🔴 **Live diagnostics** on every keystroke — 300 ms debounce,
+  configurable timeout (default 120 s), last-good cache, per-URI
+  bucketing for `` `include ``d files (clear-on-resolve cycle). Also
+  exposed via LSP 3.17 pull-model `textDocument/diagnostic`.
 - 💬 **Hover** on any identifier — instance address/width/access for regs,
   parameter values for parametrized types, `bridge` flag for addrmaps,
   `(← default at line N)` annotation when a property comes from a
@@ -31,10 +32,23 @@ Powered by [`systemrdl-lsp`](https://pypi.org/project/systemrdl-lsp/) +
   cross-file.
 - ✏ **Rename** (F2) — workspace-wide, refuses on collision with an
   existing type.
-- 🔤 **Autocomplete** with ~85 keywords / properties / access values +
-  user-defined types + user-defined properties. Context-aware: after
-  `sw =` only access modes; after `addressing =` only
-  `compact / regalign / fullalign`; etc.
+- 🔤 **Smart, compiler-driven completion**:
+  - **Keyword catalogue** (~85 keywords / properties / access values + user
+    types + user-defined properties).
+  - **Member access** — `WIDE_REG.` → reg fields; `field.` → built-in
+    references (`anded` / `ored` / `xored` / `intr` / `halt`).
+  - **Property access** — `inst-><cursor>` → only **dyn-assignable**
+    properties for that component class (skips `regwidth` / `bridge` /
+    etc. that the compiler would reject).
+  - **RHS values** — `prop = <cursor>` → exact legal literals
+    (`true/false`, AccessType, OnReadType, …) derived from the
+    compiler's `valid_types`.
+  - **Snippet bodies** — `addrmap` / `regfile` / `reg` / `field` / `enum`
+    / `mem` / `signal` / `property` expand with `$1` / `$2` placeholder
+    tab-stops.
+  - **Instance dump** deduped by short name (count + path list in docs);
+    scope-restricted to the cursor's enclosing addrmap/regfile when
+    detectable.
 - 📑 **Outline** (`addrmap → regfile → reg → field`) in the sidebar —
   hierarchical `DocumentSymbol[]`, breadcrumb works.
 - 🎯 **Inlay hints** — resolved absolute address ghost-grey at end-of-line
@@ -42,20 +56,6 @@ Powered by [`systemrdl-lsp`](https://pypi.org/project/systemrdl-lsp/) +
 - 📊 **CodeLens** — `📊 N regs · 0xS..0xE` summary above every `addrmap`.
   Lazy `codeLens/resolve` so big files only walk addrmaps for visible
   lenses.
-- 💡 **Smart completion** —
-  - `WIDE_REG.` → field names of the reg
-  - `inst.<field>.` → built-in field references (`anded` / `ored` / `xored` / `intr` / `halt`)
-  - `inst-><cursor>` → only **dyn-assignable** properties for that
-    component class (skips `regwidth` / `bridge` / etc. that the
-    compiler will reject)
-  - `prop = ` → exact legal values (boolean, AccessType, OnReadType, …)
-    derived from the compiler's property registry
-  - `addrmap` / `regfile` / `reg` / `field` / `enum` / `mem` / `signal` /
-    `property` accept the popup with **snippet bodies** + `$1` / `$2`
-    placeholder tab-stops.
-  - Instance dump deduped by short name with count + path list in the
-    side panel; restricted to the cursor's enclosing addrmap/regfile
-    when detectable.
 - 🗂 **Workspace symbols** (Ctrl+T) with optional pre-index for cross-file
   search.
 - 🌳 **Type hierarchy** — subtypes ≡ instances of the type.
@@ -71,11 +71,10 @@ Powered by [`systemrdl-lsp`](https://pypi.org/project/systemrdl-lsp/) +
   Opt-in `systemrdl-pro.formatOnSave` applies on save.
 - 🪪 **Hover with goto-def link** — every reg/field popup carries a
   `· filename:42` clickable link straight to the source declaration.
-- 🩺 **Pull-model diagnostics** (LSP 3.17 `textDocument/diagnostic`) in
-  addition to the classic push.
-- 🎨 **Semantic tokens** — `full`, `range` (re-tokenise viewport only),
-  and `full/delta` (single-edit diff against the previous result_id);
-  big files keep a snappy keystroke budget.
+- 🌈 **Semantic tokens** — `full`, `range` (re-tokenise viewport only),
+  and `full/delta` (single-edit diff against the previous `result_id`)
+  so big files keep a snappy keystroke budget. Distinguishes
+  properties / values / types beyond what TextMate scopes can express.
 - 🛡 **Graceful shutdown** — formal LSP shutdown handler drains pending
   elaborates and `pool.shutdown(wait=True)` so subprocess workers exit
   cleanly on window close.
@@ -83,8 +82,6 @@ Powered by [`systemrdl-lsp`](https://pypi.org/project/systemrdl-lsp/) +
   multi-project sessions from creeping into memory pressure.
 - ⚠ **Address conflict warnings** — per-addrmap-scoped, skips reused-type
   bodies (no false positives on multi-instance regfiles).
-- 🌈 **Semantic tokens** — distinguishes properties / values / types
-  beyond TextMate scopes.
 - 🪶 **Perl preprocessor** (clause 16.3) when `perl` is on PATH —
   parametric register generation via `<% for ... %>`. One-shot warning
   when `<%` markers appear but `perl` is missing.
@@ -152,6 +149,8 @@ The latest `.vsix` lives on
 | `systemrdl-pro.perlSafeOpcodes` | `[]` | Override the Perl `Safe` opcode set. Empty = compiler default. Add `:base_io` to allow `print`-based codegen. See _Perl preprocessor_ below. |
 | `systemrdl-pro.preindex.enabled` | `false` | Pre-elaborate every `.rdl` in the workspace at startup so workspace-wide symbol search (Ctrl+T) finds names without first opening the source. Off by default — multi-window setups can peg the CPU. |
 | `systemrdl-pro.preindex.maxFiles` | `200` | Cap on the pre-index walker. |
+| `systemrdl-pro.elaborationTimeoutMs` | `120000` | Per-elaborate wall-clock cap. After this the LSP keeps the last-good tree and surfaces a synthetic diagnostic. Bump for aggregated SoC tops with deep Perl preprocessor sections. |
+| `systemrdl-pro.elaborateInProcess` | `false` | Run the compiler in the LSP's main Python process instead of the subprocess pool (T3 default). Escape hatch for diagnosing pool-related issues. Restart the language server for the change to take effect. |
 | `systemrdl-pro.viewer.colors` | `{}` | Override viewer access-mode colours and chrome tokens. Keys map to `--rdl-...` CSS custom properties. Recognised: `rw`, `ro`, `wo`, `w1c`, `rsv`, `accent`, `warning`, `bg`, `panel`, `chrome`, `border`, `fg`, `dim`, `selected`. |
 | `systemrdl-pro.formatOnSave` | `false` | Apply the SystemRDL formatter on every save. Off by default. Use `// fmt: off` / `// fmt: on` markers to skip a region. |
 | `systemrdl-pro.trace.server` | `off` | LSP communication trace level: `off` / `messages` / `verbose`. |
