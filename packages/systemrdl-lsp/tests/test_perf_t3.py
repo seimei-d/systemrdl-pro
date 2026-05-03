@@ -129,7 +129,9 @@ def test_subprocess_round_trip_via_pool(real_pool, tmp_path):
     msgs_p, roots_p, tmp_p, consumed_p, _node_index, _spine = _decompress_compile_result(blob)
 
     # Local
-    _msgs_l, roots_l, tmp_l, _consumed_l, _node_index, _spine = _compile_text(rdl.as_uri(), SAMPLE_RDL)
+    _msgs_l, roots_l, tmp_l, _consumed_l, _node_index, _spine = _compile_text(
+        rdl.as_uri(), SAMPLE_RDL,
+    )
 
     try:
         assert _fingerprint_roots(roots_p) == _fingerprint_roots(roots_l), (

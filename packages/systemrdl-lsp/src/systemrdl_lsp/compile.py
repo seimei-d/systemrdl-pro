@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import dataclasses
 import functools
-import hashlib
 import logging
 import os
 import pathlib

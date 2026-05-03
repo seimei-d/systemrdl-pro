@@ -1124,7 +1124,9 @@ def test_cross_file_diagnostics_bucket_by_source(tmp_path):
         'addrmap top { my_ctrl_t CTRL @ 0; };\n',
         encoding="utf-8",
     )
-    msgs, _roots, tmp, _consumed, _node_index, _spine = _compile_text(master.as_uri(), master.read_text())
+    msgs, _roots, tmp, _consumed, _node_index, _spine = _compile_text(
+        master.as_uri(), master.read_text(),
+    )
     try:
         common_msgs = [m for m in msgs if m.file_path == common]
         master_msgs = [m for m in msgs if m.file_path == master]

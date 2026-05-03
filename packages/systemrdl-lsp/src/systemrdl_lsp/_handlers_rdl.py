@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def handle_include_paths(state: "ServerState", params: Any) -> dict[str, Any]:
+def handle_include_paths(state: ServerState, params: Any) -> dict[str, Any]:
     """Return the deduped, source-labeled include search path list for a URI.
 
     Powers the "SystemRDL: Show effective include paths" command. Lets the
@@ -54,7 +54,7 @@ def handle_include_paths(state: "ServerState", params: Any) -> dict[str, Any]:
     }
 
 
-def _disk_cache_key(state: "ServerState", uri: str) -> str | None:
+def _disk_cache_key(state: ServerState, uri: str) -> str | None:
     """On-disk cache key for ``uri``, or ``None`` if path/mtime unreadable.
 
     Folds the systemrdl-compiler version so a compiler upgrade auto-
@@ -81,7 +81,7 @@ def _disk_cache_key(state: "ServerState", uri: str) -> str | None:
     )
 
 
-async def handle_elaborated_tree(state: "ServerState", params: Any) -> dict[str, Any]:
+async def handle_elaborated_tree(state: ServerState, params: Any) -> dict[str, Any]:
     """Custom JSON-RPC: viewer fetches the latest elaborated tree for a URI.
 
     The (potentially multi-second) serialize runs in ``asyncio.to_thread``
@@ -218,7 +218,7 @@ async def handle_elaborated_tree(state: "ServerState", params: Any) -> dict[str,
     return envelope
 
 
-async def handle_expand_node(state: "ServerState", params: Any) -> dict[str, Any]:
+async def handle_expand_node(state: ServerState, params: Any) -> dict[str, Any]:
     """Custom JSON-RPC: lazy-mode client requests details for a placeholder Reg.
 
     Request: ``{uri, version, nodeId}``. Response: a single ``Reg`` dict with

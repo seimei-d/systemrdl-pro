@@ -287,7 +287,9 @@ def _src_link(node: Any, path_translate: dict[pathlib.Path, pathlib.Path] | None
     not openable.
     """
     inst = getattr(node, "inst", None)
-    src = getattr(inst, "inst_src_ref", None) or getattr(inst, "def_src_ref", None) if inst else None
+    if inst is None:
+        return ""
+    src = getattr(inst, "inst_src_ref", None) or getattr(inst, "def_src_ref", None)
     if src is None:
         return ""
     try:

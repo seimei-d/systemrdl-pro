@@ -18,7 +18,8 @@ import asyncio
 import logging
 import pathlib
 import re as _re
-from typing import TYPE_CHECKING, Any, Callable
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
 from lsprotocol.types import (
     TEXT_DOCUMENT_DIAGNOSTIC,
@@ -50,6 +51,7 @@ from pygls.lsp.server import LanguageServer
 from ._text_utils import _build_selection_ranges, _is_valid_identifier
 from ._uri import _uri_to_path
 from .code_actions import _code_actions_for_range
+from .compile import _resolve_search_paths
 from .completion import (
     _completion_context,
     _completion_items_for_context,
@@ -61,7 +63,6 @@ from .completion import (
     _completion_items_static,
     _enclosing_instance_scope,
 )
-from .compile import _resolve_search_paths
 from .definition import (
     _comp_defs_from_cached,
     _definition_location,
@@ -116,7 +117,7 @@ def _no_members_sentinel(replace: Range) -> Any:
 
 def register(
     server: LanguageServer,
-    state: "ServerState",
+    state: ServerState,
     *,
     read_buffer: Callable[[str], str | None],
     file_line_reader: Callable[[pathlib.Path, int], str | None],
@@ -263,7 +264,7 @@ def register(
 
         # LSP 3.17 itemDefaults capability — when the client supports it we
         # ship a single shared edit_range on the CompletionList instead of
-        # repeating it on every CompletionItem (10k items × identical range
+        # repeating it on every CompletionItem (10k items x identical range
         # was the dominant payload bloat on 25k-reg general-ctx dumps).
         # Falls back to per-item text_edit when the client is older.
         item_defaults_supported = False
@@ -360,7 +361,10 @@ def register(
                 logger.warning("[COMPL] → returning null (no members)")
                 return None
             replace = _replace_range_for_partial()
-            logger.warning("[COMPL] → returning %d items (itemDefaults=%s)", len(items), item_defaults_supported)
+            logger.warning(
+                "[COMPL] → returning %d items (itemDefaults=%s)",
+                len(items), item_defaults_supported,
+            )
             return _build_list(items, replace)
         if ctx.startswith("property:"):
             path = ctx[len("property:"):]
@@ -376,7 +380,10 @@ def register(
                 logger.warning("[COMPL] → returning null (no properties)")
                 return None
             replace = _replace_range_for_partial()
-            logger.warning("[COMPL] → returning %d items (itemDefaults=%s)", len(items), item_defaults_supported)
+            logger.warning(
+                "[COMPL] → returning %d items (itemDefaults=%s)",
+                len(items), item_defaults_supported,
+            )
             return _build_list(items, replace)
 
         if ctx != "general":
@@ -519,7 +526,7 @@ def register(
         if not word:
             return []
 
-        # 880KB buffer × `splitlines` + per-line regex iter is measurable CPU.
+        # 880KB buffer x `splitlines` + per-line regex iter is measurable CPU.
         # Off-load — VSCode dispatches highlight on every cursor stop.
         def scan() -> list[DocumentHighlight]:
             pattern = _re.compile(rf"\b{_re.escape(word)}\b")
@@ -826,7 +833,10 @@ def register(
         new_data = cur[head:len(cur) - tail]
         if delete_count == 0 and not new_data:
             return []
-        return [SemanticTokensEdit(start=head, delete_count=delete_count, data=[int(x) for x in new_data])]
+        return [SemanticTokensEdit(
+            start=head, delete_count=delete_count,
+            data=[int(x) for x in new_data],
+        )]
 
     def _filter_tokens_in_range(data: list[int], rng: Range) -> list[int]:
         """Reduce a full token stream to entries overlapping ``rng``.

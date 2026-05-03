@@ -13,7 +13,6 @@ from typing import Any
 from .cache import DiskCache
 from .compile import ElaborationCache
 
-
 # Eng-review safety net #3: cap a single elaborate pass at the configured
 # wall-clock limit. Past that we keep last-good (D7) and surface a synthetic
 # diagnostic. A pathological Perl-style include cycle in a third-party RDL

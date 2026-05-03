@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import sys
 from typing import BinaryIO
 
 logger = logging.getLogger(__name__)

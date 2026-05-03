@@ -18,7 +18,6 @@ import re
 
 from lsprotocol.types import Position, Range, TextEdit
 
-
 # `<name> { body } [trailing];` on a single line. ``body`` excludes braces.
 # We deliberately don't try to be SystemRDL-aware about ``<name>`` — any
 # identifier-then-`{` pattern qualifies, including ``field``, ``reg``,

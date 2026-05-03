@@ -36,31 +36,32 @@ from lsprotocol.types import (
     TEXT_DOCUMENT_DID_CLOSE,
     TEXT_DOCUMENT_DID_OPEN,
     TEXT_DOCUMENT_DID_SAVE,
-    TEXT_DOCUMENT_SEMANTIC_TOKENS_FULL,
     WORKSPACE_DID_CHANGE_CONFIGURATION,
-    CodeLens,
     DidChangeConfigurationParams,
     DidChangeTextDocumentParams,
     DidCloseTextDocumentParams,
     DidOpenTextDocumentParams,
     DidSaveTextDocumentParams,
-    FoldingRange,
     InitializedParams,
-    InlayHint,
-    Location,
-    ParameterInformation,
-    Position,
-    Range,
-    SemanticTokens,
-    SemanticTokensLegend,
-    SignatureHelp,
-    SignatureHelpOptions,
-    SignatureInformation,
-    SymbolInformation,
 )
 from pygls.lsp.server import LanguageServer
 from systemrdl.messages import Severity
 
+from ._handlers_lsp import register as register_lsp_handlers
+from ._handlers_rdl import (
+    handle_elaborated_tree,
+    handle_expand_node,
+    handle_include_paths,
+)
+from ._state import (
+    ELABORATION_TIMEOUT_SECONDS,
+    ELABORATION_TIMEOUT_SECONDS_MAX,
+    ELABORATION_TIMEOUT_SECONDS_MIN,
+    ServerState,
+)
+from ._text_utils import (
+    _iter_rdl_files,
+)
 from ._uri import _path_to_uri, _uri_to_path
 from .code_actions import _code_actions_for_range
 from .compile import (
@@ -92,18 +93,14 @@ from .completion import (
     _completion_context,
     _completion_items_for_context,
     _completion_items_for_types,
-    _completion_items_for_user_properties,
     _completion_items_static,
     _make_items,
 )
 from .definition import (
     _comp_defs_from_cached,
     _definition_location,
-    _find_instance_by_name,
-    _path_at_position,
     _references_to_type,
     _rename_locations,
-    _resolve_path,
     _word_at_position,
 )
 from .diagnostics import (
@@ -130,8 +127,6 @@ from .outline import (
     _workspace_symbols_for_uri,
 )
 from .semantic import (
-    TOKEN_MODIFIERS,
-    TOKEN_TYPES,
     _semantic_tokens_for_text,
 )
 from .serialize import (
@@ -142,28 +137,8 @@ from .serialize import (
     _serialize_field,
     _serialize_reg,
     _serialize_root,
-    _serialize_spine,
     _src_ref_to_dict,
     _unchanged_envelope,
-    _build_node_index,
-    expand_node,
-)
-from ._handlers_lsp import register as register_lsp_handlers
-from ._handlers_rdl import (
-    handle_elaborated_tree,
-    handle_expand_node,
-    handle_include_paths,
-)
-from ._state import (
-    ELABORATION_TIMEOUT_SECONDS,
-    ELABORATION_TIMEOUT_SECONDS_MAX,
-    ELABORATION_TIMEOUT_SECONDS_MIN,
-    ServerState,
-)
-from ._text_utils import (
-    _build_selection_ranges,
-    _is_valid_identifier,
-    _iter_rdl_files,
 )
 
 if TYPE_CHECKING:
@@ -172,7 +147,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 from systemrdl_lsp import __version__ as SERVER_VERSION  # noqa: E402  pulled from package __init__
-
 
 DEBOUNCE_SECONDS = 0.3
 

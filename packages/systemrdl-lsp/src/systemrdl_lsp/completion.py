@@ -192,11 +192,15 @@ def _build_property_metadata() -> tuple[
 
     Module-level so we pay the import + walk cost once.
     """
-    from systemrdl import RDLCompiler
     import systemrdl.component as _comp
+    from systemrdl import RDLCompiler
     from systemrdl.rdltypes import (
-        AccessType, AddressingType, InterruptType,
-        OnReadType, OnWriteType, PrecedenceType,
+        AccessType,
+        AddressingType,
+        InterruptType,
+        OnReadType,
+        OnWriteType,
+        PrecedenceType,
     )
 
     enum_catalogues: dict[type, dict[str, str]] = {}
@@ -331,15 +335,17 @@ def _make_items(catalogue: dict[str, str], kind: CompletionItemKind) -> list[Com
 # Snippet bodies for top-level keywords. Cursor stops at $1, $2, ... and
 # lands at $0 when finished. Plain-string completions (everything not in
 # this map) just insert the keyword as-is.
+# Snippet bodies — line-length lints don't help here; prose-wrap would
+# break the literal `\n` markers VSCode interprets.
 _KEYWORD_SNIPPETS: dict[str, str] = {
     "addrmap":  "addrmap ${1:name} {\n\t$0\n};",
     "regfile":  "regfile ${1:type_name} {\n\t$0\n} ${2:inst_name} @ ${3:0x0};",
-    "reg":      "reg {\n\tfield { sw=${1|rw,ro,wo|}; hw=${2|r,w,rw|}; } ${3:name}[${4:0}:${5:0}] = ${6:0};\n} ${7:NAME} @ ${8:0x0};",
+    "reg":      "reg {\n\tfield { sw=${1|rw,ro,wo|}; hw=${2|r,w,rw|}; } ${3:name}[${4:0}:${5:0}] = ${6:0};\n} ${7:NAME} @ ${8:0x0};",  # noqa: E501
     "field":    "field { sw=${1|rw,ro,wo|}; hw=${2|r,w,rw|}; } ${3:name}[${4:0}:${5:0}] = ${6:0};",
     "enum":     "enum ${1:Name} {\n\t${2:VALUE_A} = ${3:0};\n\t$0\n};",
-    "mem":      "mem ${1:type_name} {\n\tmementries = ${2:1024};\n\tmemwidth = ${3:32};\n} ${4:inst_name} @ ${5:0x0};",
+    "mem":      "mem ${1:type_name} {\n\tmementries = ${2:1024};\n\tmemwidth = ${3:32};\n} ${4:inst_name} @ ${5:0x0};",  # noqa: E501
     "signal":   "signal { activehigh=true; } ${1:name};",
-    "property": "property ${1:name} {\n\ttype = ${2:boolean};\n\tcomponent = ${3:field};\n\tdefault = ${4:false};\n};",
+    "property": "property ${1:name} {\n\ttype = ${2:boolean};\n\tcomponent = ${3:field};\n\tdefault = ${4:false};\n};",  # noqa: E501
 }
 
 
@@ -530,7 +536,7 @@ def _resolve_node_by_path(roots: list[RootNode], dotted: str) -> Any | None:
     picked (``WIDE_REG`` works without typing ``top.``). Returns ``None``
     if ambiguous-no-match.
     """
-    from systemrdl.node import AddrmapNode, MemNode, RegfileNode, RegNode
+    from systemrdl.node import RegNode
 
     segs = [s for s in dotted.split(".") if s]
     if not segs:
@@ -581,7 +587,7 @@ def _resolve_node_by_path(roots: list[RootNode], dotted: str) -> Any | None:
             kids = []
         for c in kids:
             nm = getattr(c, "inst_name", None) or ""
-            new_anc = ancestry + [nm]
+            new_anc = [*ancestry, nm]
             if nm == segs[-1]:
                 tail = new_anc[-len(segs):] if len(segs) <= len(new_anc) else None
                 if tail == segs:
@@ -639,9 +645,7 @@ def _completion_items_for_members(roots: list[RootNode], dotted: str) -> list[Co
     both addressable children and field leaves of regs.
     """
     from systemrdl.node import (
-        AddrmapNode,
         FieldNode,
-        MemNode,
         RegfileNode,
         RegNode,
     )
@@ -794,11 +798,11 @@ def _completion_items_for_instances(
             name = getattr(child, "inst_name", None)
             if not name:
                 continue
-            path = ".".join(segs + [name])
+            path = ".".join([*segs, name])
             if scope_prefix is None or path.startswith(scope_prefix):
                 remember(name, child, path)
             if isinstance(child, (AddrmapNode, RegfileNode, MemNode)):
-                walk(child, segs + [name])
+                walk(child, [*segs, name])
             elif isinstance(child, RegNode):
                 # Surface field names too — `field.bitfield` references appear
                 # in counter / dynamic property contexts.
@@ -806,7 +810,7 @@ def _completion_items_for_instances(
                     fname = getattr(f, "inst_name", None)
                     if not fname:
                         continue
-                    fpath = ".".join(segs + [name, fname])
+                    fpath = ".".join([*segs, name, fname])
                     if scope_prefix is None or fpath.startswith(scope_prefix):
                         remember(fname, f, fpath)
 

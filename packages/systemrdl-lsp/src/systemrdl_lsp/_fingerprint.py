@@ -67,6 +67,7 @@ def _fingerprint_roots(roots: list[RootNode]) -> str:
         RegfileNode,
         RegNode,
     )
+
     from .compile import _children_safe
 
     h = hashlib.sha256()
