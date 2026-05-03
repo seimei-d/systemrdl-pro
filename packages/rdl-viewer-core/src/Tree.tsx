@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import type { Addrmap, Reg, SourceLoc, Transport, TreeNode } from './types';
 import { isContainer, subtreeMatches, type FilterScope } from './util';
 import type { CtxMenuItem } from './ContextMenu';
@@ -56,30 +56,72 @@ type Props = {
   hasRoots: boolean;
 };
 
+// Approximate fixed row height — tunable. Keep in sync with .rdl-row CSS.
+// Slight over-estimate is safe (more spacer, no rendered rows missing); under-
+// estimate would clip rows at viewport edges.
+const ROW_HEIGHT_PX = 22;
+// Number of off-screen rows to render above/below the viewport so scrolling
+// doesn't flash blanks. ~one screen of buffer at typical heights.
+const OVERSCAN_ROWS = 30;
+
 export function Tree({
   rows, selectedKey, onSelectReg, onRevealContainer, onToggleCollapse, onContextMenu,
   filter, filterMatchCount, hasRoots,
 }: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const [showScrollTop, setShowScrollTop] = useState(false);
+  const [scrollTop, setScrollTopState] = useState(0);
+  const [viewportH, setViewportH] = useState(0);
 
-  // Scroll selected row into view after each render so click-to-reveal in the
-  // editor (which doesn't move the tree-pane scroll) doesn't leave the user
-  // looking at a different part of the tree than the detail pane describes.
+  // Track viewport height. ResizeObserver keeps the window in sync with
+  // pane resizes; initial measure populates the first render.
+  useEffect(() => {
+    const el = hostRef.current;
+    if (!el) return;
+    const measure = () => setViewportH(el.clientHeight);
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  // Compute the visible row window. Without virtualization, mapping 25k
+  // <TreeRow/> elements on every Viewer re-render (selection click,
+  // expand response, etc.) cost ~50–100ms of pure-JS reconciliation
+  // even though TreeRow itself is memoized. Windowed render keeps the
+  // re-render cost bounded by viewport size, not tree size.
+  const totalH = rows.length * ROW_HEIGHT_PX;
+  const startIdx = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT_PX) - OVERSCAN_ROWS);
+  const visibleCount = Math.ceil((viewportH || 600) / ROW_HEIGHT_PX) + 2 * OVERSCAN_ROWS;
+  const endIdx = Math.min(rows.length, startIdx + visibleCount);
+  const visibleRows = rows.slice(startIdx, endIdx);
+  const offsetY = startIdx * ROW_HEIGHT_PX;
+
+  // Selection scroll-into-view: if the selected row is outside the
+  // current window, jump scrollTop so it lands in the middle. We do
+  // this imperatively rather than relying on the row element existing
+  // (it may not, since virtualization elides it).
   useEffect(() => {
     if (!hostRef.current || !selectedKey) return;
-    const el = hostRef.current.querySelector<HTMLElement>(`[data-key="${cssAttr(selectedKey)}"]`);
-    if (el) el.scrollIntoView({ block: 'nearest' });
+    const idx = rows.findIndex(r => r.key === selectedKey);
+    if (idx < 0) return;
+    const rowTop = idx * ROW_HEIGHT_PX;
+    const rowBottom = rowTop + ROW_HEIGHT_PX;
+    const host = hostRef.current;
+    if (rowTop < host.scrollTop) {
+      host.scrollTop = rowTop;
+    } else if (rowBottom > host.scrollTop + host.clientHeight) {
+      host.scrollTop = rowBottom - host.clientHeight;
+    }
   }, [selectedKey, rows]);
 
-  // Show the scroll-to-top button once the user scrolls past ~one screen.
-  // Pulses to draw attention on long trees (1000-reg stress fixture) where
-  // returning to the top by hand is tedious.
   const onScroll = () => {
-    if (!hostRef.current) return;
-    setShowScrollTop(hostRef.current.scrollTop > 200);
+    const el = hostRef.current;
+    if (!el) return;
+    setScrollTopState(el.scrollTop);
+    setShowScrollTop(el.scrollTop > 200);
   };
-  const scrollTop = () => {
+  const doScrollTop = () => {
     if (hostRef.current) hostRef.current.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
@@ -109,18 +151,20 @@ export function Tree({
         aria-label="Memory map tree"
         onScroll={onScroll}
       >
-        <div className="rdl-tree">
-          {rows.map(row => (
-            <TreeRow
-              key={row.key}
-              row={row}
-              selected={selectedKey === row.key}
-              onSelectReg={onSelectReg}
-              onRevealContainer={onRevealContainer}
-              onToggleCollapse={onToggleCollapse}
-              onContextMenu={onContextMenu}
-            />
-          ))}
+        <div className="rdl-tree" style={{ height: `${totalH}px`, position: 'relative' }}>
+          <div style={{ position: 'absolute', top: 0, left: 0, right: 0, transform: `translateY(${offsetY}px)` }}>
+            {visibleRows.map(row => (
+              <TreeRow
+                key={row.key}
+                row={row}
+                selected={selectedKey === row.key}
+                onSelectReg={onSelectReg}
+                onRevealContainer={onRevealContainer}
+                onToggleCollapse={onToggleCollapse}
+                onContextMenu={onContextMenu}
+              />
+            ))}
+          </div>
         </div>
         {showScrollTop && (
           <button
@@ -128,7 +172,7 @@ export function Tree({
             type="button"
             aria-label="Scroll to top"
             title="Scroll to top"
-            onClick={scrollTop}
+            onClick={doScrollTop}
           >
             <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
               <path d="M4 10 L8 6 L12 10" />
@@ -140,9 +184,6 @@ export function Tree({
   );
 }
 
-function cssAttr(s: string): string {
-  return String(s).replace(/"/g, '\\"');
-}
 
 type RowProps = {
   row: FlatRow;
@@ -153,7 +194,10 @@ type RowProps = {
   onContextMenu: (ev: React.MouseEvent, row: FlatRow) => void;
 };
 
-function TreeRow({
+// Memoised so a selection change re-renders only the two rows whose
+// `selected` flipped, not all 500-25k visible rows. The four callback
+// props are useCallback-stable in Viewer so memo bailout is effective.
+const TreeRow = memo(function TreeRow({
   row, selected, onSelectReg, onRevealContainer, onToggleCollapse, onContextMenu,
 }: RowProps) {
   const indent = row.depth > 0 ? `rdl-indent-${Math.min(row.depth, 3)}` : '';
@@ -221,4 +265,4 @@ function TreeRow({
       <span className="access">{reg.accessSummary || ''}</span>
     </div>
   );
-}
+});

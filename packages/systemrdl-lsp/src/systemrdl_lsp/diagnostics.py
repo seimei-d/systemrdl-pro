@@ -126,17 +126,18 @@ def _publish_diagnostics(
         )
 
     affected: set[str] = set()
+    # Mirror to the per-URI cache so the LSP 3.17 pull-model
+    # ``textDocument/diagnostic`` handler can answer cheaply.
+    diag_cache = getattr(server, "_systemrdl_last_diagnostics", None)
     for bucket_uri, diags in buckets.items():
         if diags or bucket_uri == uri:
-            # Always publish the primary, even empty, so its prior diags clear.
-            # Non-empty cross-file buckets get published; empty ones are skipped
-            # below in the "stale clear" pass which targets only URIs that had
-            # diags last round.
             server.text_document_publish_diagnostics(
                 PublishDiagnosticsParams(uri=bucket_uri, diagnostics=diags)
             )
             if diags:
                 affected.add(bucket_uri)
+            if isinstance(diag_cache, dict):
+                diag_cache[bucket_uri] = list(diags)
 
     # Clear cross-file URIs that had diagnostics last round but not this one.
     # Without this pass, fixing the error in common.rdl would leave a stale

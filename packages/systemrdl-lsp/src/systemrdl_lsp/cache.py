@@ -58,6 +58,7 @@ def make_key(
     mtime_ns: int,
     include_paths: list[str] | tuple[str, ...],
     compiler_version: str,
+    include_vars: dict[str, str] | None = None,
 ) -> str:
     """Compute the content-addressed cache key.
 
@@ -65,10 +66,19 @@ def make_key(
     filenames or version strings) and hashed with SHA-256. Truncated to
     the first 32 hex chars — 128 bits, far below collision probability
     for any plausible cache size.
+
+    ``include_vars`` is part of the key: same file with different
+    ``$IP_ROOT`` substitutions (or any other ``includeVars`` mapping)
+    produces a different include graph, so it MUST hash distinctly.
+    ``None`` produces the empty-vars hash suffix, matching the
+    pre-include-vars key shape.
     """
     abs_str = str(pathlib.Path(abs_path).resolve()) if abs_path else ""
     inc_str = "\0".join(sorted(include_paths))
-    raw = f"{abs_str}\0{mtime_ns}\0{inc_str}\0{compiler_version}"
+    vars_str = "\0".join(
+        f"{k}={v}" for k, v in sorted((include_vars or {}).items())
+    )
+    raw = f"{abs_str}\0{mtime_ns}\0{inc_str}\0{compiler_version}\0{vars_str}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
 
 
@@ -92,6 +102,10 @@ class DiskCache:
     ) -> None:
         self.base = base if base is not None else default_cache_dir()
         self.max_entries = max_entries
+        # Counter for the cheap eviction gate in ``put``. Walking the
+        # cache dir + stat'ing every entry on every single put was the
+        # workspace-preindex hot path (200 entries x 200 puts).
+        self._entries_since_evict = 0
 
     # ------------------------------------------------------------------
     # Read / write
@@ -164,7 +178,14 @@ class DiskCache:
             except OSError:
                 pass
             return
-        self.evict_lru()
+        # Cheap counter gate so we don't iterdir + stat every dir on every
+        # put. The counter undercounts when other processes write to the
+        # same cache (multi-window), but the next over-cap put corrects it
+        # via the actual eviction walk.
+        self._entries_since_evict += 1
+        if self._entries_since_evict >= max(1, self.max_entries // 4):
+            self.evict_lru()
+            self._entries_since_evict = 0
 
     def evict_lru(self, max_entries: int | None = None) -> int:
         """Delete oldest cache directories beyond ``max_entries``.

@@ -275,6 +275,49 @@ def _serialize_encode_entries(enc: Any, width_bits: int) -> list[dict[str, Any]]
     return entries
 
 
+def _serialize_parameters(node: Any) -> list[dict[str, Any]]:
+    """Resolved parametrized-type bindings for a single node, or [] if none.
+
+    Returns one entry per parameter with its post-elaboration value so the
+    viewer can render `WIDTH = 16` next to a `parametrized_reg` instance.
+    The walk catches expression errors per-parameter — a single broken
+    binding shouldn't omit the rest of the list.
+    """
+    inst = getattr(node, "inst", None)
+    if inst is None:
+        return []
+    raw = getattr(inst, "parameters", None) or []
+    if not raw:
+        return []
+    out: list[dict[str, Any]] = []
+    for p in raw:
+        name = getattr(p, "name", None)
+        if not name:
+            continue
+        ptype = getattr(p, "param_type", None)
+        type_name = getattr(ptype, "__name__", str(ptype)) if ptype else None
+        value: Any = None
+        try:
+            value = p.get_value()
+        except Exception:
+            value = None
+        # Render to a JSON-safe scalar / string. Ints stringify directly;
+        # set/list values get repr'd as a fallback so the viewer can at
+        # least show *something* for exotic parameter types.
+        if isinstance(value, (int, float, str, bool)) or value is None:
+            rendered: Any = value
+        else:
+            try:
+                rendered = repr(value)
+            except Exception:
+                rendered = "?"
+        entry: dict[str, Any] = {"name": str(name), "value": rendered}
+        if type_name:
+            entry["type"] = type_name
+        out.append(entry)
+    return out
+
+
 def _serialize_reg(
     node: Any,
     cache: _TypeCache,
@@ -361,14 +404,22 @@ def _serialize_reg(
         out["accessSummary"] = "/".join(dict.fromkeys(accesses))  # ordered unique
     if have_all_resets:
         out["reset"] = _hex(reg_reset, width_bits)
-    desc = _cached_prop(node, "desc", cache)
-    if desc:
-        out["desc"] = str(desc)
+    # Skip desc on lazy spine — only Detail panel renders it and Detail
+    # gets the full reg via expand_node anyway. desc strings can run to
+    # hundreds of bytes per reg; on a 25k-reg design that's MB of
+    # redundant payload that JS event loop parses synchronously.
+    if not lazy:
+        desc = _cached_prop(node, "desc", cache)
+        if desc:
+            out["desc"] = str(desc)
     inst_src = getattr(inst, "inst_src_ref", None) if inst is not None else None
     src = _src_ref_to_dict(inst_src, path_translate) if inst_src is not None \
         else _cached_def_src_ref(node, cache, path_translate)
     if src:
         out["source"] = src
+    params = _serialize_parameters(node)
+    if params:
+        out["parameters"] = params
     return out
 
 
@@ -378,6 +429,7 @@ def _serialize_addressable(
     path_translate: dict[pathlib.Path, pathlib.Path] | None = None,
     lazy: bool = False,
     id_counter: list[int] | None = None,
+    out_index: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Serialize one ``AddrmapNode | RegfileNode | RegNode`` to its dict shape.
 
@@ -402,6 +454,8 @@ def _serialize_addressable(
         out = _serialize_reg(node, cache, path_translate, lazy=lazy)
         if my_id is not None:
             out["nodeId"] = my_id
+            if out_index is not None:
+                out_index[my_id] = node
         return out
     if isinstance(node, (AddrmapNode, RegfileNode)):
         kind = "addrmap" if isinstance(node, AddrmapNode) else "regfile"
@@ -409,7 +463,8 @@ def _serialize_addressable(
         try:
             for c in node.children(unroll=True):
                 child = _serialize_addressable(
-                    c, cache, path_translate, lazy=lazy, id_counter=id_counter
+                    c, cache, path_translate, lazy=lazy,
+                    id_counter=id_counter, out_index=out_index,
                 )
                 if child is not None:
                     children.append(child)
@@ -435,14 +490,18 @@ def _serialize_addressable(
         display_name = _cached_prop(node, "name", cache)
         if display_name:
             out["displayName"] = str(display_name)
-        desc = _cached_prop(node, "desc", cache)
-        if desc:
-            out["desc"] = str(desc)
+        if not lazy:
+            desc = _cached_prop(node, "desc", cache)
+            if desc:
+                out["desc"] = str(desc)
         inst_src = getattr(inst, "inst_src_ref", None) if inst is not None else None
         src = _src_ref_to_dict(inst_src, path_translate) if inst_src is not None \
             else _cached_def_src_ref(node, cache, path_translate)
         if src:
             out["source"] = src
+        params = _serialize_parameters(node)
+        if params:
+            out["parameters"] = params
         return out
     return None
 
@@ -469,6 +528,7 @@ def _serialize_root(
     path_translate: dict[pathlib.Path, pathlib.Path] | None = None,
     version: int = 0,
     lazy: bool = False,
+    out_index: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the JSON envelope matching ``schemas/elaborated-tree.json`` v0.2.0.
 
@@ -503,7 +563,8 @@ def _serialize_root(
         try:
             for top in r.children(unroll=True):
                 serialized = _serialize_addressable(
-                    top, cache, path_translate, lazy=lazy, id_counter=id_counter
+                    top, cache, path_translate, lazy=lazy,
+                    id_counter=id_counter, out_index=out_index,
                 )
                 if serialized is not None and serialized.get("kind") == "addrmap":
                     serialized_roots.append(serialized)
@@ -528,34 +589,30 @@ def _serialize_spine(
     stale: bool,
     path_translate: dict[pathlib.Path, pathlib.Path] | None = None,
     version: int = 0,
+    out_index: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Lazy-mode envelope: spine + placeholders. See ``_serialize_root``.
 
     Wrapper kept as a separate function so callers express intent at the
-    callsite (``_serialize_spine(...)`` vs ``_serialize_root(..., lazy=True)``)
-    and so the LSP server can reach for one or the other based on the
-    client's advertised capability without sprinkling kwargs.
+    callsite (``_serialize_spine(...)`` vs ``_serialize_root(..., lazy=True)``).
+
+    When ``out_index`` is provided, the same DFS populates a
+    ``{nodeId: RegNode}`` map for later O(1) ``expand_node`` lookup.
     """
-    return _serialize_root(roots_input, stale, path_translate, version, lazy=True)
+    return _serialize_root(
+        roots_input, stale, path_translate, version,
+        lazy=True, out_index=out_index,
+    )
 
 
-def expand_node(
+def _build_node_index(
     roots_input: list[RootNode] | RootNode | None,
-    node_id: str,
-    path_translate: dict[pathlib.Path, pathlib.Path] | None = None,
-) -> dict[str, Any] | None:
-    """Find the Reg with this ``nodeId`` and return its full serialized form.
+) -> dict[str, Any]:
+    """Walk the elaborated tree once, return ``{nodeId: RegNode}``.
 
-    Walks the same depth-first order as ``_serialize_spine`` and matches
-    by visit-index — ``node_id`` must come from a spine emitted by this
-    LSP run. Returns the full Reg dict (with ``fields[]`` populated) or
-    ``None`` if the id is unknown or names a non-Reg node. The returned
-    dict carries the same ``nodeId`` for the convenience of the client
-    (which uses it as the splice key).
-
-    Used to back the ``rdl/expandNode`` LSP RPC. Caller is responsible
-    for memoization (LSP keeps a per-cache-entry ``expanded`` dict so
-    repeat fetches of the same node skip this walk).
+    Mirrors ``_serialize_addressable``'s DFS so visit indices line up
+    with the ids the spine sent to the client. Only RegNodes go in the
+    map — containers are always fully loaded in the spine.
     """
     if isinstance(roots_input, list):
         root_list = roots_input
@@ -566,7 +623,68 @@ def expand_node(
 
     from systemrdl.node import AddrmapNode, RegfileNode, RegNode
 
+    index: dict[str, Any] = {}
+    counter = [0]
+
+    def walk(node: Any) -> None:
+        my_idx = counter[0]
+        counter[0] += 1
+        if isinstance(node, RegNode):
+            index[_node_id(my_idx)] = node
+            return
+        if isinstance(node, (AddrmapNode, RegfileNode)):
+            try:
+                for c in node.children(unroll=True):
+                    walk(c)
+            except Exception:
+                logger.exception("walk error under %r", node)
+
+    for r in root_list:
+        try:
+            for top in r.children(unroll=True):
+                walk(top)
+        except Exception:
+            logger.exception("_build_node_index walk failed at root level")
+    return index
+
+
+def expand_node(
+    roots_input: list[RootNode] | RootNode | None,
+    node_id: str,
+    path_translate: dict[pathlib.Path, pathlib.Path] | None = None,
+    node_index: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Find the Reg with this ``nodeId`` and return its full serialized form.
+
+    If ``node_index`` is provided (built once and cached on the LSP's
+    ``CachedElaboration``), the lookup is O(1). Otherwise this walks
+    the full tree in the same depth-first order as ``_serialize_spine``
+    — kept as a fallback for direct callers (tests, ad-hoc tooling)
+    that don't keep a long-lived cache.
+
+    Returns the full Reg dict (with ``fields[]`` populated) or ``None``
+    if the id is unknown or names a non-Reg node. The returned dict
+    carries the same ``nodeId`` for the convenience of the client
+    (which uses it as the splice key).
+    """
     cache = _TypeCache()
+    if node_index is not None:
+        node = node_index.get(node_id)
+        if node is None:
+            return None
+        out = _serialize_reg(node, cache, path_translate, lazy=False)
+        out["nodeId"] = node_id
+        return out
+
+    if isinstance(roots_input, list):
+        root_list = roots_input
+    elif roots_input is None:
+        root_list = []
+    else:
+        root_list = [roots_input]
+
+    from systemrdl.node import AddrmapNode, RegfileNode, RegNode
+
     counter = [0]
 
     def walk(node: Any) -> dict[str, Any] | None:
@@ -581,10 +699,6 @@ def expand_node(
             return None
         if isinstance(node, (AddrmapNode, RegfileNode)):
             if my_id == node_id:
-                # Caller asked to expand a container — not supported in
-                # lazy v1 (containers are always loaded in the spine).
-                # Return None; server raises NodeNotFound to keep the
-                # client's "this id is a Reg" assumption simple.
                 return None
             try:
                 for c in node.children(unroll=True):
@@ -606,12 +720,3 @@ def expand_node(
     return None
 
 
-# Public alias retained for backwards compatibility with the (private-by-convention)
-# `_safe_get_property` name used elsewhere in the codebase. Not used internally any
-# more — `_cached_prop` supersedes it for serialize.py's hot path.
-def _safe_get_property(node: Any, prop: str) -> Any:
-    """``node.get_property(prop)`` with LookupError + AttributeError swallowed."""
-    try:
-        return node.get_property(prop)
-    except (LookupError, AttributeError):
-        return None

@@ -1,5 +1,5 @@
-import { useMemo, useState } from 'react';
-import type { EncodeEntry, Field, Reg, SourceLoc, Transport } from './types';
+import { memo, useMemo, useState } from 'react';
+import type { EncodeEntry, Field, ParameterBinding, Reg, SourceLoc, Transport } from './types';
 import { BitGrid } from './BitGrid';
 
 type Props = {
@@ -8,7 +8,12 @@ type Props = {
   transport: Transport;
 };
 
-export function Detail({ reg, path, transport }: Props) {
+// Memoised so filter keystrokes in Viewer (which re-render the whole
+// component) don't re-render the heavy bit-grid + field rows when the
+// active reg hasn't actually changed. `reg` and `path` come from
+// `findRegByKey` which returns the same node-reference for the same
+// (root, key) pair across re-renders.
+function DetailInner({ reg, path, transport }: Props) {
   // Decoder input lives at the Detail level so per-field rows can show
   // the decoded value in their reset column when input is non-empty.
   const [decoderInput, setDecoderInput] = useState('');
@@ -43,6 +48,9 @@ export function Detail({ reg, path, transport }: Props) {
         <span className="k">Access</span><span className="v">{reg.accessSummary || '—'}</span>
       </div>
       {reg.desc && <div className="desc">{reg.desc}</div>}
+      {reg.parameters && reg.parameters.length > 0 && (
+        <ParametersTable parameters={reg.parameters} />
+      )}
       {reg.accessWidth && reg.accessWidth !== reg.width && (
         <div className="rdl-split-access">
           <strong>Split access:</strong>{' '}
@@ -89,6 +97,7 @@ export function Detail({ reg, path, transport }: Props) {
     </div>
   );
 }
+export const Detail = memo(DetailInner);
 
 type DecodedField = { value: string; encode?: string };
 
@@ -96,25 +105,74 @@ type DecodedField = { value: string; encode?: string };
  * Decode a register-level hex/bin/dec value into per-field hex strings.
  * Returns null when the input is empty or unparseable, in which case the
  * field rows fall back to showing reset values.
+ *
+ * Implementation note: JavaScript bitwise operators (`>>>`, `&`) operate on
+ * 32-bit signed integers. For 64-bit (or any >32-bit) registers, fields
+ * whose `lsb >= 32` would silently decode to `0` because `>>> 32` is `>>> 0`
+ * in JS. We therefore route the entire decode through `BigInt` whenever
+ * the register width exceeds 32 bits — `BigInt` shifts and masks operate
+ * at arbitrary precision.
  */
 function decode(reg: Reg | null, raw: string): Record<string, DecodedField> | null {
   if (!reg) return null;
+  const width = reg.width || 32;
+  const out: Record<string, DecodedField> = {};
+
+  if (width > 32) {
+    const n = parseInputValueBig(raw);
+    if (n === null) return null;
+    const regMask = (1n << BigInt(width)) - 1n;
+    const masked = n & regMask;
+    for (const f of reg.fields || []) {
+      const fwidth = Math.max(1, f.msb - f.lsb + 1);
+      const fmask = (1n << BigInt(fwidth)) - 1n;
+      const v = (masked >> BigInt(f.lsb)) & fmask;
+      const digits = Math.max(1, Math.ceil(fwidth / 4));
+      const hex = '0x' + v.toString(16).padStart(digits, '0');
+      const enc = f.encode?.find(e => {
+        const ev = parseInputValueBig(e.value);
+        return ev !== null && ev === v;
+      })?.name;
+      out[f.name] = { value: hex, encode: enc };
+    }
+    return out;
+  }
+
+  // ≤32-bit register — Number-based path. Stays for the common case so
+  // we don't pay BigInt allocation cost on every field of every reg.
   const n = parseInputValue(raw);
   if (n === null) return null;
-  const width = reg.width || 32;
-  const mask = width >= 53 ? Number.MAX_SAFE_INTEGER : (2 ** width) - 1;
-  const masked = Number(n) & mask;
-  const out: Record<string, DecodedField> = {};
+  const mask = width >= 32 ? 0xFFFFFFFF : (2 ** width) - 1;
+  // `& 0xFFFFFFFF` returns a signed Int32; `>>> 0` re-coerces to unsigned.
+  const masked = (n & mask) >>> 0;
   for (const f of reg.fields || []) {
     const fwidth = Math.max(1, f.msb - f.lsb + 1);
-    const fmask = fwidth >= 53 ? Number.MAX_SAFE_INTEGER : (2 ** fwidth) - 1;
-    const v = (masked >>> f.lsb) & fmask;
+    const fmask = fwidth >= 32 ? 0xFFFFFFFF : (2 ** fwidth) - 1;
+    const v = ((masked >>> f.lsb) & fmask) >>> 0;
     const digits = Math.max(1, Math.ceil(fwidth / 4));
     const hex = '0x' + v.toString(16).padStart(digits, '0');
     const enc = f.encode?.find(e => parseInputValue(e.value) === v)?.name;
     out[f.name] = { value: hex, encode: enc };
   }
   return out;
+}
+
+/**
+ * Same parse rules as ``parseInputValue`` but returns a ``BigInt`` so
+ * values above 2^53 don't lose precision.
+ */
+function parseInputValueBig(s: string): bigint | null {
+  if (!s) return null;
+  const trimmed = s.replace(/_/g, '').trim();
+  if (!trimmed) return null;
+  try {
+    if (/^0x[0-9a-f]+$/i.test(trimmed)) return BigInt('0x' + trimmed.slice(2));
+    if (/^0b[01]+$/i.test(trimmed)) return BigInt('0b' + trimmed.slice(2));
+    if (/^\d+$/.test(trimmed)) return BigInt(trimmed);
+  } catch {
+    return null;
+  }
+  return null;
 }
 
 /**
@@ -174,6 +232,40 @@ function FieldRow({
       )}
     </div>
   );
+}
+
+function ParametersTable({ parameters }: { parameters: ParameterBinding[] }) {
+  return (
+    <div className="rdl-parameters" onClick={e => e.stopPropagation()}>
+      <div className="rdl-parameters-title">Parameters</div>
+      <table className="rdl-parameters-table">
+        <thead>
+          <tr><th>Name</th><th>Type</th><th>Value</th></tr>
+        </thead>
+        <tbody>
+          {parameters.map((p, i) => (
+            <tr key={i}>
+              <td className="n"><code>{p.name}</code></td>
+              <td className="t">{p.type ?? '—'}</td>
+              <td className="v"><code>{renderParamValue(p.value)}</code></td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function renderParamValue(v: unknown): string {
+  if (v === null || v === undefined) return '—';
+  if (typeof v === 'number' && Number.isInteger(v)) {
+    // Integers render in both decimal and hex when non-trivial — matches the
+    // muscle memory of register people who think in both bases.
+    return v >= 16 ? `${v} (0x${v.toString(16)})` : String(v);
+  }
+  if (typeof v === 'boolean' || typeof v === 'number') return String(v);
+  if (typeof v === 'string') return v;
+  return String(v);
 }
 
 function EncodeTable({ entries }: { entries: EncodeEntry[] }) {

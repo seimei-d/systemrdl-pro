@@ -2,7 +2,7 @@
   "name": "systemrdl-pro",
   "displayName": "SystemRDL Pro",
   "description": "Live diagnostics + interactive memory-map viewer for SystemRDL 2.0",
-  "version": "0.26.4",
+  "version": "0.29.0",
   "publisher": "seimei-d",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -30,6 +30,12 @@
         "configuration": "./language-configuration.json"
       }
     ],
+    "configurationDefaults": {
+      "[systemrdl-pro]": {
+        "editor.wordBasedSuggestions": "off",
+        "editor.suggest.showWords": false
+      }
+    },
     "grammars": [
       {
         "language": "systemrdl-pro",
@@ -172,6 +178,12 @@
           "default": "off",
           "scope": "window",
           "description": "Trace LSP communication (output to 'SystemRDL Pro' channel)."
+        },
+        "systemrdl-pro.formatOnSave": {
+          "type": "boolean",
+          "default": false,
+          "scope": "resource",
+          "description": "Apply the SystemRDL formatter on every save (whitespace cleanup + one-attribute-per-line for flat blocks). Off by default; turn on if you want the LSP to re-format your file every Ctrl+S. The formatter respects `// fmt:off` / `// fmt:on` comment markers — lines between them are left untouched."
         }
       }
     }

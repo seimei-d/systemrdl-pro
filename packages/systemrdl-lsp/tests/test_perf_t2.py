@@ -45,7 +45,7 @@ addrmap top {
 def _roots(rdl_text: str, tmp_path: Path, name: str = "x.rdl"):
     p = tmp_path / name
     p.write_text(rdl_text)
-    msgs, roots, tmp, consumed = _compile_text(p.as_uri(), rdl_text)
+    msgs, roots, tmp, consumed, _node_index, _spine = _compile_text(p.as_uri(), rdl_text)
     return roots, tmp, consumed, msgs
 
 
@@ -214,7 +214,7 @@ def test_consumed_files_includes_includee(tmp_path):
         }};
     """)
     main.write_text(main_text)
-    msgs, roots, tmp, consumed = _compile_text(main.as_uri(), main_text)
+    msgs, roots, tmp, consumed, _node_index, _spine = _compile_text(main.as_uri(), main_text)
     try:
         assert roots, f"compile failed: {[m.text for m in msgs]}"
         # Resolve symlinks/realpath like _harvest does.
@@ -228,7 +228,7 @@ def test_consumed_files_excludes_temp_path(tmp_path):
     include reverse-dep tracking; including self would loop the cascade)."""
     main = tmp_path / "main.rdl"
     main.write_text(SIMPLE_RDL)
-    msgs, roots, tmp, consumed = _compile_text(main.as_uri(), SIMPLE_RDL)
+    msgs, roots, tmp, consumed, _node_index, _spine = _compile_text(main.as_uri(), SIMPLE_RDL)
     try:
         assert roots
         assert tmp.resolve() not in consumed

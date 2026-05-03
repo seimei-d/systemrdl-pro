@@ -61,6 +61,11 @@
           "description": "True when the addrmap is marked as a bus bridge (SystemRDL clause 9.2). RTL backends use it as a synthesis hint; the viewer surfaces it in tooltips."
         },
         "source": { "$ref": "#/$defs/SourceLoc" },
+        "parameters": {
+          "type": "array",
+          "description": "Resolved parametrized-type bindings for this instance. Empty / omitted when the type is non-parametrized.",
+          "items": { "$ref": "#/$defs/ParameterBinding" }
+        },
         "children": {
           "type": "array",
           "items": {
@@ -87,6 +92,11 @@
         "size": { "$ref": "#/$defs/HexU64" },
         "desc": { "type": "string" },
         "source": { "$ref": "#/$defs/SourceLoc" },
+        "parameters": {
+          "type": "array",
+          "description": "Resolved parametrized-type bindings for this instance.",
+          "items": { "$ref": "#/$defs/ParameterBinding" }
+        },
         "children": {
           "type": "array",
           "items": {
@@ -128,9 +138,30 @@
         },
         "desc": { "type": "string" },
         "source": { "$ref": "#/$defs/SourceLoc" },
+        "parameters": {
+          "type": "array",
+          "description": "Resolved parametrized-type bindings for this register instance (e.g. a `parametrized_reg #(.WIDTH(16))` shows `WIDTH = 16`).",
+          "items": { "$ref": "#/$defs/ParameterBinding" }
+        },
         "fields": {
           "type": "array",
           "items": { "$ref": "#/$defs/Field" }
+        }
+      }
+    },
+    "ParameterBinding": {
+      "type": "object",
+      "required": ["name", "value"],
+      "additionalProperties": false,
+      "description": "One resolved parameter on a parametrized component instance. Value is post-elaboration (the literal the compiler evaluated for THIS instance).",
+      "properties": {
+        "name": { "type": "string" },
+        "type": {
+          "type": "string",
+          "description": "Parameter type-name (e.g. 'int', 'longint', 'string')."
+        },
+        "value": {
+          "description": "JSON-safe rendering of the resolved value: int/float/bool/string/null inline, exotic types fall back to repr()."
         }
       }
     },

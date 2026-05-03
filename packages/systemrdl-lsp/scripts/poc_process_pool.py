@@ -56,7 +56,7 @@ def probe_pickle_rootnode() -> dict:
 
     rdl_path = EXAMPLES / "sample.rdl"
     text = rdl_path.read_text()
-    _msgs, roots, tmp_path, _consumed = _compile_text(rdl_path.as_uri(), text)
+    _msgs, roots, tmp_path, _consumed, _node_index, _spine = _compile_text(rdl_path.as_uri(), text)
     print(f"elaborated {len(roots)} roots from {rdl_path.name}")
     if not roots:
         return {"ok": False, "reason": "no roots elaborated"}
@@ -104,7 +104,7 @@ def probe_compression() -> dict:
     from systemrdl_lsp.compile import _compile_text
 
     print(f"elaborating {big.name}...")
-    _msgs, roots, tmp_path, _ = _compile_text(big.as_uri(), big.read_text())
+    _msgs, roots, tmp_path, _, _node_index, _spine = _compile_text(big.as_uri(), big.read_text())
     if not roots:
         return {"ok": False, "reason": "no roots"}
 
@@ -150,7 +150,7 @@ def _serialize_in_subprocess(uri: str, text: str) -> dict:
     )
     from systemrdl_lsp.serialize import _serialize_root, _serialize_spine
 
-    msgs, roots, tmp_path, consumed = _compile_text(uri, text)
+    msgs, roots, tmp_path, consumed, _node_index, _spine = _compile_text(uri, text)
     spine_envelopes = []
     full_envelopes = []
     for r in roots:
@@ -236,7 +236,7 @@ def _elaborate_only(uri: str, text: str) -> tuple[float, int]:
     from systemrdl_lsp.compile import _compile_text
 
     t0 = time.monotonic()
-    _msgs, roots, tmp_path, _consumed = _compile_text(uri, text)
+    _msgs, roots, tmp_path, _consumed, _node_index, _spine = _compile_text(uri, text)
     elapsed = time.monotonic() - t0
     tmp_path.unlink(missing_ok=True)
     return elapsed, len(roots)

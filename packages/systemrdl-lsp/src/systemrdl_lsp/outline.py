@@ -24,8 +24,8 @@ from lsprotocol.types import (
     SymbolKind,
 )
 
+from .compile import _format_hex
 from .diagnostics import _build_range
-from .hover import _format_hex
 from .serialize import _hex
 
 if TYPE_CHECKING:
@@ -180,8 +180,14 @@ def _inlay_hints_for_addressables(
 def _code_lenses_for_addrmaps(
     roots: list[RootNode], path: pathlib.Path
 ) -> list[CodeLens]:
-    """One ``📊 N regs · 0xS..0xE`` summary lens above every top-level addrmap."""
-    from systemrdl.node import AddrmapNode, RegNode
+    """Cheap-shell lenses (range + data only) for top-level addrmaps in ``path``.
+
+    Heavy walk (reg count, address range) is deferred to ``codeLens/resolve``
+    — VSCode only resolves lenses currently on screen, so on a 25k-reg file
+    we walk one addrmap subtree per scroll instead of all of them every time
+    the editor asks for lenses.
+    """
+    from systemrdl.node import AddrmapNode
 
     out: list[CodeLens] = []
     for r in roots:
@@ -199,30 +205,50 @@ def _code_lenses_for_addrmaps(
                 start=Position(line=line_0b, character=0),
                 end=Position(line=line_0b, character=0),
             )
-
-            reg_count = 0
-            min_addr: int | None = None
-            max_addr: int | None = None
-
-            def walk(node: Any) -> None:
-                nonlocal reg_count, min_addr, max_addr
-                if isinstance(node, RegNode):
-                    reg_count += 1
-                    a = node.absolute_address
-                    min_addr = a if min_addr is None else min(min_addr, a)
-                    end = a + max(1, getattr(node, "size", 1))
-                    max_addr = end if max_addr is None else max(max_addr, end)
-                if hasattr(node, "children"):
-                    for c in node.children(unroll=True):
-                        walk(c)
-
-            walk(top)
-            if reg_count:
-                summary = f"📊 {reg_count} reg{'s' if reg_count != 1 else ''}"
-                if min_addr is not None and max_addr is not None:
-                    summary += f" · {_hex(min_addr)}..{_hex(max_addr)}"
-                out.append(CodeLens(range=rng, command=Command(title=summary, command="")))
+            out.append(CodeLens(
+                range=rng,
+                data={"addrmapName": top.inst_name, "line": line_0b},
+            ))
     return out
+
+
+def _resolve_code_lens_for(roots: list[RootNode], addrmap_name: str) -> Command | None:
+    """Walk the named top-level addrmap, return the summary Command."""
+    from systemrdl.node import AddrmapNode, RegNode
+
+    target = None
+    for r in roots:
+        for top in r.children(unroll=True):
+            if isinstance(top, AddrmapNode) and top.inst_name == addrmap_name:
+                target = top
+                break
+        if target is not None:
+            break
+    if target is None:
+        return None
+    reg_count = 0
+    min_addr: int | None = None
+    max_addr: int | None = None
+
+    def walk(node: Any) -> None:
+        nonlocal reg_count, min_addr, max_addr
+        if isinstance(node, RegNode):
+            reg_count += 1
+            a = node.absolute_address
+            min_addr = a if min_addr is None else min(min_addr, a)
+            end = a + max(1, getattr(node, "size", 1))
+            max_addr = end if max_addr is None else max(max_addr, end)
+        if hasattr(node, "children"):
+            for c in node.children(unroll=True):
+                walk(c)
+
+    walk(target)
+    if not reg_count:
+        return None
+    summary = f"📊 {reg_count} reg{'s' if reg_count != 1 else ''}"
+    if min_addr is not None and max_addr is not None:
+        summary += f" · {_hex(min_addr)}..{_hex(max_addr)}"
+    return Command(title=summary, command="")
 
 
 # ---------------------------------------------------------------------------

@@ -76,7 +76,7 @@ def test_compressed_round_trip_locally(tmp_path):
     rdl.write_text(SAMPLE_RDL)
     blob = _compile_text_compressed(rdl.as_uri(), SAMPLE_RDL)
     assert isinstance(blob, bytes)
-    msgs, roots, tmp, consumed = _decompress_compile_result(blob)
+    msgs, roots, tmp, consumed, _node_index, _spine = _decompress_compile_result(blob)
     try:
         assert isinstance(msgs, list)
         assert len(roots) == 1
@@ -97,7 +97,7 @@ def test_compression_actually_shrinks(tmp_path):
     rdl = tmp_path / "a.rdl"
     rdl.write_text(SAMPLE_RDL)
     blob = _compile_text_compressed(rdl.as_uri(), SAMPLE_RDL)
-    msgs, roots, tmp, consumed = _decompress_compile_result(blob)
+    msgs, roots, tmp, consumed, _node_index, _spine = _decompress_compile_result(blob)
     try:
         raw = pickle.dumps((msgs, roots, tmp, consumed), protocol=5)
         # zlib L=1 typically gets at least 2x on this fixture; allow
@@ -126,10 +126,12 @@ def test_subprocess_round_trip_via_pool(real_pool, tmp_path):
     # Subprocess
     fut = real_pool.submit(_compile_text_compressed, rdl.as_uri(), SAMPLE_RDL)
     blob = fut.result(timeout=60)
-    msgs_p, roots_p, tmp_p, consumed_p = _decompress_compile_result(blob)
+    msgs_p, roots_p, tmp_p, consumed_p, _node_index, _spine = _decompress_compile_result(blob)
 
     # Local
-    _msgs_l, roots_l, tmp_l, _consumed_l = _compile_text(rdl.as_uri(), SAMPLE_RDL)
+    _msgs_l, roots_l, tmp_l, _consumed_l, _node_index, _spine = _compile_text(
+        rdl.as_uri(), SAMPLE_RDL,
+    )
 
     try:
         assert _fingerprint_roots(roots_p) == _fingerprint_roots(roots_l), (
@@ -289,7 +291,7 @@ def _elaborate_and_report_rss(uri: str, text: str) -> tuple[int, int]:
         sys.path.insert(0, str(sys_path_prefix))
     from systemrdl_lsp.compile import _compile_text
 
-    _msgs, roots, tmp_path, _consumed = _compile_text(uri, text)
+    _msgs, roots, tmp_path, _consumed, _node_index, _spine = _compile_text(uri, text)
     rss = _worker_rss_kb()
     tmp_path.unlink(missing_ok=True)
     return len(roots), rss
@@ -700,6 +702,46 @@ def test_disk_cache_load_overrides_stale_with_current_state(tmp_path, monkeypatc
         "disk cache load must reflect current stale_uris membership, "
         "not the value frozen at disk-write time"
     )
+
+
+def test_cancellation_emits_finished_and_registers_cleanup(real_pool, tmp_path):
+    """T4-A C6: when the user / pygls cancels an in-flight
+    `_full_pass_async` (LSP shutdown, rapid restart), two things must
+    happen:
+
+    1. ``rdl/elaborationFinished`` is emitted so the viewer's
+       "re-elaborating" spinner clears (would otherwise persist into
+       the next session via the cached webview state).
+    2. The shielded subprocess's tmp file gets cleaned up via a
+       done-callback (subprocess keeps running because of
+       ``asyncio.shield``; without the callback the tmp leaks).
+
+    Test: kick off an elaborate of a deliberately heavy fixture, cancel
+    the task before it can complete, assert the task raises
+    ``CancelledError``. The behavioural guarantee (callback registered)
+    is hard to observe from outside; we verify the public contract
+    (cancellation propagates without swallowing) and confirm the
+    plumbing doesn't crash on the cancel path.
+    """
+    s = build_server()
+    state = s._systemrdl_state
+    full_pass = s._systemrdl_full_pass_async
+    state.elaborate_in_process = False
+    state.elaborate_pool = real_pool
+
+    rdl = tmp_path / "a.rdl"
+    rdl.write_text(SAMPLE_RDL * 50)  # tiny but enough to give us a moment
+    uri = rdl.as_uri()
+
+    async def cancel_mid_flight() -> None:
+        task = asyncio.create_task(full_pass(uri, rdl.read_text()))
+        # Yield once so the task gets to the await point.
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    _run(cancel_mid_flight())
 
 
 def test_full_pass_pool_path_preserves_includes(real_pool, tmp_path):

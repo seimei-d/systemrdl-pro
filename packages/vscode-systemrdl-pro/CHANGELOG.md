@@ -4,6 +4,451 @@ All notable changes to **SystemRDL Pro** are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [SemVer](https://semver.org/).
 
+## [0.29.0] — 2026-05-03
+
+Bumps bundled language server to **systemrdl-lsp 0.21.0**.
+
+### Added — completion
+
+- Member access (`WIDE_REG.`) suggests reg fields; field-on-`.` suggests
+  built-in references (`anded` / `ored` / `xored` / `intr` / `halt`).
+- Property access (`inst->`) shows only properties that are
+  **`dyn_assign_allowed`** for the component class — driven by the
+  compiler's authoritative `property_rules` registry so it auto-tracks
+  upstream changes.
+- RHS value completion (`prop = `) lists exact legal literals — boolean
+  `true/false`, AccessType, OnReadType, OnWriteType, PrecedenceType,
+  AddressingType, InterruptType — derived from `valid_types` in the
+  compiler. `ro` / `wo` aliases added explicitly because the AccessType
+  enum uses `r` / `w`.
+- Snippet bodies for `addrmap`, `regfile`, `reg`, `field`, `enum`, `mem`,
+  `signal`, `property` — accept the keyword and tab through `$1` / `$2`
+  placeholders.
+- Instance suggestions deduped by short name (count + path list in the
+  documentation popup) and scoped to the cursor's enclosing addrmap /
+  regfile when detectable from the buffer.
+- LSP 3.17 `CompletionList.itemDefaults.editRange` shared across items.
+  Falls back to per-item `text_edit` when the client lacks the cap.
+
+### Added — formatter
+
+- Re-indents lines by running `{` / `}` depth (over- / under-indented
+  closing braces snap back into place).
+- Splits flat one-line `field { sw=rw; hw=r; reset=0; } NAME[…];` blocks
+  into one attribute per line.
+- Honours `// fmt: off` / `// fmt: on` markers (alias `// systemrdl-fmt:`)
+  to skip a region — same convention as black / clang-format.
+- New `systemrdl-pro.formatOnSave` setting (default `false`) routes the
+  formatter through `textDocument/willSaveWaitUntil`.
+
+### Added — capabilities
+
+- Hover popup carries a `· filename:N` markdown link (clickable goto-def)
+  that translates the compiler's tmp file back to the user's workspace path.
+- `textDocument/diagnostic` (LSP 3.17 pull-model) — push via
+  `publishDiagnostics` stays primary; pull serves a per-URI cached snapshot.
+- `textDocument/semanticTokens/range` (viewport-only re-tokenize) and
+  `textDocument/semanticTokens/full/delta` (single-edit diff against the
+  previous `result_id`).
+- `codeLens/resolve` — initial response is cheap shells; the addrmap walk
+  for `📊 N regs · 0xS..0xE` runs only for lenses VSCode actually paints.
+- `workspace/codeLens/refresh` notification on every successful elaborate
+  so the lens overlay tracks line shifts after format / edit.
+
+### Added — viewer
+
+- Detail panel renders a `Parameters` table for parametrized instances
+  (`parametrized_reg #(.WIDTH(16)) PR16` → `WIDTH = 16 (0x10)`).
+- New schema type `ParameterBinding` carried end-to-end through spine /
+  expand_node serialize.
+
+### Added — lifecycle / reliability
+
+- Formal LSP `shutdown` handler drains pending debounce tasks (with 2 s
+  cap), then `pool.shutdown(wait=True, cancel_futures=True)` so subprocess
+  workers exit cleanly on window close.
+- `ElaborationCache` backed by `OrderedDict` with LRU eviction (default
+  50 entries) — long multi-project sessions stop creeping into memory.
+- Cancellation cascade: in-flight ProcessPool futures are tracked per URI
+  and `.cancel()`'d on rapid `didChange` so queued slots free up
+  immediately. Already-running workers can't be killed safely in Python's
+  pool model, but the asyncio awaiter is dropped on parent cancel.
+
+### Refactored
+
+- `server.py` 2480 → 1388 lines (-44%). Extracted `_state.py`,
+  `_text_utils.py`, `_fingerprint.py`, `_handlers_rdl.py`,
+  `_handlers_lsp.py`.
+- `_publish_diagnostics` mirrors to `state.last_diagnostics` so the
+  pull-model handler answers cheaply.
+
+### Fixed
+
+- `examples/stress_25k_multi/bank_49.rdl` was missing the trailing `;`
+  after the regfile's closing brace — broke the demo file's parse.
+- Hover source link previously pointed at the LSP's content-addressed
+  tmp file (`.systemrdl-lsp-XXXXXX.rdl`); now translated to the real URI.
+
+## [0.28.5] — 2026-05-02
+
+Bumps bundled language server to **systemrdl-lsp 0.20.4**.
+
+### Fixed
+
+- **Cross-URI expand still serialized through the GIL.** Click on a
+  reg in `stress_25k.rdl`, then click on a reg in `sample.rdl` —
+  sample's reg appeared only after stress's resolved. Cause: the
+  `nodeId → RegNode` index was built lazily on first click via
+  `to_thread`, which on a 25k-reg design held the GIL for ~hundreds
+  of ms and starved concurrent expand requests. The index is now
+  built **inside the compile pool worker** and shipped back with the
+  compile result (zlib+pickle preserves shared refs). By the time
+  the viewer can render and click, the index is already on the cache
+  — no on-demand build, no GIL contention. Also strips noisy historical
+  comments left over from the recent perf passes.
+
+## [0.28.4] — 2026-05-02
+
+### Fixed
+
+- **Viewer was still slow on click into a 25k-reg placeholder, even
+  though the LSP returned in <1 ms.** The 0.28.3 LSP fix made
+  `expand_node` truly O(1), but the viewer was still spending hundreds
+  of ms per click on JS-side work: `findRegByKey` ran a full O(N)
+  DFS walk every time the selection changed (twice — once in the
+  auto-select effect, once in the `found` useMemo), and the expand
+  response was spliced INTO the tree state so `flatRows` and the new
+  `regIndex` both rebuilt afterwards (each O(N)). Now: a per-root
+  `Map<key, {reg, path}>` makes selection lookup O(1), and the
+  populated reg is stored out-of-band keyed by `version:nodeId` and
+  overrides `found.reg` at render time — the tree state is never
+  touched, so no downstream memo invalidation. Click-to-Detail is now
+  bound by React reconciliation alone.
+
+## [0.28.3] — 2026-05-02
+
+Bumps bundled language server to **systemrdl-lsp 0.20.3**.
+
+### Fixed
+
+- **First-click expand was still slow on big designs and serialized
+  across panels.** 0.28.2's `expand_node` O(1) fix lazy-built the
+  `nodeId → RegNode` index on first click, but on a 25k-reg design
+  that build itself ran for hundreds of ms holding the GIL — so
+  clicking a register in stress_25k.rdl AND simultaneously clicking a
+  register in another open file made the second click wait for the
+  first to finish. Now the index is built FOR FREE during spine
+  serialization (same DFS that assigns node ids). By the time the
+  viewer renders and the user can click, the index is already
+  populated, so every expand request is a O(1) dict lookup with no
+  CPU work to contend over.
+
+## [0.28.2] — 2026-05-02
+
+Bumps bundled language server to **systemrdl-lsp 0.20.2**.
+
+### Fixed
+
+- **Big-file elaborate blocked small-file elaborate.** Field-reported
+  as "open stress_25k.rdl, then enum_demo.rdl — had to wait until
+  the big one rendered". The cross-process pool (T3) ran the actual
+  elaborate in parallel, but the post-compile work
+  (`_address_conflict_diagnostics` walks the tree twice;
+  `_fingerprint_roots` walks it once for SHA-256) ran synchronously
+  on the asyncio loop. On a 25k-reg design that meant several seconds
+  of pure-Python tree walking with the GIL pinned to one URI's apply,
+  blocking every other URI's `_apply_compile_result` from making
+  progress. Both walks now run via `asyncio.to_thread` so the loop
+  schedules other URIs in between — restores the cross-URI decoupling
+  that existed before T2 added fingerprinting and T4-A added the
+  conflict scan.
+
+## [0.28.1] — 2026-05-02
+
+Bumps bundled language server to **systemrdl-lsp 0.20.1**.
+
+### Fixed
+
+- **`refreshMemoryMap` inflight guard dropped follow-up versions.**
+  Field-reported as "edited address, took 15s to update". The 0.28.0
+  inflight guard collapsed N concurrent calls into 1 fetch (correct
+  for drag/resize spam), but if a newer-version notification arrived
+  *during* an in-flight fetch, the new one was silently dropped — the
+  viewer stayed on the just-fetched version until some unrelated
+  event triggered another refresh (typically 15-30 s later when the
+  user clicked away and back). Mirrors the CLI's
+  `refreshInFlight + refreshQueued` idiom: N→1 coalescing on arrival,
+  plus one queued re-fetch after the in-flight one finishes.
+
+- **`rdl/expandNode` walked the full tree on every first click.**
+  Field-reported as "register details slow on 25k". Each placeholder
+  expand re-ran a depth-first walk of the elaborated tree to find the
+  matching `nodeId`. On a 25k-register design that meant noticeable
+  lag every time you opened a register's detail pane for the first
+  time, and concurrent expand calls serialized through the GIL.
+  Now the LSP builds a `nodeId → RegNode` index lazily on first
+  expand per cache entry; subsequent expands are O(1) dict lookups.
+  Memory cost is one ref per Reg (negligible — RegNodes already live
+  in the cached roots).
+
+## [0.28.0] — 2026-05-02
+
+T4-C/T4-D — architectural cleanups (Tier-3) + performance fixes
+(Tier-4) from the post-T3 multi-agent code review. No new features;
+~20 reliability/correctness/performance items landed across all four
+packages. Bigger architectural splits (server.py / extension.ts /
+viewer-core hooks; viewer virtualisation) deferred to dedicated PRs
+where the regression risk warrants standalone review.
+
+### Architecture (T4-C)
+
+- **A3** — `_apply_stale_transition` helper consolidates the stale
+  state machine that used to live inline in three sites
+  (`_apply_compile_result` success + parse-failure, `_full_pass_async`
+  timeout). The last three field-reported stale-bar regressions all
+  traced back to drift between the copies.
+- **A5** — `_read_workspace_config` + `_apply_workspace_config`
+  helpers dedup the config fetch/refresh flow that was copy-pasted
+  between `_on_initialized` and `_on_config_change`.
+- **A7** — `_format_hex` moved to `compile.py`; `outline.py` no
+  longer imports from `hover.py` (inverted dependency cleanup).
+- **A10** — `_children_safe` helper kills the four-times-copy-pasted
+  `node.children(skip_not_present=...)` try/except dance in
+  `_harvest_consumed_files` and `_fingerprint_roots`.
+
+### Performance (T4-D)
+
+In-LSP:
+
+- **P6** — `DiskCache.evict_lru` no longer issues `iterdir + stat`
+  on every put. Counter gate runs the actual eviction every
+  `max_entries / 4` puts.
+- **P7** — `_harvest_consumed_files` dedups raw paths before
+  `pathlib.resolve()` (~50–250 ms saved on 25k regs; the harvest
+  visited 50k src_refs but only K unique filenames).
+- **P8** — `_on_close` cancels the pending debounce task and
+  drops the elaboration lock (was leaving locks alive forever for
+  files closed during a debounce window).
+- **P10** — `_peakrdl_toml_paths` cached via `lru_cache(128)` —
+  pre-T4-D walked ancestor dirs and read the toml on every
+  `_resolve_search_paths` call (every didOpen / didSave).
+- **P11** — `_build_selection_ranges` builds a prefix-sum of line
+  start offsets so `pos_of` is O(log n) (binary search) instead of
+  O(n) per call. Deep nesting in 10k-line files used to be O(K·N).
+
+In viewer-core:
+
+- **P2** — `TreeRow` wrapped in `React.memo` so a selection change
+  re-renders only the two rows whose `selected` flipped, not all
+  500–25k visible rows.
+- **P3** — `findRegByKey` wrapped in `useMemo` so the O(n) DFS
+  doesn't run in the render body on every keystroke / scroll /
+  toast.
+- **P4** — Filter input debounced 150 ms. Pre-T4-D fast typing
+  triggered 200k field comparisons per keystroke on a 25k-reg
+  tree.
+- **P5** — `Detail` wrapped in `React.memo` so filter keystrokes
+  don't re-render the heavy bit-grid + field rows when the active
+  reg hasn't changed.
+
+In extension:
+
+- **P12** — `onDidChangeDiagnostics` debounced 200 ms. Status-bar
+  diag refresh used to fire per LSP publish (multiple per keystroke
+  during catchup), each iterating the entire DiagnosticCollection.
+- **P13** — `cachedRegCount` + `cachedRootNames` populated once on
+  `refreshMemoryMap`. Status-bar updates no longer re-walk the tree
+  on every tab switch / debounced diag tick.
+- **P14** — `refreshMemoryMap` coalesces concurrent calls via a
+  per-panel inflight promise. Drag/resize used to fire multiple LSP
+  round-trips for the same effective work.
+
+In rdl-viewer-cli:
+
+- **P15** — Tree pre-serialised once per refresh (`latestTreeJson`)
+  instead of being re-`JSON.stringify`-d on every `/tree` request
+  and every SSE connect.
+- **P16** — `JSON.parse` accepts the dump's `Buffer` directly,
+  avoiding the intermediate UTF-8 string allocation (saves ~half
+  the peak memory transient on 25k-reg dumps).
+- **P17** — `staticAsset` caches asset bytes in a `Map<string,
+  Buffer>` after the first load. Pre-T4-D every request did
+  `existsSync + readFileSync` syscalls.
+
+### Deferred to follow-up PRs
+
+These are real items from the review but warrant standalone PR
+review because they restructure or add risk:
+
+- **A1** — split `server.py` build_server() factory.
+- **A2** — `ServerState` sub-types (T2 / T3 / config clusters).
+- **A4** — separate test-hooks module + shrink `__all__`.
+- **A8** — move `_canonicalize_for_skip` + `_fingerprint_roots` to `cache.py`.
+- **A9** — split `_full_pass_async` into named phases.
+- **A11** — viewer-core `useTransport` + `useExpandNode` hooks.
+- **A12** — extension.ts module split.
+- **A13/A14** — typed transport factory in viewer-core, used by
+  extension and CLI inline scripts.
+- **A15/A16** — shared python-probe module + CLI server-state factory.
+- **P1** — viewer virtualisation (largest UX win; needs careful
+  perf benchmarks before/after to justify).
+- **P9** — `cached.serialized` non-lazy memory release.
+
+### Tests
+
+138 pass (no test changes — these are reliability/perf fixes
+without new behaviour surface). All typechecks pass.
+
+## [0.27.1] — 2026-05-02
+
+T4-B — eleven Tier-2 hardening fixes from the post-T3 multi-agent
+code review. No new features; reliability + performance + correctness
+improvements that prevent classes of bugs from emerging.
+
+### Fixed
+
+- **H1 — `pendingExpansions` `useState` → `useRef`.** Pre-T4-B used
+  `useState<Set<string>>` with the setter discarded — the Set was
+  mutated in place. Under React 18 StrictMode the effect double-
+  invokes; the second invocation found the key already in the Set
+  from the first run and silently dropped the expand request,
+  leaving the placeholder spinner stuck in dev. Real `useRef` now.
+- **H5 — Per-panel cursor sync state.** `cursorSyncTimer` and
+  `suppressNextCursorSync` were module-globals. With two panels
+  open (multi-root, Decision 3C), a reveal in panel A would
+  suppress the next cursor sync for panel B too, and a cursor move
+  in panel A's editor would clear panel B's pending debounce.
+  Both fields now live on `PanelEntry` per panel.
+- **H6 — Restart-server subscription leak.** Each call to
+  `startServer` (initial + every `restartServer`) used to push a
+  fresh `{ dispose: () => client?.stop() }` into
+  `context.subscriptions` and register a fresh trio of
+  `client.onNotification` handlers without cleaning up prior
+  registrations. After N restarts every push notification fired
+  N×`refreshMemoryMap`. Tracked lifecycle aggregate now disposed
+  before re-creating.
+- **H7 — `clientReady` hung forever on early-return.** `startServer`
+  returned without resolving the readiness promise when Python was
+  not found or the LSP module was missing. Deserialized panels
+  awaiting `clientReady` blocked on it indefinitely, leaving the
+  viewer permanently blank with no error message even after a
+  restart fixed the underlying issue. `signalClientReady()` now
+  fires on every exit path including the catch arm of
+  `client.start()`.
+- **H8 — CSPRNG nonce.** `makeNonce()` used `Math.random()` —
+  category-error vs the CSP nonce mechanism. Switched to
+  `crypto.randomBytes(18).toString('base64url')`.
+- **H9 — Watcher + decoration disposal.** `createFileSystemWatcher`
+  was leaked by `LanguageClient.synchronize.fileEvents` on every
+  restart (one inotify/fd handle per restart). `flashDecoration`
+  was a module-load-time singleton with no disposal path. Both now
+  tracked and disposed correctly.
+
+### Fixed (in `systemrdl-lsp` 0.19.1)
+
+- **H2 — `include_vars` in disk cache key.** `make_key` hashed
+  `(abs_path, mtime, include_paths, compiler_version)` but NOT the
+  `include_vars` substitution map. Two compiles of the same file
+  with different `$IP_ROOT` values would hit the same disk-cache
+  entry and the second would receive the first's spine envelope —
+  silent cross-workspace cache poisoning. Vars now in the key
+  (sorted key=value pairs, NUL-separated).
+- **H3 — `_fingerprint_roots` type cache.** Pre-T4-B did 200k+
+  uncached `node.get_property()` calls per fingerprint on a 25k-
+  reg fixture (~1s wasted per elaborate). Mirrors `serialize.py`'s
+  `_TypeCache` pattern: keyed by `(id(original_def), prop_name)`,
+  bypassed for instance-level overrides.
+- **H4 — Hover off the event loop + single tree walk.**
+  `_property_origin_hint` did a synchronous `Path.read_text` on
+  every hover; the hover handler runs on the asyncio event loop, so
+  a slow NFS / spinning-disk read would stall diagnostics,
+  completion, and every other LSP response for hundreds of
+  milliseconds. New optional `line_reader` parameter consults the
+  LSP buffer cache first, falls back to disk only when not
+  provided. Plus `_node_at_position` collapsed from two full tree
+  walks (line-counter + best-match) to one, and the `fields()`
+  double-visit (children(unroll=True) already yields fields)
+  was removed — roughly 2× speedup on every hover.
+
+### Fixed (in `rdl-viewer` 0.1.0+)
+
+- **H10 — SIGTERM handler.** Pre-T4-B only `SIGINT` was handled.
+  Docker, systemd, plain `kill <pid>` all default to SIGTERM and
+  took the default behaviour (immediate exit, no cleanup) —
+  leaking the watcher's inotify handle and orphaning any
+  in-flight Python dump child as a zombie until the kernel
+  reaped it. Mirror SIGINT handler.
+- **H11 — `--port` / `--python` argv bounds check.** Pre-T4-B did
+  bare `Number(argv[++i])` for `--port` (forgot value →
+  `Number(undefined)=NaN` → Bun.serve assigned a random port,
+  silent confusion) and bare `argv[++i]` for `--python`
+  (`undefined` propagates into spawnSync, throws uncaught). Now
+  validates + exits with an actionable error.
+
+### Tests
+
+138 pass (no test changes — these are reliability/perf fixes
+without new behavior surface).
+
+## [0.27.0] — 2026-05-02
+
+T4-A — six Tier-1 critical bug fixes from the post-T3 multi-agent
+code review (`docs/code-review-2026-05-02.md`, local-only). Each one
+was a real bug nobody had reported yet but every one would surface
+eventually.
+
+### Fixed
+
+- **C1 — Decoder showed `0x0` for fields above bit 31 of 64-bit
+  registers.** JavaScript `>>>` is a 32-bit shift; a 64-bit reg with
+  a field at `lsb >= 32` silently truncated to zero regardless of
+  input. Decoder now routes >32-bit registers through `BigInt`
+  arithmetic; ≤32-bit registers stay on the cheaper `Number` path.
+- **C2 — Lazy expand left placeholder spinner stuck on screen.**
+  `spliceExpandedReg` mutated the parent's `children` array in place
+  and only spread the top-level `tree` envelope, so `useMemo([root])`
+  callers (`buildFlatList` → `flatRows`) didn't recompute and the
+  tree kept rendering the placeholder row even though the reg's data
+  was already in memory. Splice now returns a fresh tree with every
+  container on the root → reg path cloned (immutable update path).
+- **C3 — `expandNode` race lost responses on rapid clicks.**
+  `expandResolvers` was keyed on `nodeId` only — a second click for
+  the same node (or a v2 elaborate landing while v1's expand was in
+  flight) overwrote the resolver, leaking the prior promise so the
+  spinner never cleared. Resolvers now keyed by `version+":"+nodeId`,
+  and rapid duplicate clicks short-circuit to the existing in-flight
+  promise instead of posting a second LSP request and overwriting
+  the resolver.
+- **C4 — `getTree()` rejection silently hung the viewer.** The
+  `.catch(() => {})` swallowed every failure mode (LSP startup
+  failure, transport timeout). The viewer now renders an error pane
+  with the message + a Retry button; live tree updates clear the
+  error automatically when the transport recovers.
+
+### Fixed (in `systemrdl-lsp` 0.19.0)
+
+- **C5 — Standalone CLI binary served HTTP 500 on every static
+  asset.** `VIEWER_CORE_DIST` was hardcoded to a path relative to
+  the source tree; after `bun build` produced `dist/rdl-viewer.js`
+  the path no longer resolved. Build now copies viewer assets into
+  `dist/viewer/` next to the binary, and `VIEWER_CORE_DIST` prefers
+  that location with the dev-source path as fallback.
+- **C6 — LSP shutdown / cancellation leaked tmp files and stuck the
+  "Re-elaborating" spinner.** `_full_pass_async` sent
+  `rdl/elaborationStarted` then awaited the shielded subprocess
+  future; `CancelledError` propagated out without sending `Finished`
+  (spinner stuck) and without registering a tmp-file cleanup
+  callback (subprocess kept running, wrote tmp, no-one unlinked it).
+  New explicit `except CancelledError` catches the case, registers
+  a done-callback that unlinks the tmp when the late result arrives,
+  emits `Finished`, then re-raises so the cancellation still
+  propagates to whatever requested it.
+
+### Tests
+
+138 pass (137 baseline + 1 new in `tests/test_perf_t3.py` covering
+the cancellation path).
+
 ## [0.26.4] — 2026-05-02
 
 ### Fixed (in `systemrdl-lsp` 0.18.4)

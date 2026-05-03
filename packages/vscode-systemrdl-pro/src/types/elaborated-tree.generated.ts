@@ -14,6 +14,12 @@ export type SourceLoc = {
   endColumn?: number;
 };
 
+export type ParameterBinding = {
+  name: string;
+  type?: string;
+  value: unknown;
+};
+
 export type AccessMode = 'rw' | 'ro' | 'wo' | 'w1c' | 'w0c' | 'w1s' | 'w0s' | 'rclr' | 'rset' | 'wclr' | 'wset' | 'na';
 
 export type EncodeEntry = {
@@ -51,6 +57,7 @@ export type Reg = {
   accessSummary?: string;
   desc?: string;
   source?: SourceLoc;
+  parameters?: ParameterBinding[];
   fields: Field[];
 };
 
@@ -64,6 +71,7 @@ export type Regfile = {
   size: HexU64;
   desc?: string;
   source?: SourceLoc;
+  parameters?: ParameterBinding[];
   children: (Regfile | Reg)[];
 };
 
@@ -78,6 +86,7 @@ export type Addrmap = {
   desc?: string;
   isBridge?: boolean;
   source?: SourceLoc;
+  parameters?: ParameterBinding[];
   children: (Addrmap | Regfile | Reg)[];
 };
 

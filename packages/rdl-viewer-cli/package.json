@@ -9,7 +9,8 @@
   "bin": { "rdl-viewer": "./src/index.ts" },
   "scripts": {
     "start": "bun run src/index.ts",
-    "build": "bun build src/index.ts --target=bun --outfile=dist/rdl-viewer.js",
+    "build": "bun build src/index.ts --target=bun --outfile=dist/rdl-viewer.js && bun run copy-assets",
+    "copy-assets": "mkdir -p dist/viewer && cp -R ../rdl-viewer-core/dist/* dist/viewer/",
     "typecheck": "tsc --noEmit",
     "lint": "echo 'rdl-viewer-cli: lint not configured'"
   },

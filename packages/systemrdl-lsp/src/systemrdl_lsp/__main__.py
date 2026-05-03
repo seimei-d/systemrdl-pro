@@ -30,6 +30,14 @@ def main() -> int:
         stream=sys.stderr,
     )
 
+    # Swap pygls's sync stdout writer for our async one BEFORE start_io.
+    # The sync writer blocks the asyncio loop on every flush — fine for
+    # small responses, fatal for the multi-MB spine envelopes a 25k-reg
+    # design produces (the loop stalls for seconds while vscode drains
+    # the pipe, and every other in-flight LSP request waits behind it).
+    from systemrdl_lsp._async_writer import install as _install_async_writer
+    _install_async_writer()
+
     server = build_server()
     server.start_io()
     return 0

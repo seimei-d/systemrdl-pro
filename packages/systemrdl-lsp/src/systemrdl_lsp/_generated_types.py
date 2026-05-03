@@ -27,6 +27,11 @@ class SourceLoc(TypedDict):
     endLine: NotRequired[int]
     endColumn: NotRequired[int]
 
+class ParameterBinding(TypedDict):
+    name: str
+    type: NotRequired[str]
+    value: object
+
 AccessMode = Literal['rw', 'ro', 'wo', 'w1c', 'w0c', 'w1s', 'w0s', 'rclr', 'rset', 'wclr', 'wset', 'na']
 
 class EncodeEntry(TypedDict):
@@ -62,6 +67,7 @@ class Reg(TypedDict):
     accessSummary: NotRequired[str]
     desc: NotRequired[str]
     source: NotRequired["SourceLoc"]
+    parameters: NotRequired[list["ParameterBinding"]]
     fields: list["Field"]
 
 class Regfile(TypedDict):
@@ -74,6 +80,7 @@ class Regfile(TypedDict):
     size: "HexU64"
     desc: NotRequired[str]
     source: NotRequired["SourceLoc"]
+    parameters: NotRequired[list["ParameterBinding"]]
     children: list[Union["Regfile", "Reg"]]
 
 class Addrmap(TypedDict):
@@ -87,6 +94,7 @@ class Addrmap(TypedDict):
     desc: NotRequired[str]
     isBridge: NotRequired[bool]
     source: NotRequired["SourceLoc"]
+    parameters: NotRequired[list["ParameterBinding"]]
     children: list[Union["Addrmap", "Regfile", "Reg"]]
 
 # Top-level envelope ----------------------------------------------------

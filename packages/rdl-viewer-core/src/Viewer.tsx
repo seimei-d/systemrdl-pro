@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ElaboratedTree, Reg, SourceLoc, Transport, TreeNode } from './types';
-import { findFirstReg, findRegByKey, isContainer, subtreeMatches, type FilterScope } from './util';
+import { findFirstReg, isContainer, subtreeMatches, type FilterScope } from './util';
 import { buildFlatList, FlatRow, Tree } from './Tree';
 import { Detail } from './Detail';
 import { ContextMenu, CtxMenuItem, CtxMenuState } from './ContextMenu';
@@ -12,19 +12,45 @@ export function Viewer({ transport }: Props) {
   const [activeRoot, setActiveRoot] = useState(0);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [filter, setFilter] = useState('');
+  // Separate uncontrolled-style input value so the input feels instant
+  // while `filter` (which drives the expensive subtree scan) only
+  // commits after the user stops typing for 150 ms. Cuts 200k field
+  // comparisons per keystroke down to one per pause on big trees.
+  const filterTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [filterScope, setFilterScope] = useState<FilterScope>('all');
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
   const [ctxMenu, setCtxMenu] = useState<CtxMenuState>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [isElaborating, setIsElaborating] = useState(false);
+  // surface getTree() rejections to the user. Pre-T4-A this was
+  // ``.catch(() => {})``, so any LSP startup failure or transport
+  // hiccup left the viewer rendering "Loading…" forever with zero
+  // signal. Now the rejection is captured and rendered as an error
+  // banner with a retry handle. Fixed in 0.26.5+.
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [retryCounter, setRetryCounter] = useState(0);
 
   // Initial fetch + live updates.
   useEffect(() => {
     let mounted = true;
-    transport.getTree().then(t => { if (mounted) setTree(t); }).catch(() => {});
-    const off = transport.onTreeUpdate(t => { if (mounted) setTree(t); });
+    setLoadError(null);
+    transport.getTree()
+      .then(t => { if (mounted) setTree(t); })
+      .catch(err => {
+        if (!mounted) return;
+        const msg = err instanceof Error ? err.message : String(err);
+        setLoadError(msg || 'unknown error');
+      });
+    const off = transport.onTreeUpdate(t => {
+      if (!mounted) return;
+      setTree(t);
+      // A live update means the transport is healthy again — clear
+      // any prior load error banner so the recovered tree renders
+      // without leftover noise.
+      setLoadError(null);
+    });
     return () => { mounted = false; off(); };
-  }, [transport]);
+  }, [transport, retryCounter]);
 
   // Re-elaborate indicator. The host signals start/finish of a full pass; the
   // banner stays up while we wait so the user knows a fresh tree is on the
@@ -34,12 +60,51 @@ export function Viewer({ transport }: Props) {
     return transport.onElaborating(setIsElaborating);
   }, [transport]);
 
+  const roots = tree?.roots ?? [];
+  const root = roots[activeRoot];
+
+  // line → location index, built once per tree. Replaces the per-cursor-move
+  // O(N) walk through every root + reg + field that previously fired on
+  // every editor cursor change. Same idea as `regIndex` for clicks: do the
+  // O(N) walk once at build time, do O(1) lookups on the hot path. Cursor
+  // sync fires for every keystroke in the host editor, so this matters on
+  // 25k-reg designs.
+  const lineIndex = useMemo(() => {
+    const m = new Map<number, { kind: 'tab'; index: number } | { kind: 'reg'; key: string }>();
+    if (!tree) return m;
+    const rs = tree.roots ?? [];
+    // Tabs first so root-line entries take precedence over a same-line reg.
+    for (let i = 0; i < rs.length; i++) {
+      const ln = rs[i].source?.line;
+      if (ln !== undefined && !m.has(ln)) m.set(ln, { kind: 'tab', index: i });
+    }
+    function walk(node: TreeNode, segs: string[]): void {
+      if (node.kind === 'reg') {
+        const key = segs.join('.');
+        for (const f of node.fields || []) {
+          const fl = f.source?.line;
+          if (fl !== undefined && !m.has(fl)) m.set(fl, { kind: 'reg', key });
+        }
+        const rl = node.source?.line;
+        if (rl !== undefined && !m.has(rl)) m.set(rl, { kind: 'reg', key });
+        return;
+      }
+      // For containers we do NOT register the container line — the original
+      // walk explicitly returned null on container hits so the outer loop
+      // could route to a tab match instead. We've already pre-seeded tabs
+      // above; container interior keeps walking into children.
+      for (const c of node.children || []) walk(c, segs.concat([c.name]));
+    }
+    for (const r of rs) walk(r, [r.name]);
+    return m;
+  }, [tree]);
+
   // Optional editor cursor sync.
   useEffect(() => {
     if (!transport.onCursorMove) return;
     return transport.onCursorMove(line0b => {
       if (!tree) return;
-      const result = locateByCursorLine(tree.roots, line0b);
+      const result = lineIndex.get(line0b);
       if (!result) return;
       if (result.kind === 'tab' && activeRoot !== result.index) {
         setActiveRoot(result.index);
@@ -49,10 +114,7 @@ export function Viewer({ transport }: Props) {
         setSelectedKey(result.key);
       }
     });
-  }, [tree, activeRoot, transport]);
-
-  const roots = tree?.roots ?? [];
-  const root = roots[activeRoot];
+  }, [tree, activeRoot, transport, lineIndex]);
 
   // Compute flat list once per render — drives Tree and keyboard handler.
   const flatRows = useMemo<FlatRow[]>(
@@ -60,15 +122,33 @@ export function Viewer({ transport }: Props) {
     [root, filter, filterScope, collapsed],
   );
 
+  // key → {reg, path} index built once per root for O(1) selection
+  // lookup. Without this, every click re-walked the whole tree.
+  const regIndex = useMemo(() => {
+    const m = new Map<string, { reg: Reg; path: string[] }>();
+    if (!root) return m;
+    function walk(node: TreeNode, segs: string[]): void {
+      if (node.kind === 'reg') {
+        m.set(segs.join('.'), { reg: node, path: segs });
+        return;
+      }
+      const kids = node.children;
+      if (!kids) return;
+      for (const c of kids) walk(c, segs.concat([c.name]));
+    }
+    walk(root, [root.name]);
+    return m;
+  }, [root]);
+
   // Auto-select first reg when root changes or selection becomes invalid.
   useEffect(() => {
     if (!root) return;
-    const stillValid = selectedKey && findRegByKey(root, selectedKey);
+    const stillValid = selectedKey && regIndex.has(selectedKey);
     if (!stillValid) {
       const first = findFirstReg(root, [root.name]);
       setSelectedKey(first?.key ?? null);
     }
-  }, [root, selectedKey]);
+  }, [root, selectedKey, regIndex]);
 
   const filterMatchCount = useMemo(
     () => flatRows.filter(r => r.kind === 'reg').length,
@@ -132,6 +212,7 @@ export function Viewer({ transport }: Props) {
       } else if (e.key === 'Escape') {
         const input = document.getElementById('rdl-filter-input') as HTMLInputElement | null;
         if (input && (document.activeElement === input || filter)) {
+          if (filterTimer.current) clearTimeout(filterTimer.current);
           setFilter('');
           input.value = '';
           input.blur();
@@ -184,57 +265,62 @@ export function Viewer({ transport }: Props) {
     setCtxMenu({ x: ev.clientX, y: ev.clientY, items });
   }, [onCopy, transport]);
 
-  const found = root && selectedKey ? findRegByKey(root, selectedKey) : null;
+  // Populated regs from `transport.expandNode`, keyed by `version:nodeId`.
+  // Stored out-of-band so we don't splice into the tree state — splicing
+  // would force `flatRows` and `regIndex` to rebuild on every click.
+  const [expandedRegs, setExpandedRegs] = useState<Map<string, Reg>>(() => new Map());
 
-  // T1.7: lazy expansion of placeholder regs. When the user selects a reg
-  // whose `loadState === 'placeholder'`, fire `transport.expandNode` and
-  // splice the populated reg into the tree state so Detail re-renders with
-  // real fields. Per-nodeId in-flight tracking avoids stampedes when the
-  // user rapidly clicks through siblings.
-  const [pendingExpansions] = useState<Set<string>>(() => new Set());
+  const found = useMemo(() => {
+    const base = selectedKey ? regIndex.get(selectedKey) ?? null : null;
+    if (!base) return null;
+    const v = tree?.version ?? 0;
+    const nid = base.reg.nodeId;
+    if (nid && base.reg.loadState === 'placeholder') {
+      const populated = expandedRegs.get(`${v}:${nid}`);
+      if (populated) {
+        return { reg: { ...populated, loadState: 'loaded' as const }, path: base.path };
+      }
+    }
+    return base;
+  }, [regIndex, selectedKey, expandedRegs, tree?.version]);
+
+  // useRef (not useState) for the in-flight set: we mutate in place
+  // and never want it to drive re-renders. useState here broke under
+  // StrictMode's double-invoke — the second pass saw the key already
+  // present and silently dropped the expand request.
+  const pendingExpansions = useRef<Set<string>>(new Set()).current;
   useEffect(() => {
     if (!found || !tree || !transport.expandNode) return;
     const reg = found.reg;
     if (reg.loadState !== 'placeholder' || !reg.nodeId) return;
     const nodeId = reg.nodeId;
     const version = tree.version ?? 0;
-    // Key by `version:nodeId` (not raw nodeId): the same nodeId in a fresh
-    // elaboration is a *new* request, even though the string matches. With
-    // raw-key tracking, an in-flight expand from version v1 would block the
-    // version-v2 retry until the v1 request resolves as `outdated`, leaving
-    // the spinner up unnecessarily for the round-trip duration.
+    // version:nodeId — same nodeId across elaborations is a fresh request.
     const trackingKey = `${version}:${nodeId}`;
     if (pendingExpansions.has(trackingKey)) return;
+    if (expandedRegs.has(trackingKey)) return;
     pendingExpansions.add(trackingKey);
     transport.expandNode(version, nodeId)
       .then(populated => {
-        // Functional setTree so we always splice into the *current* tree,
-        // not the closure-captured one. If `onTreeUpdate` replaced the tree
-        // while expand was in flight, we splice into the new tree (the
-        // matching placeholder is presumably still there because the new
-        // elaboration would have produced the same shape with the same
-        // nodeId — same DFS order). Falls through gracefully if not.
         pendingExpansions.delete(trackingKey);
-        setTree(currentTree => {
-          if (!currentTree) return currentTree;
-          // Build a new top-level wrapper so React notices the change.
-          // Mutate nested nodes in place — they're not part of React state
-          // identity, only the outer envelope is.
-          spliceExpandedReg(currentTree, nodeId, populated);
-          return { ...currentTree };
+        setExpandedRegs(prev => {
+          // Keep only current-version entries; older ones are unreachable.
+          const next = new Map<string, Reg>();
+          const prefix = `${version}:`;
+          for (const [k, v] of prev) {
+            if (k.startsWith(prefix)) next.set(k, v);
+          }
+          next.set(trackingKey, populated);
+          return next;
         });
       })
       .catch(() => {
-        // Swallow errors — placeholder stays visible. The common case here
-        // is a soft `outdated` from the server (race against a fresh
-        // elaboration). The new tree from onTreeUpdate has already arrived
-        // or is in flight, but we still need to nudge React so useEffect
-        // re-evaluates against the latest tree.version with the placeholder
-        // again — otherwise we'd be stuck on the spinner.
+        // Swallow `outdated` and other errors — placeholder stays visible.
+        // Nudge React so this effect re-runs against the new tree.version.
         pendingExpansions.delete(trackingKey);
-        setTree(currentTree => (currentTree ? { ...currentTree } : currentTree));
+        setExpandedRegs(prev => new Map(prev));
       });
-  }, [found, tree, transport, pendingExpansions]);
+  }, [found, tree, transport, pendingExpansions, expandedRegs]);
 
   // Empty + version=0 = LSP responded before initial elaborate finished (server
   // returns a stub envelope when its cache is still empty). Don't paint the
@@ -244,6 +330,26 @@ export function Viewer({ transport }: Props) {
   // addrmap" and we let the existing message render.
   const stillElaboratingFirstPass =
     !tree || (tree.version === 0 && (tree.roots ?? []).length === 0);
+  // error trumps loading — if getTree rejected, surface the
+  // error with a retry button instead of an indefinite spinner. Retry
+  // bumps ``retryCounter`` which re-runs the fetch effect.
+  if (loadError && !tree) {
+    return (
+      <div className="rdl-viewer">
+        <div className="rdl-empty rdl-load-error" role="alert">
+          <p><strong>⚠ Could not load elaborated tree</strong></p>
+          <p style={{ opacity: 0.85, fontSize: '0.9em' }}>{loadError}</p>
+          <button
+            type="button"
+            className="rdl-retry-btn"
+            onClick={() => { setLoadError(null); setRetryCounter(n => n + 1); }}
+          >
+            Retry
+          </button>
+        </div>
+      </div>
+    );
+  }
   if (stillElaboratingFirstPass) {
     return (
       <div className="rdl-viewer">
@@ -318,7 +424,11 @@ export function Viewer({ transport }: Props) {
                 id="rdl-filter-input"
                 type="text"
                 placeholder={filterScopePlaceholder(filterScope)}
-                onChange={e => setFilter(e.target.value.toLowerCase())}
+                onChange={e => {
+                  const v = e.target.value.toLowerCase();
+                  if (filterTimer.current) clearTimeout(filterTimer.current);
+                  filterTimer.current = setTimeout(() => setFilter(v), 150);
+                }}
               />
               <button
                 type="button"
@@ -367,75 +477,3 @@ function filterScopePlaceholder(scope: FilterScope): string {
   }
 }
 
-/**
- * T1.7: walk a tree and replace the placeholder Reg with the populated one
- * returned by `transport.expandNode`. Replaces the reference inside the
- * parent's `children` array (rather than `Object.assign`-ing in place) so
- * downstream `useMemo`s keyed on the reg reference recompute. Mutating in
- * place was leaving the Decoder panel showing stale results after a register
- * switch, because Detail's `decoded = useMemo(() => decode(reg, …), [reg])`
- * was bailing out on a referentially-equal reg whose fields had silently
- * grown under it.
- */
-function spliceExpandedReg(tree: ElaboratedTree, nodeId: string, populated: Reg): void {
-  type Walkable = TreeNode & { children?: TreeNode[] };
-  const stack: Walkable[] = [...((tree.roots ?? []) as Walkable[])];
-  while (stack.length > 0) {
-    const node = stack.pop()!;
-    const kids = ('children' in node && Array.isArray(node.children))
-      ? node.children
-      : null;
-    if (kids) {
-      for (let i = 0; i < kids.length; i++) {
-        const child = kids[i] as TreeNode;
-        if (
-          child.kind === 'reg'
-          && child.nodeId === nodeId
-          && child.loadState === 'placeholder'
-        ) {
-          // Server omits loadState on expand responses — clear the placeholder
-          // marker explicitly so the next render path treats this as loaded.
-          kids[i] = { ...populated, loadState: 'loaded' } as TreeNode;
-          return;
-        }
-      }
-      stack.push(...(kids as Walkable[]));
-    }
-  }
-}
-
-/**
- * Walk roots looking for a node whose source line matches `line0b`. Used by
- * the editor → viewer cursor sync (Decision D10). Returns either:
- *   - { kind: 'tab', index } — top-level addrmap → switch tabs
- *   - { kind: 'reg', key } — matched a reg or one of its fields → select it
- */
-function locateByCursorLine(roots: TreeNode[], line0b: number):
-  | { kind: 'tab'; index: number }
-  | { kind: 'reg'; key: string }
-  | null {
-  for (let i = 0; i < roots.length; i++) {
-    const r = roots[i];
-    if (r.source?.line === line0b) return { kind: 'tab', index: i };
-  }
-  for (let i = 0; i < roots.length; i++) {
-    const found = walk(roots[i], [roots[i].name]);
-    if (found) return { kind: 'reg', key: found };
-  }
-  return null;
-  function walk(node: TreeNode, segs: string[]): string | null {
-    if (node.kind === 'reg') {
-      for (const f of node.fields || []) {
-        if (f.source?.line === line0b) return segs.join('.');
-      }
-      if (node.source?.line === line0b) return segs.join('.');
-      return null;
-    }
-    if (node.source?.line === line0b) return null; // container line — let outer logic handle
-    for (const c of node.children || []) {
-      const r = walk(c, segs.concat([c.name]));
-      if (r) return r;
-    }
-    return null;
-  }
-}

@@ -31,11 +31,31 @@ import { existsSync, readFileSync, watch } from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 
-// Resolve the @systemrdl-pro/viewer-core build output. In dev (running from
-// packages/rdl-viewer-cli/src/index.ts) this is two directories up; once we
-// publish the CLI as a standalone binary the build step will copy the assets
-// next to the bundled JS and this path will need to change.
-const VIEWER_CORE_DIST = path.resolve(import.meta.dir, '../../rdl-viewer-core/dist');
+// Resolve the @systemrdl-pro/viewer-core build output.
+//
+// Two layouts must work:
+//
+//   1. Dev — `bun run start` from `packages/rdl-viewer-cli/src/index.ts`.
+//      `import.meta.dir` is `…/packages/rdl-viewer-cli/src`. The viewer
+//      assets live two directories up at
+//      `…/packages/rdl-viewer-core/dist`.
+//
+//   2. Built binary — `dist/rdl-viewer.js` produced by `bun build`. The
+//      `copy-assets` build step puts the viewer assets at
+//      `dist/viewer/` next to the binary, so `import.meta.dir` is
+//      `…/packages/rdl-viewer-cli/dist` and we look in
+//      `…/packages/rdl-viewer-cli/dist/viewer`.
+//
+// We try the bundled-next-to-binary path first, fall back to the dev
+// path. Pre-T4-A C5 only the dev path was attempted, which silently
+// served HTTP 500 on every `/viewer.js` request from a published
+// binary because the relative path didn't resolve to a real directory.
+const VIEWER_CORE_DIST = (() => {
+  const bundled = path.resolve(import.meta.dir, 'viewer');
+  if (existsSync(bundled)) return bundled;
+  const dev = path.resolve(import.meta.dir, '../../rdl-viewer-core/dist');
+  return dev;
+})();
 
 type CliArgs = {
   file: string;
@@ -50,11 +70,28 @@ function parseArgs(argv: string[]): CliArgs {
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--port' || a === '-p') {
-      args.port = Number(argv[++i]);
+      // bounds + numeric check. Pre-T4-B was bare
+      // `Number(argv[++i])` which silently produced NaN if the user
+      // forgot the value (`rdl-viewer file --port`) — Bun.serve then
+      // assigned a random port, leaving the caller confused. Now
+      // exit with an actionable error.
+      const val = argv[++i];
+      if (val === undefined || !/^\d+$/.test(val)) {
+        console.error(`rdl-viewer: --port requires a numeric argument (got ${val === undefined ? 'nothing' : JSON.stringify(val)})`);
+        process.exit(2);
+      }
+      args.port = Number(val);
     } else if (a === '--no-open') {
       args.open = false;
     } else if (a === '--python') {
-      args.python = argv[++i];
+      // same — pre-T4-B passed `undefined` into spawnSync,
+      // throwing an uncaught synchronous TypeError.
+      const val = argv[++i];
+      if (val === undefined) {
+        console.error('rdl-viewer: --python requires a path argument');
+        process.exit(2);
+      }
+      args.python = val;
     } else if (a === '--help' || a === '-h') {
       printHelp();
       process.exit(0);
@@ -159,17 +196,22 @@ function runDump(python: string, file: string): Promise<DumpResult> {
     });
     child.on('close', (code) => {
       clearTimeout(killTimer);
-      const stdout = Buffer.concat(outChunks).toString('utf8');
+      // P16: Bun's JSON.parse accepts a Buffer directly, dodging the
+      // intermediate UTF-8 string allocation. Pre-T4-D `Buffer.concat
+      // → toString → JSON.parse` did three full copies of the dump
+      // payload (~40 MB transient on 25k regs).
+      const stdoutBuf = Buffer.concat(outChunks);
       const stderr = Buffer.concat(errChunks).toString('utf8');
       let tree: unknown = null;
-      if (stdout.trim().length > 0) {
+      if (stdoutBuf.length > 0) {
         try {
-          tree = JSON.parse(stdout);
+          tree = JSON.parse(stdoutBuf.toString('utf8'));
         } catch (e) {
+          const head = stdoutBuf.toString('utf8', 0, Math.min(200, stdoutBuf.length));
           finish({
             ok: false,
             tree: null,
-            stderr: `dump JSON parse failed: ${e}\n${stdout.slice(0, 200)}\n${stderr}`,
+            stderr: `dump JSON parse failed: ${e}\n${head}\n${stderr}`,
           });
           return;
         }
@@ -219,6 +261,7 @@ if (!checkLspModule(python)) {
 }
 
 let latestTree: unknown = null;
+let latestTreeJson: string | null = null;  // P15: pre-serialised; recomputed once per refresh
 let latestStderr = '';
 
 // Debounce concurrent refreshes — fs.watch can fire 2–3 times for an atomic
@@ -238,7 +281,10 @@ async function refresh(): Promise<void> {
     const r = await runDump(python, args.file);
     latestTree = r.tree;
     latestStderr = r.stderr;
-    if (r.tree !== null) broadcast(JSON.stringify(r.tree));
+    if (r.tree !== null) {
+      latestTreeJson = JSON.stringify(r.tree);
+      broadcast(latestTreeJson);
+    }
     if (r.stderr.trim().length > 0) {
       process.stderr.write(`[${new Date().toISOString()}] systemrdl-lsp:\n${r.stderr}`);
     }
@@ -260,10 +306,19 @@ const watcher = watch(args.file, () => {
   watchTimer = setTimeout(() => refresh(), 120);
 });
 
-process.on('SIGINT', () => {
-  watcher.close();
+// handle SIGTERM in addition to SIGINT. Docker, systemd,
+// `kill <pid>` (without args) — all default to SIGTERM, not SIGINT.
+// Pre-T4-B SIGTERM took the default behaviour (exit immediately
+// with no cleanup), leaking the watcher's inotify handle and
+// orphaning any in-flight Python dump child as a zombie until the
+// kernel reaped it. Mirror the SIGINT handler.
+const shutdown = (sig: string) => {
+  console.error(`rdl-viewer: received ${sig}, shutting down`);
+  try { watcher.close(); } catch { /* ignore */ }
   process.exit(0);
-});
+};
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));
 
 const server = Bun.serve({
   port: args.port,
@@ -275,7 +330,7 @@ const server = Bun.serve({
       });
     }
     if (url.pathname === '/tree') {
-      return new Response(JSON.stringify(latestTree ?? { schemaVersion: '0.1.0', roots: [] }), {
+      return new Response(latestTreeJson ?? JSON.stringify({ schemaVersion: '0.1.0', roots: [] }), {
         headers: { 'content-type': 'application/json; charset=utf-8' },
       });
     }
@@ -295,8 +350,8 @@ const server = Bun.serve({
         start(controller) {
           sseClients.add(controller);
           controller.enqueue(`event: ready\ndata: 1\n\n`);
-          if (latestTree !== null) {
-            controller.enqueue(`data: ${JSON.stringify(latestTree)}\n\n`);
+          if (latestTreeJson !== null) {
+            controller.enqueue(`data: ${latestTreeJson}\n\n`);
           }
         },
         cancel(controller) {
@@ -322,16 +377,27 @@ const server = Bun.serve({
  * `bun --filter @systemrdl-pro/viewer-core build` to refresh the SPA without
  * rebuilding the CLI.
  */
+// P17: cache asset bytes per-name. The viewer bundle never changes
+// between server restarts, so two syscalls (existsSync + readFileSync)
+// per request was pure waste under any concurrent reload.
+const assetCache = new Map<string, Buffer>();
+
 function staticAsset(name: string, contentType: string): Response {
-  const full = path.join(VIEWER_CORE_DIST, name);
-  if (!existsSync(full)) {
-    return new Response(
-      `viewer-core asset missing: ${name}. Run \`bun --filter @systemrdl-pro/viewer-core build\`.`,
-      { status: 500, headers: { 'content-type': 'text/plain; charset=utf-8' } },
-    );
+  let body = assetCache.get(name);
+  if (!body) {
+    const full = path.join(VIEWER_CORE_DIST, name);
+    if (!existsSync(full)) {
+      return new Response(
+        `viewer-core asset missing: ${name}. Run \`bun --filter @systemrdl-pro/viewer-core build\`.`,
+        { status: 500, headers: { 'content-type': 'text/plain; charset=utf-8' } },
+      );
+    }
+    body = readFileSync(full);
+    assetCache.set(name, body);
   }
-  const body = readFileSync(full);
-  return new Response(body, {
+  // Bun's Response accepts Buffer at runtime; the DOM lib's BodyInit
+  // type does not list it. Cast to satisfy the typechecker.
+  return new Response(body as unknown as BodyInit, {
     headers: { 'content-type': contentType, 'cache-control': 'no-cache' },
   });
 }

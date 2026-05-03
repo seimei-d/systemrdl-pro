@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import dataclasses
 import functools
-import hashlib
 import logging
 import os
 import pathlib
@@ -115,6 +114,11 @@ class _SimpleRef:
 # so this regex doesn't accidentally chew on field values or property names.
 _INCLUDE_VAR_RE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?")
 _INCLUDE_DIRECTIVE_RE = re.compile(r'(`include\s+")([^"]*)(")')
+
+
+def _format_hex(value: int, width_hex_chars: int = 8) -> str:
+    """Render an integer as a zero-padded uppercase hex literal."""
+    return f"0x{value:0{width_hex_chars}X}"
 
 
 # ---------------------------------------------------------------------------
@@ -287,6 +291,7 @@ def _resolve_search_paths(
     return out
 
 
+@functools.lru_cache(maxsize=128)
 def _peakrdl_toml_paths(start: pathlib.Path) -> list[str]:
     """Walk upward from ``start`` looking for ``peakrdl.toml`` and read its
     ``[parser] incl_search_paths`` array.
@@ -295,6 +300,12 @@ def _peakrdl_toml_paths(start: pathlib.Path) -> list[str]:
     with PeakRDL just works in the editor without re-declaring its include
     tree under ``systemrdl-pro.includePaths``. Workspace-relative paths are
     resolved against the .toml's own directory, matching PeakRDL semantics.
+
+    Cached because the toml location and contents rarely change during a
+    session, and ``_resolve_search_paths`` is on the hot path of every
+    didOpen / didSave / documentLink. Cache key is the start path; we
+    bound the cache so a long-running LSP with many distinct workspace
+    files doesn't grow it unbounded. Restart the LSP to invalidate.
     """
     try:
         import tomllib  # Python 3.11+
@@ -363,8 +374,16 @@ def _compile_text(
     incl_search_paths: list[str] | None = None,
     include_vars: dict[str, str] | None = None,
     perl_safe_opcodes: list[str] | None = None,
-) -> tuple[list[CompilerMessage], list[RootNode], pathlib.Path, set[pathlib.Path]]:
-    """Compile in-memory buffer text. Returns (messages, roots, temp_path, consumed_files).
+) -> tuple[
+    list[CompilerMessage],
+    list[RootNode],
+    pathlib.Path,
+    set[pathlib.Path],
+    dict[str, Any],
+    dict[str, Any] | None,
+]:
+    """Compile in-memory buffer text. Returns
+    ``(messages, roots, temp_path, consumed_files, node_index, spine_envelope)``.
 
     ``roots`` is a list of RootNode instances — one per top-level ``addrmap``
     *definition* in the file (Decision 3C). ``compiler.elaborate()`` with no
@@ -451,7 +470,24 @@ def _compile_text(
         for sev, msg_text, src_ref in printer.captured
     ]
     consumed = _harvest_consumed_files(roots, printer.captured, tmp_path)
-    return messages, roots, tmp_path, consumed
+    # Build the index AND pre-serialize the spine envelope here. In the
+    # pool path this all happens in the worker process — no GIL contention
+    # with the main process, so other URIs stay unblocked while a 25k-reg
+    # design churns through serialization. Pickle's memo keeps shared
+    # refs aligned across the process boundary. Spine envelope's version
+    # field is a placeholder (0); main process patches it to the real
+    # cache version after cache.put.
+    node_index: dict[str, Any] = {}
+    spine_envelope: dict[str, Any] | None = None
+    if roots:
+        from .serialize import _build_node_index, _serialize_spine
+        node_index = _build_node_index(roots)
+        spine_envelope = _serialize_spine(
+            roots, stale=False,
+            path_translate={tmp_path: original_path},
+            version=0,
+        )
+    return messages, roots, tmp_path, consumed, node_index, spine_envelope
 
 
 # ---------------------------------------------------------------------------
@@ -510,7 +546,14 @@ def _compile_text_compressed(
 
 def _decompress_compile_result(
     blob: bytes,
-) -> tuple[list[CompilerMessage], list[RootNode], pathlib.Path, set[pathlib.Path]]:
+) -> tuple[
+    list[CompilerMessage],
+    list[RootNode],
+    pathlib.Path,
+    set[pathlib.Path],
+    dict[str, Any],
+    dict[str, Any] | None,
+]:
     """Reverse of ``_compile_text_compressed``. Called in the parent
     process to materialize the subprocess's elaborate result."""
     return pickle.loads(zlib.decompress(blob))
@@ -542,6 +585,29 @@ def _pool_warmup_noop() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _children_safe(node: Any) -> list[Any]:
+    """Version-portable ``node.children()`` accessor.
+
+    ``systemrdl-compiler`` added ``skip_not_present=False`` to
+    ``children()`` in a specific version; older installs raise
+    ``TypeError`` on the unknown kwarg. extracted as a
+    helper so the 3-tier try/except dance lives in one place
+    instead of being copy-pasted four times across
+    ``_harvest_consumed_files`` and ``_fingerprint_roots``.
+    Returns ``[]`` on any failure — node has no children, or the
+    underlying compiler raised.
+    """
+    try:
+        return list(node.children(skip_not_present=False))
+    except TypeError:
+        try:
+            return list(node.children())
+        except Exception:
+            return []
+    except Exception:
+        return []
+
+
 def _harvest_consumed_files(
     roots: list[RootNode],
     captured: list[tuple[Severity, str, Any]],
@@ -553,8 +619,14 @@ def _harvest_consumed_files(
     instance's ``def_src_ref`` / ``inst_src_ref`` in the elaborated tree.
     Used by the LSP to maintain the include-graph reverse map so an edit to
     a library file proactively re-elaborates open consumers (T2-A).
+
+    T4-C A7 + P7: ``_children_safe`` for the version-portability dance
+    around ``skip_not_present``; ``seen_raw`` dedups before the
+    expensive ``pathlib.resolve()`` syscall (was N calls where K
+    unique would do — ~50-250 ms saved on 25k regs).
     """
     files: set[pathlib.Path] = set()
+    seen_raw: set[str] = set()
     try:
         tmp_resolved = tmp_path.resolve()
     except OSError:
@@ -563,6 +635,14 @@ def _harvest_consumed_files(
     def feed(raw: Any) -> None:
         if not raw:
             return
+        # dedup before resolve(). On 25k regs the harvest visits
+        # ~50k src_refs with ~2 unique filenames; resolving each one
+        # issues a stat()/realpath() syscall (~1-5 µs each). Hashing
+        # the raw string first cuts the syscall count to K, not N.
+        raw_str = str(raw)
+        if raw_str in seen_raw:
+            return
+        seen_raw.add(raw_str)
         try:
             path = pathlib.Path(raw).resolve()
         except (OSError, ValueError):
@@ -583,176 +663,19 @@ def _harvest_consumed_files(
                 ref = getattr(inst, attr, None)
                 if ref is not None:
                     feed(getattr(ref, "filename", None))
-        try:
-            kids = list(node.children(skip_not_present=False))
-        except TypeError:
-            try:
-                kids = list(node.children())
-            except Exception:
-                kids = []
-        except Exception:
-            kids = []
-        for kid in kids:
+        for kid in _children_safe(node):
             walk(kid)
 
     for root in roots:
-        try:
-            top = list(root.children(skip_not_present=False))
-        except TypeError:
-            try:
-                top = list(root.children())
-            except Exception:
-                top = []
-        except Exception:
-            top = []
-        for child in top:
+        for child in _children_safe(root):
             walk(child)
 
     return files
 
 
-# ---------------------------------------------------------------------------
-# T2-B: AST fingerprint
-# ---------------------------------------------------------------------------
-
-
-# Properties hashed into the fingerprint. Must mirror EVERY property
-# ``serialize.py`` reads via ``_cached_prop`` — anything the spine
-# envelope renders for the viewer needs to be in here, otherwise an
-# edit to that property would skip the version bump and the viewer
-# would render stale data. Source positions and SourceRef internals
-# stay out so a whitespace-only edit still hashes identically.
-#
-# When you add a new ``_cached_prop(node, "X", cache)`` call to
-# serialize.py, ALSO add "X" to the matching list here. Test
-# ``test_fingerprint_changes_on_<X>`` should pin it down.
-_FIELD_FP_PROPS = (
-    # Access semantics — drives the access summary glyph + decoder.
-    "sw", "hw", "onread", "onwrite",
-    "we", "wel", "swacc", "swmod",
-    "rclr", "rset", "woclr", "woset",
-    # Field-level state.
-    "reset", "singlepulse", "intr", "counter",
-    # Documentation surface — viewer renders these.
-    "name", "desc",
-    # Enum encoding — viewer renders the value table.
-    "encode",
-)
-_REG_FP_PROPS = (
-    "regwidth", "accesswidth", "shared",
-    # Documentation surface — viewer renders these.
-    "name", "desc",
-)
-_CONTAINER_FP_PROPS = (
-    # Addrmap / Regfile / Mem — viewer shows these in the tree row.
-    "name", "desc", "bridge",
-)
-
-
-def _fingerprint_roots(roots: list[RootNode]) -> str:
-    """Stable SHA-256 hex of the elaborated tree's viewer-facing semantics.
-
-    The LSP uses this to detect "elaborate produced an identical tree" and
-    skip the cache version bump + ``rdl/elaboratedTreeChanged`` push (T2-B).
-    Two compiles whose fingerprints match are guaranteed to produce
-    identical spine envelopes — within a few hundred ms on 25k registers,
-    cheaper than the spine serialize we avoid.
-
-    Hashed inputs: node type, instance name, absolute address, array
-    dimensions, regwidth/accesswidth (regs), lsb/msb + access modifiers
-    (fields), and recursive child hashes. Excluded on purpose: source
-    line numbers, file paths, ``inst_src_ref``, dynamic property origin —
-    those change with no semantic effect on the viewer.
-    """
-    from systemrdl.node import (
-        AddrmapNode,
-        FieldNode,
-        MemNode,
-        RegfileNode,
-        RegNode,
-    )
-
-    h = hashlib.sha256()
-
-    def feed(s: str) -> None:
-        h.update(s.encode("utf-8", errors="replace"))
-        h.update(b"\0")
-
-    def safe_prop(node: Any, name: str) -> str:
-        try:
-            value = node.get_property(name)
-        except Exception:
-            return "ERR"
-        if value is None:
-            return ""
-        # Enum values (AccessType, OnReadType, ...) have stable repr.
-        # Ints stringify cleanly. Expressions get whatever __repr__ yields,
-        # which is consistent across runs on the same compiler version.
-        return repr(value)
-
-    def visit(node: Any) -> None:
-        feed(type(node).__name__)
-        feed(str(node.inst_name or ""))
-        try:
-            feed(str(node.absolute_address))
-        except Exception:
-            feed("?addr")
-        inst = getattr(node, "inst", None)
-        if inst is not None:
-            feed(str(getattr(inst, "type_name", "") or ""))
-            try:
-                dims = getattr(inst, "array_dimensions", None) or ()
-                feed(",".join(str(d) for d in dims))
-            except Exception:
-                feed("?dims")
-            try:
-                stride = getattr(inst, "array_stride", None)
-                feed(str(stride) if stride is not None else "")
-            except Exception:
-                feed("?stride")
-        if isinstance(node, RegNode):
-            for prop in _REG_FP_PROPS:
-                feed(f"{prop}={safe_prop(node, prop)}")
-            feed(f"is_alias={getattr(node, 'is_alias', False)}")
-        elif isinstance(node, FieldNode):
-            try:
-                feed(f"lsb={node.lsb}")
-                feed(f"msb={node.msb}")
-            except Exception:
-                feed("?bits")
-            for prop in _FIELD_FP_PROPS:
-                feed(f"{prop}={safe_prop(node, prop)}")
-        elif isinstance(node, (AddrmapNode, RegfileNode, MemNode)):
-            for prop in _CONTAINER_FP_PROPS:
-                feed(f"{prop}={safe_prop(node, prop)}")
-        try:
-            kids = list(node.children(skip_not_present=False))
-        except TypeError:
-            try:
-                kids = list(node.children())
-            except Exception:
-                kids = []
-        except Exception:
-            kids = []
-        feed(f"#kids={len(kids)}")
-        for kid in kids:
-            visit(kid)
-
-    for root in roots:
-        feed("$ROOT")
-        try:
-            top = list(root.children(skip_not_present=False))
-        except TypeError:
-            try:
-                top = list(root.children())
-            except Exception:
-                top = []
-        except Exception:
-            top = []
-        for child in top:
-            visit(child)
-
-    return h.hexdigest()
+# Re-export the fingerprint hash so existing imports (server.py, tests)
+# continue working after the move to its own module.
+from ._fingerprint import _fingerprint_roots  # noqa: E402,F401
 
 
 def _elaborate(path: pathlib.Path) -> list[tuple[Severity, str, Any]]:
@@ -763,7 +686,7 @@ def _elaborate(path: pathlib.Path) -> list[tuple[Severity, str, Any]]:
         return printer.captured
 
     text = path.read_text(encoding="utf-8")
-    messages, _roots, tmp_path, _consumed = _compile_text(path.as_uri(), text)
+    messages, _roots, tmp_path, _consumed, _node_index, _spine = _compile_text(path.as_uri(), text)
     tmp_path.unlink(missing_ok=True)  # legacy path doesn't cache, safe to drop now
     out: list[tuple[Severity, str, Any]] = []
     for m in messages:
@@ -793,8 +716,7 @@ class CachedElaboration:
     temp_path: pathlib.Path | None = None
     # Monotonic per-URI version. Incremented on every successful ``put`` so
     # ``rdl/elaboratedTree`` clients can pass ``sinceVersion`` and the LSP
-    # answers with a tiny ``{unchanged: true}`` envelope when nothing changed
-    # (TODO-1: skip serialization on no-op refresh).
+    # answers with a tiny ``{unchanged: true}`` envelope when nothing changed.
     version: int = 0
     # Serialized JSON dict, lazily populated on first ``rdl/elaboratedTree``
     # request and re-used for every subsequent same-version request. Cleared
@@ -807,6 +729,9 @@ class CachedElaboration:
     # initialized on first expand request. Cleared whenever the entry is
     # replaced (next elaboration regenerates ids so old entries are stale).
     expanded: dict[str, dict[str, Any]] | None = None
+    # nodeId → RegNode lookup table for O(1) expand. Walk order matches
+    # the spine's DFS so ids line up. Refs only — RegNodes live in roots.
+    node_index: dict[str, Any] | None = None
     # T2-B: SHA-256 fingerprint of the elaborated tree's viewer-facing
     # semantics. Lets ``_apply_compile_result`` skip the cache version
     # bump + ``rdl/elaboratedTreeChanged`` push when an edit produced an
@@ -834,11 +759,21 @@ class ElaborationCache:
     temp file is unlinked. ``clear`` drops everything.
     """
 
-    def __init__(self) -> None:
-        self._entries: dict[str, CachedElaboration] = {}
+    def __init__(self, max_entries: int = 50) -> None:
+        # OrderedDict for LRU semantics — most-recently-used moves to end on
+        # `get`/`put`, oldest evicts when count exceeds ``max_entries``.
+        # Default cap matches a generous open-files-per-window estimate;
+        # protect-class URIs (currently-open documents) are reinserted on
+        # every access so they never evict.
+        from collections import OrderedDict
+        self._entries: OrderedDict[str, CachedElaboration] = OrderedDict()
+        self.max_entries = max_entries
 
     def get(self, uri: str) -> CachedElaboration | None:
-        return self._entries.get(uri)
+        entry = self._entries.get(uri)
+        if entry is not None:
+            self._entries.move_to_end(uri)
+        return entry
 
     def put(
         self,
@@ -847,6 +782,8 @@ class ElaborationCache:
         text: str,
         temp_path: pathlib.Path | None = None,
         ast_fingerprint: str | None = None,
+        node_index: dict[str, Any] | None = None,
+        serialized: dict[str, Any] | None = None,
     ) -> None:
         old = self._entries.get(uri)
         old_version = 0
@@ -862,7 +799,17 @@ class ElaborationCache:
             version=old_version + 1,
             ast_fingerprint=ast_fingerprint,
             text_canonical=_canonicalize_for_skip(text),
+            node_index=node_index,
+            serialized=serialized,
         )
+        self._entries.move_to_end(uri)
+        self._evict_lru()
+
+    def _evict_lru(self) -> None:
+        while len(self._entries) > self.max_entries:
+            _uri, victim = self._entries.popitem(last=False)
+            if victim.temp_path is not None:
+                victim.temp_path.unlink(missing_ok=True)
 
     def clear(self) -> None:
         for entry in self._entries.values():

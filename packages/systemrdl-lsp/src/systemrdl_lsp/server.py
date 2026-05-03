@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import asyncio
 import atexit
-import dataclasses
 import logging
 import multiprocessing as mp
 import pathlib
@@ -37,33 +36,33 @@ from lsprotocol.types import (
     TEXT_DOCUMENT_DID_CLOSE,
     TEXT_DOCUMENT_DID_OPEN,
     TEXT_DOCUMENT_DID_SAVE,
-    TEXT_DOCUMENT_SEMANTIC_TOKENS_FULL,
     WORKSPACE_DID_CHANGE_CONFIGURATION,
-    CodeLens,
     DidChangeConfigurationParams,
     DidChangeTextDocumentParams,
     DidCloseTextDocumentParams,
     DidOpenTextDocumentParams,
     DidSaveTextDocumentParams,
-    FoldingRange,
     InitializedParams,
-    InlayHint,
-    Location,
-    ParameterInformation,
-    Position,
-    Range,
-    SemanticTokens,
-    SemanticTokensLegend,
-    SignatureHelp,
-    SignatureHelpOptions,
-    SignatureInformation,
-    SymbolInformation,
 )
 from pygls.lsp.server import LanguageServer
 from systemrdl.messages import Severity
 
+from ._handlers_lsp import register as register_lsp_handlers
+from ._handlers_rdl import (
+    handle_elaborated_tree,
+    handle_expand_node,
+    handle_include_paths,
+)
+from ._state import (
+    ELABORATION_TIMEOUT_SECONDS,
+    ELABORATION_TIMEOUT_SECONDS_MAX,
+    ELABORATION_TIMEOUT_SECONDS_MIN,
+    ServerState,
+)
+from ._text_utils import (
+    _iter_rdl_files,
+)
 from ._uri import _path_to_uri, _uri_to_path
-from .cache import DiskCache, make_key
 from .code_actions import _code_actions_for_range
 from .compile import (
     CachedElaboration,
@@ -94,18 +93,14 @@ from .completion import (
     _completion_context,
     _completion_items_for_context,
     _completion_items_for_types,
-    _completion_items_for_user_properties,
     _completion_items_static,
     _make_items,
 )
 from .definition import (
     _comp_defs_from_cached,
     _definition_location,
-    _find_instance_by_name,
-    _path_at_position,
     _references_to_type,
     _rename_locations,
-    _resolve_path,
     _word_at_position,
 )
 from .diagnostics import (
@@ -119,7 +114,6 @@ from .diagnostics import (
 )
 from .formatting import _document_formatting_edits, _format_text
 from .hover import (
-    _format_hex,
     _hover_for_word,
     _hover_text_for_node,
     _node_at_position,
@@ -133,23 +127,18 @@ from .outline import (
     _workspace_symbols_for_uri,
 )
 from .semantic import (
-    TOKEN_MODIFIERS,
-    TOKEN_TYPES,
     _semantic_tokens_for_text,
 )
 from .serialize import (
     ELABORATED_TREE_SCHEMA_VERSION,
     _field_access_token,
     _hex,
-    _safe_get_property,
     _serialize_addressable,
     _serialize_field,
     _serialize_reg,
     _serialize_root,
-    _serialize_spine,
     _src_ref_to_dict,
     _unchanged_envelope,
-    expand_node,
 )
 
 if TYPE_CHECKING:
@@ -157,127 +146,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-SERVER_VERSION = "0.18.4"
-
-
-def _iter_rdl_files(root: pathlib.Path, exclude_dirs: set[str]):
-    """Yield every ``.rdl`` file under ``root``, skipping noisy directory names.
-
-    Used by the workspace pre-index. Errors during traversal (permission denied,
-    broken symlinks) are silently skipped — the pre-index is best-effort, not
-    a hard guarantee.
-    """
-    try:
-        for entry in root.iterdir():
-            if entry.is_dir():
-                if entry.name in exclude_dirs or entry.name.startswith("."):
-                    continue
-                yield from _iter_rdl_files(entry, exclude_dirs)
-            elif entry.is_file() and entry.suffix.lower() == ".rdl":
-                yield entry
-    except (PermissionError, OSError):
-        return
-
-
-def _build_selection_ranges(
-    text: str, lines: list[str], line_0b: int, char_0b: int
-) -> list[Any]:
-    """Walk outward from the cursor position through enclosing `{...}` blocks.
-
-    Returns a list of LSP ``Range`` objects, **innermost first**. Caller links
-    them parent-pointer-style for ``textDocument/selectionRange``. Pure textual
-    scan — strings/comments are stripped to whitespace so braces inside them
-    don't confuse the matcher (same trick as folding ranges).
-    """
-    import re as _re
-
-    if line_0b < 0 or line_0b >= len(lines):
-        return []
-    line = lines[line_0b]
-    if char_0b < 0 or char_0b > len(line):
-        return []
-
-    # Innermost: the word under cursor.
-    word = _word_at_position(text, line_0b, char_0b)
-    word_range: Range | None = None
-    if word:
-        m = _re.search(rf"\b{_re.escape(word)}\b", line)
-        if m and m.start() <= char_0b <= m.end():
-            word_range = Range(
-                start=Position(line=line_0b, character=m.start()),
-                end=Position(line=line_0b, character=m.end()),
-            )
-
-    # Strip strings/comments to neutral whitespace so brace counting doesn't
-    # see literals or block-comment braces.
-    cleaned = _re.sub(r'"(?:\\.|[^"\\])*"', lambda m: " " * len(m.group(0)), text)
-    cleaned = _re.sub(r"//[^\n]*", lambda m: " " * len(m.group(0)), cleaned)
-    cleaned = _re.sub(
-        r"/\*[\s\S]*?\*/",
-        lambda m: _re.sub(r"[^\n]", " ", m.group(0)),
-        cleaned,
-    )
-
-    # Convert (line, char) → absolute offset.
-    def offset_of(li: int, co: int) -> int:
-        return sum(len(ln) + 1 for ln in lines[:li]) + co
-
-    def pos_of(off: int) -> Position:
-        # Inverse of offset_of.
-        seen = 0
-        for li, ln in enumerate(lines):
-            if seen + len(ln) >= off:
-                return Position(line=li, character=off - seen)
-            seen += len(ln) + 1
-        return Position(line=len(lines), character=0)
-
-    cursor_off = offset_of(line_0b, char_0b)
-    ranges: list[Range] = []
-    if word_range is not None:
-        ranges.append(word_range)
-
-    # Walk outward through balanced `{...}` pairs that contain the cursor.
-    # Strategy: scan all `{` `}` pairs in the file, keep those whose span
-    # includes the cursor offset, sort by span size ascending → innermost first.
-    stack: list[int] = []
-    pairs: list[tuple[int, int]] = []
-    for i, ch in enumerate(cleaned):
-        if ch == "{":
-            stack.append(i)
-        elif ch == "}" and stack:
-            start = stack.pop()
-            pairs.append((start, i + 1))
-    enclosing = [(s, e) for s, e in pairs if s <= cursor_off <= e]
-    enclosing.sort(key=lambda t: t[1] - t[0])
-    for s, e in enclosing:
-        ranges.append(Range(start=pos_of(s), end=pos_of(e)))
-
-    # Outermost: whole file.
-    last_line = max(0, len(lines) - 1)
-    ranges.append(Range(
-        start=Position(line=0, character=0),
-        end=Position(line=last_line, character=len(lines[last_line]) if lines else 0),
-    ))
-    return ranges
-
-
-def _is_valid_identifier(name: str) -> bool:
-    """Match SystemRDL identifier syntax: ``[A-Za-z_][A-Za-z0-9_]*``.
-
-    Used by rename to reject input that would corrupt the buffer.
-    """
-    import re as _re
-    return bool(_re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name))
-
+from systemrdl_lsp import __version__ as SERVER_VERSION  # noqa: E402  pulled from package __init__
 
 DEBOUNCE_SECONDS = 0.3
-# Eng-review safety net #3: cap a single elaborate pass at 60s wall-clock by default.
-# Past that we keep last-good (D7) and surface a synthetic diagnostic. A pathological
-# Perl-style include cycle in a third-party RDL pack should NOT freeze the editor.
-# Override per-workspace via systemrdl-pro.elaborationTimeoutMs (state.elaboration_timeout_s).
-ELABORATION_TIMEOUT_SECONDS = 120.0
-ELABORATION_TIMEOUT_SECONDS_MIN = 1.0
-ELABORATION_TIMEOUT_SECONDS_MAX = 600.0
 
 
 # Re-exports for backwards-compat — tests import several private helpers
@@ -320,7 +191,6 @@ __all__ = [
     "_field_access_token",
     "_fingerprint_roots",
     "_folding_ranges_from_text",
-    "_format_hex",
     "_format_text",
     "_hex",
     "_hover_for_word",
@@ -336,7 +206,6 @@ __all__ = [
     "_references_to_type",
     "_rename_locations",
     "_resolve_search_paths",
-    "_safe_get_property",
     "_semantic_tokens_for_text",
     "_serialize_addressable",
     "_serialize_field",
@@ -351,119 +220,6 @@ __all__ = [
     "_workspace_symbols_for_uri",
     "build_server",
 ]
-
-
-# ---------------------------------------------------------------------------
-# Server state
-# ---------------------------------------------------------------------------
-
-
-@dataclasses.dataclass
-class ServerState:
-    cache: ElaborationCache = dataclasses.field(default_factory=ElaborationCache)
-    pending: dict[str, asyncio.Task] = dataclasses.field(default_factory=dict)
-    include_paths: list[str] = dataclasses.field(default_factory=list)
-    # T2-A: forward and reverse maps over the include graph, populated from
-    # the set of source files the compiler actually opened on each successful
-    # elaborate (see ``compile._harvest_consumed_files``). Used to proactively
-    # re-elaborate any open consumer when a library file changes — the user
-    # no longer has to close-and-reopen ``stress_25k.rdl`` after editing
-    # ``types.rdl``. Both maps key on URIs.
-    include_graph: dict[str, set[str]] = dataclasses.field(default_factory=dict)
-    includee_to_includers: dict[str, set[str]] = dataclasses.field(default_factory=dict)
-    # T2-C: per-URI elaboration mutex. Replaces the TODO(T2) marker that used
-    # to live above ``_full_pass_async``. Same-URI didOpen+didSave races
-    # serialize through this lock so the second call sees the first call's
-    # cache.put before short-circuiting on buffer-equality. Different URIs
-    # still elaborate concurrently (subject to GIL contention).
-    uri_elab_locks: dict[str, asyncio.Lock] = dataclasses.field(default_factory=dict)
-    # Test-only override that stands in for the pygls workspace. When
-    # non-None, ``_is_open(uri)`` returns ``uri in self`` and
-    # ``_read_buffer(uri)`` returns ``self.get(uri)`` instead of going
-    # through ``server.workspace`` (which is not initialized in unit
-    # tests). Production code never sets this. Map: URI → buffer text.
-    test_open_buffers: dict[str, str] | None = None
-    # Substitution map for ``$VAR`` / ``${VAR}`` inside ```include "..."`` paths.
-    # Read from systemrdl-pro.includeVars; falls back to os.environ during expansion.
-    include_vars: dict[str, str] = dataclasses.field(default_factory=dict)
-    # URIs whose latest parse attempt failed but for which we still have a last-good
-    # cache entry. The viewer renders a stale-bar when a URI is in this set (D7).
-    stale_uris: set[str] = dataclasses.field(default_factory=set)
-    # URIs that need to skip the buffer-equality / canonicalize-skip
-    # short-circuits on the next elaborate (typically because a cascade
-    # trigger needs to re-elaborate the file even though its own buffer
-    # didn't change — an includee changed). Cleared the moment the
-    # bypass actually fires. Separate from ``stale_uris`` so the stale-
-    # transition logic in ``_apply_compile_result`` can detect a
-    # genuine False → True (or T → F) move; if cascade overloaded
-    # stale_uris like it used to, ``was_stale`` would always be True
-    # on the cascade path and the viewer would miss the new failure.
-    force_re_elaborate: set[str] = dataclasses.field(default_factory=set)
-    # Forwarded to RDLCompiler(perl_safe_opcodes=...). Empty list keeps the
-    # compiler's safe default. Power users adding `:base_io` for `print`-based
-    # codegen go through this setting.
-    perl_safe_opcodes: list[str] = dataclasses.field(default_factory=list)
-    # One-shot guard for the "Perl is not on PATH" notification. The diagnostic
-    # itself comes from systemrdl-compiler on every compile, so we only nag with
-    # the modal banner once per session.
-    perl_warning_shown: bool = False
-    # Per-primary-URI snapshot of which cross-file URIs we last published
-    # non-empty diagnostics to. Drives the clear-on-resolve cycle for
-    # `\`include`d files (a fixed error in common.rdl publishes [] there next
-    # compile so the stale squiggle disappears).
-    diag_affected: dict[str, set[str]] = dataclasses.field(default_factory=dict)
-    # Background pre-index toggles. workspace/symbol only sees files the user
-    # has opened; pre-warming the cache fixes Ctrl+T against unfamiliar trees.
-    # Default off — on a multi-window workspace each VSCode window starts its
-    # own LSP and the parallel pre-indexes pegged the CPU. Users who want
-    # workspace-wide search opt in via settings.json.
-    preindex_enabled: bool = False
-    preindex_max_files: int = 200
-    # Per-workspace override for ELABORATION_TIMEOUT_SECONDS. systemrdl-pro.elaborationTimeoutMs
-    # surfaces this so big chip designs (multi-subsystem aggregates in the 10-25k+ register
-    # range) can lift the 10s cap when their elaboration legitimately takes longer.
-    elaboration_timeout_s: float = ELABORATION_TIMEOUT_SECONDS
-    # T1.4: lazy-tree capability gate. Set in INITIALIZED handler from
-    # client.capabilities.experimental.systemrdlLazyTree. When True the LSP
-    # serves spine envelopes (Reg.loadState='placeholder') and answers
-    # rdl/expandNode requests; when False it serves full trees as before.
-    lazy_supported: bool = False
-    # T1.4: on-disk cache for spine envelopes. Survives window reload; second
-    # window in a multi-root workspace shares the cache via content key.
-    # Constructed lazily by the build_server() helper so tests can swap it.
-    disk_cache: DiskCache = dataclasses.field(default_factory=DiskCache)
-    # T3: ProcessPoolExecutor for cross-URI parallel elaborate. ``None``
-    # means in-thread (legacy/fallback). Initialized on INITIALIZED based
-    # on systemrdl-pro.elaborateInProcess; defaults to subprocess mode.
-    # Workers pre-warm via _pool_warmup_noop so the first real elaborate
-    # doesn't pay spawn + import cost on the user's typing latency.
-    elaborate_pool: Any = None  # ProcessPoolExecutor when active
-    # systemrdl-pro.elaborateInProcess setting. False (default) = use
-    # the subprocess pool. True = run in the asyncio default
-    # ThreadPoolExecutor as before T3 — kept as an escape hatch in
-    # case a future systemrdl-compiler upgrade breaks RootNode pickle
-    # compatibility, or for diagnosing pool-related issues in the field.
-    elaborate_in_process: bool = False
-    # Pool size cap. 2 covers the documented pain (small file behind
-    # one big elaborate). Bumping higher is fine but each worker holds
-    # ~150 MB resident at idle plus the in-flight tree, so 2-4 is the
-    # sweet spot for a developer machine. Surfaced as a setting if a
-    # future user reports needing more.
-    elaborate_pool_workers: int = 2
-    # T3-G: worker recycle threshold. Mitigates the upstream
-    # systemrdl-compiler memory leak (~5 MB per elaborate of a
-    # 40-reg fixture, observed in test_memory_growth_bounded). After
-    # this many successful subprocess elaborates we tear down the
-    # pool and spawn a fresh one — RSS comes back to baseline. 50
-    # gives a few minutes of editing on big designs before the
-    # next recycle, recycling itself is ~150 ms (worker spawn +
-    # _pool_worker_init), barely visible during a typing pause.
-    pool_max_elaborates: int = 50
-    # Counts successful subprocess elaborates since the current pool
-    # was spawned. Reset to 0 in ``_ensure_elaborate_pool``. When it
-    # hits ``pool_max_elaborates`` the elaborate-finished bookkeeping
-    # schedules a recycle and resets the counter.
-    pool_elaborate_count: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -533,6 +289,33 @@ def build_server() -> LanguageServer:
     # spawned worker processes can stick around as orphans.
     atexit.register(_shutdown_elaborate_pool)
 
+    def _apply_stale_transition(
+        uri: str, cached: CachedElaboration, target_stale: bool,
+    ) -> int | None:
+        """Toggle ``state.stale_uris[uri]`` to match ``target_stale``.
+
+        On a real transition (False → True or True → False), bump
+        ``cached.version`` and clear ``cached.serialized`` so the next
+        ``rdl/elaboratedTree`` fetch builds a fresh envelope with the
+        right stale flag, and return the new version so the caller
+        can fire ``rdl/elaboratedTreeChanged``. Returns ``None`` when
+        state was already correct (no client refresh needed).
+
+        Centralises the stale state machine that used to live inline
+        in three sites — last three field-reported stale-bar
+        regressions all traced back to one of the copies drifting.
+        """
+        is_stale_now = uri in state.stale_uris
+        if target_stale and not is_stale_now:
+            state.stale_uris.add(uri)
+        elif not target_stale and is_stale_now:
+            state.stale_uris.discard(uri)
+        else:
+            return None
+        cached.version += 1
+        cached.serialized = None
+        return cached.version
+
     def _update_include_graph(uri: str, consumed_files: set[pathlib.Path]) -> None:
         """Refresh forward + reverse include maps for ``uri`` (T2-A).
 
@@ -566,22 +349,32 @@ def build_server() -> LanguageServer:
         roots: list[RootNode],
         tmp_path: pathlib.Path,
         consumed_files: set[pathlib.Path],
+        precomputed_conflicts: list[CompilerMessage] | None = None,
+        precomputed_fingerprint: str | None = None,
+        precomputed_node_index: dict[str, Any] | None = None,
+        precomputed_spine: dict[str, Any] | None = None,
     ) -> bool:
         """Apply elaborate output to cache + diagnostics + viewer notification.
 
         Returns ``True`` when the AST genuinely changed (cascade-trigger
-        consumers via reverse-dep map). ``False`` when this was a semantic
-        no-op (T2-B fingerprint match) or a parse failure — neither warrants
-        cascading work onto consumers.
+        consumers via reverse-dep map). ``False`` on semantic no-op
+        (fingerprint match) or parse failure.
+
+        Optional ``precomputed_*`` kwargs let callers hoist the heavy
+        post-compile tree walks off the asyncio loop.
         """
         version_after: int | None = None
         ast_changed = False
         if roots:
-            try:
-                conflicts = _address_conflict_diagnostics(roots, tmp_path)
-                messages = list(messages) + conflicts
-            except Exception:
-                logger.debug("address-conflict scan failed", exc_info=True)
+            if precomputed_conflicts is not None:
+                conflicts = precomputed_conflicts
+            else:
+                try:
+                    conflicts = _address_conflict_diagnostics(roots, tmp_path)
+                except Exception:
+                    logger.debug("address-conflict scan failed", exc_info=True)
+                    conflicts = []
+            messages = list(messages) + conflicts
 
             # ``has_errors`` covers BOTH compile/parse errors AND post-
             # elaborate conflict diagnostics (address overlaps, alias
@@ -596,7 +389,11 @@ def build_server() -> LanguageServer:
             # parse failed" → would benefit from rewording but that's
             # extension-side).
             has_errors = any(m.severity == Severity.ERROR for m in messages)
-            new_fp = _fingerprint_roots(roots)
+            new_fp = (
+                precomputed_fingerprint
+                if precomputed_fingerprint is not None
+                else _fingerprint_roots(roots)
+            )
             old = state.cache.get(uri)
             # T2-B fingerprint short-circuit: if the elaborated tree is byte-
             # identical (semantically) to the prior one, drop the new tmp_path
@@ -614,30 +411,34 @@ def build_server() -> LanguageServer:
                 old.text = buffer_text
                 old.text_canonical = _canonicalize_for_skip(buffer_text)
                 old.elaborated_at = time.time()
-                # Symmetric stale transition (handles both T → F and F
-                # → T). The latter fires when the user introduces an
-                # address conflict in a buffer that otherwise produces
-                # the same fingerprint as before — the AST is the same
-                # but the diagnostics changed. Either direction needs
-                # a version bump + serialized invalidation so the
-                # client re-fetches and the viewer's stale-bar
-                # reflects current state.
-                was_stale = uri in state.stale_uris
-                if has_errors:
-                    state.stale_uris.add(uri)
-                else:
-                    state.stale_uris.discard(uri)
-                is_stale = uri in state.stale_uris
-                if was_stale != is_stale:
-                    old.version += 1
-                    old.serialized = None
-                    version_after = old.version
+                # symmetric stale transition (handles both T → F
+                # and F → T). The latter fires when the user introduces
+                # an address conflict in a buffer that produces the same
+                # fingerprint as before — AST is the same but the
+                # diagnostics changed.
+                bumped = _apply_stale_transition(uri, old, has_errors)
+                if bumped is not None:
+                    version_after = bumped
                 _update_include_graph(uri, consumed_files)
             else:
                 # Cache takes ownership of the temp file (it backs lazy
                 # src_ref reads for hover/documentSymbol). Old entry's
                 # temp file is unlinked there.
-                state.cache.put(uri, roots, buffer_text, tmp_path, ast_fingerprint=new_fp)
+                # Compute target version inline so we can stuff index + spine
+                # into the entry atomically through cache.put — without this,
+                # an expand request landing between cache.put and the field
+                # assignment sees node_index=None and triggers the slow
+                # fallback walk on the main process loop.
+                target_version = (old.version if old else 0) + 1
+                if precomputed_spine is not None:
+                    precomputed_spine["version"] = target_version
+                    precomputed_spine["stale"] = has_errors
+                state.cache.put(
+                    uri, roots, buffer_text, tmp_path,
+                    ast_fingerprint=new_fp,
+                    node_index=precomputed_node_index or None,
+                    serialized=precomputed_spine,
+                )
                 if has_errors:
                     state.stale_uris.add(uri)
                 else:
@@ -673,25 +474,12 @@ def build_server() -> LanguageServer:
                 ast_changed = True
                 prior_cached = state.cache.get(uri)
                 if prior_cached is not None:
-                    was_stale = uri in state.stale_uris
-                    state.stale_uris.add(uri)
-                    if not was_stale:
-                        # Stale state just transitioned False → True.
-                        # Without doing anything else, the viewer would
-                        # never know: cached.serialized still holds the
-                        # last (non-stale) envelope, version hasn't
-                        # bumped, so no rdl/elaboratedTreeChanged push
-                        # fires and the client's sinceVersion check
-                        # would short-circuit even if it asked. Bump
-                        # version + clear cached serialization so the
-                        # next fetch builds a fresh envelope with
-                        # ``stale=True`` and the "Showing last good"
-                        # banner appears. This was reported in the
-                        # field after T2 ship — broken RDL no longer
-                        # surfaced the stale icon.
-                        prior_cached.version += 1
-                        prior_cached.serialized = None
-                        version_after = prior_cached.version
+                    # stale F → T transition through the
+                    # central helper. Originally inlined here as
+                    # 9 lines of state-machine boilerplate.
+                    bumped = _apply_stale_transition(uri, prior_cached, True)
+                    if bumped is not None:
+                        version_after = bumped
             else:
                 # Library file: refresh the includee graph from this
                 # buffer's perspective (it may itself include other
@@ -703,13 +491,10 @@ def build_server() -> LanguageServer:
             server, uri, messages, previously_affected
         )
 
-        # TODO-1 push: notify the client that a fresh elaborated tree is ready.
-        # Payload is metadata-only ({uri, version}); the client decides whether
-        # to fetch the full tree (rdl/elaboratedTree with sinceVersion). This
-        # eliminates the user-perceptible refresh delay on save (extension
-        # used to wait for didSaveTextDocument before pulling a fresh tree).
-        # T2-B: only fire when ast_changed — a fingerprint-skip path leaves
-        # cache.version untouched so the viewer's existing tree is current.
+        # Server-push of "fresh tree ready". Metadata-only payload; the client
+        # decides whether to fetch the body (rdl/elaboratedTree with
+        # sinceVersion). Skip when the fingerprint short-circuit kept
+        # ``cache.version`` untouched — there is nothing new to fetch.
         if version_after is not None:
             try:
                 server.protocol.notify(
@@ -718,6 +503,19 @@ def build_server() -> LanguageServer:
                 )
             except Exception:
                 logger.debug("could not send elaboratedTreeChanged notification", exc_info=True)
+            # Refresh server→client requests (LSP 3.16/3.17) for everything
+            # that ties UI overlays to source-line positions. Fire-and-forget;
+            # VSCode re-asks with the fresh src_refs.
+            for refresh in (
+                server.workspace_code_lens_refresh_async,
+                server.workspace_inlay_hint_refresh_async,
+                server.workspace_semantic_tokens_refresh_async,
+                server.workspace_diagnostic_refresh_async,
+            ):
+                try:
+                    asyncio.create_task(refresh())
+                except Exception:
+                    logger.debug("workspace refresh %s failed", refresh.__name__, exc_info=True)
 
         return ast_changed
 
@@ -873,14 +671,18 @@ def build_server() -> LanguageServer:
 
             _check_perl_pre_flight(buffer_text)
 
-            # Tell the client elaboration is starting so it can paint a
-            # "re-elaborating" indicator while keeping the existing tree
-            # interactive. Paired with rdl/elaborationFinished in the finally
-            # block below so the indicator clears on every termination path
-            # (success, timeout, exception). Best-effort: a missed notification
-            # only means a slightly stale UI, never broken state.
+            # ``started_notified`` + try/finally below guarantee
+            # ``rdl/elaborationFinished`` fires on EVERY exit path —
+            # including ``CancelledError`` from LSP shutdown or a rapid
+            # restart. Pre-T4-A cancellation propagated up
+            # unconditionally and the viewer's "re-elaborating" spinner
+            # stayed visible until window reload, plus the subprocess
+            # tmp file was leaked because no done-callback was attached
+            # in the cancel path.
+            started_notified = False
             try:
                 server.protocol.notify("rdl/elaborationStarted", {"uri": uri})
+                started_notified = True
             except Exception:
                 logger.debug("could not send elaborationStarted", exc_info=True)
 
@@ -896,6 +698,49 @@ def build_server() -> LanguageServer:
             # done-callback cleans up the orphan tmp file when the
             # late result eventually arrives.
             t_submit = time.monotonic()
+            # track the latest pool future at this scope so the
+            # outer cancellation handler can register a tmp-cleanup
+            # callback on it. Reassigned by ``_submit_compile`` on
+            # every BrokenProcessPool retry.
+            pool_fut: Any = None
+            ast_changed = False
+
+            def _register_late_cleanup(pf: Any) -> None:
+                """Attach a done-callback that unlinks the subprocess's
+                tmp file when the (still in-flight) future eventually
+                finishes. Used for the cancellation path AND the
+                timeout path — both leave the subprocess running past
+                the point where the parent stopped waiting, with a
+                tmp file that has no other owner. ``add_done_callback``
+                fires immediately if ``pf`` is already done, so this
+                also covers the rare race where cancellation and
+                completion arrive in the same tick.
+                """
+                if pf is None:
+                    return
+                def _cleanup(f: Any) -> None:
+                    try:
+                        result = f.result()
+                    except BaseException:
+                        return
+                    if isinstance(result, (bytes, bytearray)):
+                        try:
+                            decoded = _decompress_compile_result(result)
+                        except Exception:
+                            return
+                        late_tmp = decoded[2] if len(decoded) >= 3 else None
+                    else:
+                        late_tmp = result[2] if len(result) >= 3 else None
+                    if late_tmp is None:
+                        return
+                    try:
+                        late_tmp.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                try:
+                    pf.add_done_callback(_cleanup)
+                except Exception:
+                    logger.debug("could not attach late-cleanup callback", exc_info=True)
 
             def _submit_compile() -> tuple[bool, asyncio.Future, Any]:
                 """Submit one elaborate attempt; return
@@ -916,6 +761,7 @@ def build_server() -> LanguageServer:
                         state.include_vars,
                         state.perl_safe_opcodes,
                     )
+                    state.inflight_pool_futures[uri] = pf
                     awaitable = asyncio.wrap_future(pf)
                 else:
                     awaitable = loop.run_in_executor(
@@ -974,12 +820,49 @@ def build_server() -> LanguageServer:
                         asyncio.shield(fut), timeout=state.elaboration_timeout_s
                     )
                     if using_pool:
-                        messages, roots, tmp_path, consumed_files = (
-                            _decompress_compile_result(raw_result)
+                        # Hoist zlib+pickle.loads off the main asyncio
+                        # loop. On a 25k-reg blob (~6 MB compressed) the
+                        # decode is ~2 s of pure-Python work; running it
+                        # synchronously here pinned the GIL and made
+                        # every other in-flight LSP request wait —
+                        # observed in field traces as multi-second expand
+                        # latency on small files concurrent with a big
+                        # file's compile completion.
+                        (
+                            messages,
+                            roots,
+                            tmp_path,
+                            consumed_files,
+                            node_index,
+                            spine_envelope,
+                        ) = await asyncio.to_thread(
+                            _decompress_compile_result, raw_result
                         )
                     else:
-                        messages, roots, tmp_path, consumed_files = raw_result
+                        (
+                            messages,
+                            roots,
+                            tmp_path,
+                            consumed_files,
+                            node_index,
+                            spine_envelope,
+                        ) = raw_result
                     break
+                except asyncio.CancelledError:
+                    # LSP shutdown / pygls task-cancel arrived
+                    # mid-elaborate. The shielded subprocess is still
+                    # running and will eventually emit its tmp file —
+                    # register a callback so the tmp gets unlinked
+                    # when it does. Also pair the elaborationStarted
+                    # notification with Finished so the viewer's
+                    # spinner clears (the next session reload would
+                    # otherwise inherit a stale spinner state from
+                    # the persisted webview). Re-raise so the
+                    # cancellation propagates to whatever requested it.
+                    _register_late_cleanup(pool_fut)
+                    if started_notified:
+                        _emit_elaboration_finished(uri)
+                    raise
                 except broken_pool_excs as exc:
                     if recovery_attempted or not using_pool:
                         logger.exception(
@@ -1057,24 +940,20 @@ def build_server() -> LanguageServer:
                     pool_fut.add_done_callback(_drop_late_result)
                 else:
                     fut.add_done_callback(_drop_late_result)
-                # Mark stale + force the viewer to re-fetch (see the
-                # parse-failure branch in _apply_compile_result for
-                # the same pattern + rationale).
                 cached_for_timeout = state.cache.get(uri)
                 if cached_for_timeout is not None:
-                    was_stale = uri in state.stale_uris
-                    state.stale_uris.add(uri)
-                    if not was_stale:
-                        cached_for_timeout.version += 1
-                        cached_for_timeout.serialized = None
+                    bumped = _apply_stale_transition(
+                        uri, cached_for_timeout, True,
+                    )
+                    if bumped is not None:
                         try:
                             server.protocol.notify(
                                 "rdl/elaboratedTreeChanged",
-                                {"uri": uri, "version": cached_for_timeout.version},
+                                {"uri": uri, "version": bumped},
                             )
                         except Exception:
                             logger.debug(
-                                "could not push stale-state-changed (timeout)",
+                                "stale-state notify failed (timeout)",
                                 exc_info=True,
                             )
                 try:
@@ -1105,15 +984,46 @@ def build_server() -> LanguageServer:
                 _emit_elaboration_finished(uri)
                 return
             t_compile_done = time.monotonic()
+            # Run conflicts + fingerprint walks off the asyncio loop so
+            # they don't block other URIs' apply on a 25k-reg tree.
+            precomputed_conflicts: list[CompilerMessage] | None = None
+            precomputed_fp: str | None = None
+            if roots:
+                def _heavy_walks() -> tuple[list[CompilerMessage], str]:
+                    try:
+                        conflicts_local = _address_conflict_diagnostics(
+                            roots, tmp_path
+                        )
+                    except Exception:
+                        logger.debug("address-conflict scan failed", exc_info=True)
+                        conflicts_local = []
+                    fp_local = _fingerprint_roots(roots)
+                    return conflicts_local, fp_local
+                try:
+                    precomputed_conflicts, precomputed_fp = await asyncio.to_thread(
+                        _heavy_walks
+                    )
+                except Exception:
+                    logger.debug("post-compile walks failed", exc_info=True)
+            t_apply_start = time.monotonic()
             ast_changed = _apply_compile_result(
-                uri, buffer_text, messages, roots, tmp_path, consumed_files
+                uri,
+                buffer_text,
+                messages,
+                roots,
+                tmp_path,
+                consumed_files,
+                precomputed_conflicts=precomputed_conflicts,
+                precomputed_fingerprint=precomputed_fp,
+                precomputed_node_index=node_index,
+                precomputed_spine=spine_envelope,
             )
             t_apply_done = time.monotonic()
             logger.debug(
                 "_full_pass_async %s: compile=%.3fs apply=%.3fs ast_changed=%s",
                 uri,
                 t_compile_done - t_submit,
-                t_apply_done - t_compile_done,
+                t_apply_done - t_apply_start,
                 ast_changed,
             )
             # T3-G: count successful subprocess elaborates and recycle
@@ -1149,6 +1059,7 @@ def build_server() -> LanguageServer:
         viewer can clear its "re-elaborating" indicator regardless of whether
         the pass succeeded, timed out, or threw. Best-effort.
         """
+        state.inflight_pool_futures.pop(uri, None)
         try:
             server.protocol.notify("rdl/elaborationFinished", {"uri": uri})
         except Exception:
@@ -1226,9 +1137,87 @@ def build_server() -> LanguageServer:
         finally:
             state.pending.pop(uri, None)
 
+    async def _read_workspace_config() -> dict[str, Any] | None:
+        """Fetch the systemrdl-pro section of the workspace config.
+
+        Returns the dict on success, ``None`` if the client returned
+        nothing or the response wasn't a dict. Raises only on the
+        underlying transport failure — callers wrap in try/except.
+        """
+        from lsprotocol.types import (
+            ConfigurationItem,
+            WorkspaceConfigurationParams,
+        )
+        configs = await server.workspace_configuration_async(
+            WorkspaceConfigurationParams(
+                items=[ConfigurationItem(section="systemrdl-pro")]
+            )
+        )
+        if configs and isinstance(configs[0], dict):
+            return configs[0]
+        return None
+
+    def _apply_workspace_config(cfg: dict[str, Any], *, is_initial: bool) -> None:
+        """Push values from a workspace-config dict into ServerState.
+
+        Shared by ``_on_initialized`` (initial fetch) and
+        ``_on_config_change`` (live update). Pre-T4-C the same
+        ~30 lines of parsing lived in two places and drifted with
+        every new setting.
+
+        ``is_initial`` controls two things: log every value at INFO
+        on first read (operators want a startup snapshot), and reload
+        ``preindex.*`` only on the initial pass (mid-session preindex
+        toggles need an explicit restart anyway since the cache state
+        differs).
+        """
+        paths = cfg.get("includePaths") or []
+        state.include_paths = [str(p) for p in paths if p]
+        raw_vars = cfg.get("includeVars") or {}
+        if isinstance(raw_vars, dict):
+            state.include_vars = {str(k): str(v) for k, v in raw_vars.items()}
+        raw_opcodes = cfg.get("perlSafeOpcodes") or []
+        if isinstance(raw_opcodes, list):
+            state.perl_safe_opcodes = [str(op) for op in raw_opcodes if op]
+        if "formatOnSave" in cfg:
+            state.format_on_save = bool(cfg["formatOnSave"])
+        if is_initial:
+            preindex_cfg = cfg.get("preindex") or {}
+            if isinstance(preindex_cfg, dict):
+                if "enabled" in preindex_cfg:
+                    state.preindex_enabled = bool(preindex_cfg["enabled"])
+                max_files = preindex_cfg.get("maxFiles")
+                if isinstance(max_files, int) and max_files > 0:
+                    state.preindex_max_files = max_files
+        timeout_ms = cfg.get("elaborationTimeoutMs")
+        if isinstance(timeout_ms, (int, float)) and timeout_ms > 0:
+            state.elaboration_timeout_s = max(
+                ELABORATION_TIMEOUT_SECONDS_MIN,
+                min(ELABORATION_TIMEOUT_SECONDS_MAX, timeout_ms / 1000.0),
+            )
+        if "elaborateInProcess" in cfg:
+            new_in_proc = bool(cfg.get("elaborateInProcess"))
+            if not is_initial and new_in_proc != state.elaborate_in_process:
+                logger.info(
+                    "elaborateInProcess change observed (was=%s now=%s); "
+                    "restart the LSP for it to take effect "
+                    "(SystemRDL: Restart Language Server)",
+                    state.elaborate_in_process, new_in_proc,
+                )
+            state.elaborate_in_process = new_in_proc
+        if is_initial:
+            logger.info("includePaths: %s", state.include_paths)
+            logger.info("includeVars: %s", list(state.include_vars))
+            logger.info("perlSafeOpcodes override: %s", state.perl_safe_opcodes)
+            logger.info(
+                "preindex enabled=%s max=%d",
+                state.preindex_enabled, state.preindex_max_files,
+            )
+            logger.info("elaboration timeout: %.1fs", state.elaboration_timeout_s)
+
     @server.feature(INITIALIZED)
     def _on_initialized(_ls: LanguageServer, _params: InitializedParams) -> None:
-        # T1.4: detect lazy-tree client capability before answering any
+        # Detect lazy-tree client capability before answering any
         # rdl/elaboratedTree request. The capability lives under
         # `experimental.systemrdlLazyTree` per the design doc; clients that
         # don't set it get the v0.1-shaped full tree (backward compat).
@@ -1243,62 +1232,16 @@ def build_server() -> LanguageServer:
 
         async def fetch() -> None:
             try:
-                from lsprotocol.types import (
-                    ConfigurationItem,
-                    WorkspaceConfigurationParams,
-                )
-                configs = await server.workspace_configuration_async(
-                    WorkspaceConfigurationParams(
-                        items=[ConfigurationItem(section="systemrdl-pro")]
-                    )
-                )
-                if configs and isinstance(configs[0], dict):
-                    cfg = configs[0]
-                    paths = cfg.get("includePaths") or []
-                    state.include_paths = [str(p) for p in paths if p]
-                    raw_vars = cfg.get("includeVars") or {}
-                    if isinstance(raw_vars, dict):
-                        state.include_vars = {str(k): str(v) for k, v in raw_vars.items()}
-                    raw_opcodes = cfg.get("perlSafeOpcodes") or []
-                    if isinstance(raw_opcodes, list):
-                        state.perl_safe_opcodes = [str(op) for op in raw_opcodes if op]
-                    preindex_cfg = cfg.get("preindex") or {}
-                    if isinstance(preindex_cfg, dict):
-                        if "enabled" in preindex_cfg:
-                            state.preindex_enabled = bool(preindex_cfg["enabled"])
-                        max_files = preindex_cfg.get("maxFiles")
-                        if isinstance(max_files, int) and max_files > 0:
-                            state.preindex_max_files = max_files
-                    timeout_ms = cfg.get("elaborationTimeoutMs")
-                    if isinstance(timeout_ms, (int, float)) and timeout_ms > 0:
-                        state.elaboration_timeout_s = max(
-                            ELABORATION_TIMEOUT_SECONDS_MIN,
-                            min(ELABORATION_TIMEOUT_SECONDS_MAX, timeout_ms / 1000.0),
-                        )
-                    state.elaborate_in_process = bool(
-                        cfg.get("elaborateInProcess", False)
-                    )
-                    logger.info("includePaths from initial config: %s", state.include_paths)
-                    logger.info("includeVars from initial config: %s", list(state.include_vars))
-                    logger.info("perlSafeOpcodes override: %s", state.perl_safe_opcodes)
-                    logger.info(
-                        "preindex enabled=%s max=%d",
-                        state.preindex_enabled, state.preindex_max_files,
-                    )
-                    logger.info(
-                        "elaboration timeout: %.1fs", state.elaboration_timeout_s,
-                    )
+                cfg = await _read_workspace_config()
+                if cfg is not None:
+                    _apply_workspace_config(cfg, is_initial=True)
             except Exception:
-                logger.debug("could not fetch initial workspace configuration", exc_info=True)
-            # T3: stand up the cross-process elaborate pool *after*
-            # config has been read so the elaborateInProcess override
-            # is honoured. Pool init is best-effort — falls back to
-            # in-thread on failure.
+                logger.debug("initial workspace config read failed", exc_info=True)
+            # Pool init AFTER config so the elaborateInProcess override
+            # is honoured. Best-effort — falls back to in-thread on failure.
             _ensure_elaborate_pool()
-            # Workspace pre-index runs after config so it picks up the user's
-            # configured preindex limit (skip-on-disable + file-count cap).
-            # Even on config failure we still try with defaults — pre-warming
-            # the cache with default limits is preferable to no index.
+            # Pre-index runs with whatever config we got (defaults on failure
+            # are better than nothing — they still warm the cache).
             asyncio.ensure_future(_preindex_workspace())
 
         asyncio.ensure_future(fetch())
@@ -1321,21 +1264,39 @@ def build_server() -> LanguageServer:
         existing = state.pending.get(uri)
         if existing is not None:
             existing.cancel()
+        # Cascade cancellation into the pool worker if the previous
+        # elaborate hadn't started yet — at least frees a queued slot.
+        # Workers already running keep going (Python's ProcessPool can't
+        # safely kill them), but the awaiter is dropped on parent cancel.
+        prev_pool_fut = state.inflight_pool_futures.pop(uri, None)
+        if prev_pool_fut is not None:
+            try:
+                prev_pool_fut.cancel()
+            except Exception:
+                pass
         state.pending[uri] = asyncio.ensure_future(_debounced_full_pass(uri))
 
     @server.feature(TEXT_DOCUMENT_DID_CLOSE)
     def _on_close(_ls: LanguageServer, params: DidCloseTextDocumentParams) -> None:
-        """Best-effort cleanup of per-URI state when a document closes (T2-C).
+        """Per-URI cleanup when a document closes.
 
-        Only drops the elaboration lock if it isn't currently held — a
-        lock with active waiters / a pending elaborate keeps it alive
-        until the next close. The include-graph and reverse map are
-        intentionally NOT cleared here: a workspace-symbol search or a
-        consumer that gets re-opened later is still served correctly
-        by stale-but-bounded data, and clearing would force redundant
-        re-elaborates on every tab close.
+        - Cancel any pending debounce task so we don't elaborate against
+          stale workspace state moments after close (the buffer might
+          already be gone from pygls' workspace).
+        - Drop the elaboration lock if not held. If currently held, leave
+          it; the in-flight elaborate completes naturally and the next
+          close cleans up.
+
+        ``include_graph`` / ``includee_to_includers`` / ``stale_uris``
+        are intentionally NOT cleared: a workspace-symbol search or
+        re-opened consumer is still served correctly by stale-but-
+        bounded data, and clearing would force redundant re-elaborates
+        on every tab close.
         """
         uri = params.text_document.uri
+        existing = state.pending.pop(uri, None)
+        if existing is not None:
+            existing.cancel()
         lock = state.uri_elab_locks.get(uri)
         if lock is not None and not lock.locked():
             state.uri_elab_locks.pop(uri, None)
@@ -1345,6 +1306,34 @@ def build_server() -> LanguageServer:
         # pygls 2.x logs noisy warnings for cancel notifications that arrive after
         # the request already completed. A no-op handler keeps the channel quiet.
         return None
+
+    @server.feature("shutdown")
+    async def _on_shutdown(_ls: LanguageServer, _params: Any) -> None:
+        """Drain in-flight work before exit so we don't orphan elaborates.
+
+        Cancels every queued debounce, waits up to 2s for the in-flight
+        compiles to finish, and then shuts the subprocess pool with
+        ``wait=True`` so its workers exit cleanly. Without this VSCode's
+        process kill on window close left worker subprocesses briefly
+        stranded.
+        """
+        for task in list(state.pending.values()):
+            task.cancel()
+        if state.pending:
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*state.pending.values(), return_exceptions=True),
+                    timeout=2.0,
+                )
+            except (asyncio.TimeoutError, Exception):
+                pass
+        pool = state.elaborate_pool
+        if pool is not None:
+            state.elaborate_pool = None
+            try:
+                pool.shutdown(wait=True, cancel_futures=True)
+            except Exception:
+                logger.debug("pool drain failed", exc_info=True)
 
     @server.feature("workspace/didChangeWatchedFiles")
     def _on_watched_files_changed(_ls: LanguageServer, _params: Any) -> None:
@@ -1361,137 +1350,22 @@ def build_server() -> LanguageServer:
     ) -> None:
         async def refresh() -> None:
             try:
-                from lsprotocol.types import (
-                    ConfigurationItem,
-                    WorkspaceConfigurationParams,
-                )
-                configs = await server.workspace_configuration_async(
-                    WorkspaceConfigurationParams(
-                        items=[ConfigurationItem(section="systemrdl-pro")]
-                    )
-                )
-                if configs and isinstance(configs[0], dict):
-                    paths = configs[0].get("includePaths") or []
-                    state.include_paths = [str(p) for p in paths if p]
-                    raw_vars = configs[0].get("includeVars") or {}
-                    if isinstance(raw_vars, dict):
-                        state.include_vars = {str(k): str(v) for k, v in raw_vars.items()}
-                    raw_opcodes = configs[0].get("perlSafeOpcodes") or []
-                    if isinstance(raw_opcodes, list):
-                        state.perl_safe_opcodes = [str(op) for op in raw_opcodes if op]
-                    timeout_ms = configs[0].get("elaborationTimeoutMs")
-                    if isinstance(timeout_ms, (int, float)) and timeout_ms > 0:
-                        state.elaboration_timeout_s = max(
-                            ELABORATION_TIMEOUT_SECONDS_MIN,
-                            min(ELABORATION_TIMEOUT_SECONDS_MAX, timeout_ms / 1000.0),
-                        )
-                    if "elaborateInProcess" in configs[0]:
-                        new_in_proc = bool(configs[0].get("elaborateInProcess"))
-                        if new_in_proc != state.elaborate_in_process:
-                            logger.info(
-                                "elaborateInProcess change observed (was=%s now=%s); "
-                                "the LSP must be restarted for it to take effect "
-                                "(SystemRDL: Restart Language Server)",
-                                state.elaborate_in_process, new_in_proc,
-                            )
-                        state.elaborate_in_process = new_in_proc
+                cfg = await _read_workspace_config()
+                if cfg is not None:
+                    _apply_workspace_config(cfg, is_initial=False)
             except Exception:
                 logger.debug("config refresh failed", exc_info=True)
 
         asyncio.ensure_future(refresh())
 
-    @server.feature("textDocument/hover")
-    def _on_hover(_ls: LanguageServer, params: Any) -> Any | None:
-        from lsprotocol.types import Hover, MarkupContent, MarkupKind
-
-        cached = state.cache.get(params.text_document.uri)
-        if cached is None or not cached.roots:
-            return None
-
-        line, char = params.position.line, params.position.character
-
-        # 1. Instance lookup first — gives the richest answer when it hits.
-        node = _node_at_position(cached.roots, line, char)
-        markdown = _hover_text_for_node(node) if node is not None else None
-
-        # 2-3. Word-based catalogue lookup for keywords / properties / access values / type names.
-        if markdown is None:
-            word = _word_at_position(cached.text, line, char)
-            if word:
-                markdown = _hover_for_word(word, cached.roots)
-
-        if markdown is None:
-            return None
-        return Hover(contents=MarkupContent(kind=MarkupKind.Markdown, value=markdown))
-
-    @server.feature("textDocument/documentSymbol")
-    def _on_document_symbol(_ls: LanguageServer, params: Any) -> list[Any]:
-        cached = state.cache.get(params.text_document.uri)
-        if cached is None or not cached.roots:
-            return []
-        return _document_symbols(cached.roots)
-
-    @server.feature("textDocument/foldingRange")
-    def _on_folding(_ls: LanguageServer, params: Any) -> list[FoldingRange]:
-        cached = state.cache.get(params.text_document.uri)
-        text = cached.text if cached is not None else _read_buffer(params.text_document.uri) or ""
-        return _folding_ranges_from_text(text)
-
-    @server.feature("textDocument/inlayHint")
-    def _on_inlay_hint(_ls: LanguageServer, params: Any) -> list[InlayHint]:
-        cached = state.cache.get(params.text_document.uri)
-        if cached is None or not cached.roots:
-            return []
-        try:
-            target_path = _uri_to_path(params.text_document.uri)
-        except ValueError:
-            return []
-        path = cached.temp_path or target_path
-        return _inlay_hints_for_addressables(cached.roots, path, cached.text)
-
-    @server.feature("textDocument/codeLens")
-    def _on_code_lens(_ls: LanguageServer, params: Any) -> list[CodeLens]:
-        cached = state.cache.get(params.text_document.uri)
-        if cached is None or not cached.roots:
-            return []
-        path = cached.temp_path or _uri_to_path(params.text_document.uri)
-        return _code_lenses_for_addrmaps(cached.roots, path)
-
-    @server.feature("workspace/symbol")
-    def _on_workspace_symbol(_ls: LanguageServer, params: Any) -> list[SymbolInformation]:
-        query = getattr(params, "query", "") or ""
-        out: list[SymbolInformation] = []
-        for uri, entry in state.cache._entries.items():
-            if entry.roots:
-                out.extend(_workspace_symbols_for_uri(uri, entry.roots, query))
-        return out
-
-    @server.feature("textDocument/completion")
-    def _on_completion(_ls: LanguageServer, params: Any) -> Any:
-        from lsprotocol.types import CompletionList
-
-        cached = state.cache.get(params.text_document.uri)
-        text = cached.text if cached is not None else _read_buffer(params.text_document.uri) or ""
-        ctx = _completion_context(text, params.position.line, params.position.character)
-        if ctx != "general":
-            return CompletionList(is_incomplete=False, items=_completion_items_for_context(ctx))
-        items = _completion_items_static()
-        if cached is not None and cached.roots:
-            items.extend(_completion_items_for_types(cached.roots))
-            items.extend(_completion_items_for_user_properties(cached.roots))
-        return CompletionList(is_incomplete=False, items=items)
-
     def _file_line_reader(path: pathlib.Path, line_idx: int) -> str | None:
         """Read line N from a workspace file, preferring the LSP buffer cache.
 
-        If the user has the file open with unsaved edits, the LSP's text-document
-        cache reflects those edits — use it so rename operates on what the user
-        actually sees. Falls back to disk for files not currently open.
+        If the user has the file open with unsaved edits, the LSP's text-
+        document cache reflects those edits — use it so rename operates on
+        what the user actually sees. Falls back to disk for files not
+        currently open.
         """
-        # Try LSP buffer cache first (active edit). The cache may carry the
-        # primary URI for an in-flight compile, but other files we read from
-        # disk; that's fine because rename's scope is single-document edits
-        # plus cross-file edits to disk-resident `\\\`include`d files.
         target_uri = path.resolve().as_uri()
         text = _read_buffer(target_uri)
         if text is None:
@@ -1504,723 +1378,23 @@ def build_server() -> LanguageServer:
             return lines[line_idx]
         return None
 
-    @server.feature("textDocument/prepareRename")
-    def _on_prepare_rename(_ls: LanguageServer, params: Any) -> Any | None:
-        """Validate that the cursor is on a renameable identifier.
-
-        We only rename top-level component type names — instance names and
-        keywords return None so VSCode shows "You cannot rename this element".
-        """
-        from lsprotocol.types import Position
-        from lsprotocol.types import Range as LSPRange
-
-        uri = params.text_document.uri
-        cached = state.cache.get(uri)
-        if cached is None or not cached.roots:
-            return None
-        word = _word_at_position(cached.text, params.position.line, params.position.character)
-        if not word:
-            return None
-        defs = _comp_defs_from_cached(cached.roots)
-        if word not in defs:
-            return None
-        # Return the cursor-line range of the word so VSCode anchors its
-        # rename input box correctly. The actual edits get computed in
-        # textDocument/rename below.
-        line = cached.text.splitlines()[params.position.line] if params.position.line < len(
-            cached.text.splitlines()
-        ) else ""
-        import re as _re
-        m = _re.search(rf"\b{_re.escape(word)}\b", line)
-        if m is None:
-            return None
-        return LSPRange(
-            start=Position(line=params.position.line, character=m.start()),
-            end=Position(line=params.position.line, character=m.end()),
-        )
-
-    @server.feature("textDocument/rename")
-    def _on_rename(_ls: LanguageServer, params: Any) -> Any | None:
-        """Compute a workspace edit that renames a type across declaration + uses."""
-        from lsprotocol.types import TextEdit, WorkspaceEdit
-
-        uri = params.text_document.uri
-        cached = state.cache.get(uri)
-        if cached is None or not cached.roots:
-            return None
-        word = _word_at_position(cached.text, params.position.line, params.position.character)
-        if not word:
-            return None
-        new_name = getattr(params, "new_name", None) or ""
-        # SystemRDL identifiers: [A-Za-z_][A-Za-z0-9_]*. Reject anything else
-        # so the user gets the standard VSCode "Can't rename" hint instead of
-        # a corrupt buffer.
-        if not new_name or not _is_valid_identifier(new_name):
-            return None
-
-        defs = _comp_defs_from_cached(cached.roots)
-        if word not in defs:
-            return None
-        if new_name in defs:
-            # Collision with another existing type — refuse rather than
-            # silently shadow.
-            return None
-
-        try:
-            original_path = _uri_to_path(uri)
-        except ValueError:
-            original_path = None
-        translate = (
-            {cached.temp_path: original_path}
-            if cached.temp_path is not None and original_path is not None
-            else None
-        )
-        locs = _rename_locations(word, cached.roots, translate, _file_line_reader)
-        if not locs:
-            return None
-
-        # Bucket edits by URI; LSP WorkspaceEdit.changes is a map[uri, TextEdit[]].
-        per_uri: dict[str, list[TextEdit]] = {}
-        for loc in locs:
-            per_uri.setdefault(loc.uri, []).append(
-                TextEdit(range=loc.range, new_text=new_name)
-            )
-        return WorkspaceEdit(changes=per_uri)
-
-    @server.feature("textDocument/documentHighlight")
-    def _on_document_highlight(_ls: LanguageServer, params: Any) -> list[Any]:
-        """Highlight every textual occurrence of the identifier under the cursor.
-
-        Implementation: regex-find every `\\b<word>\\b` match in the buffer.
-        Cheap and matches user expectation (highlight = same lexical token).
-        """
-        from lsprotocol.types import DocumentHighlight, DocumentHighlightKind
-
-        uri = params.text_document.uri
-        cached = state.cache.get(uri)
-        text = cached.text if cached is not None else _read_buffer(uri) or ""
-        word = _word_at_position(text, params.position.line, params.position.character)
-        if not word:
-            return []
-        import re as _re
-        pattern = _re.compile(rf"\b{_re.escape(word)}\b")
-        out: list[DocumentHighlight] = []
-        for line_idx, line in enumerate(text.splitlines()):
-            for m in pattern.finditer(line):
-                out.append(
-                    DocumentHighlight(
-                        range=Range(
-                            start=Position(line=line_idx, character=m.start()),
-                            end=Position(line=line_idx, character=m.end()),
-                        ),
-                        kind=DocumentHighlightKind.Text,
-                    )
-                )
-        return out
-
-    @server.feature("textDocument/selectionRange")
-    def _on_selection_range(_ls: LanguageServer, params: Any) -> list[Any]:
-        """Smart selection: expand cursor → word → enclosing `{...}` block(s) → file.
-
-        Pure textual implementation walks outward through brace pairs, no
-        elaboration dependency. Lets the user expand a selection from a
-        field name through its containing reg, regfile, addrmap, etc. with
-        Shift+Alt+Right.
-        """
-        from lsprotocol.types import SelectionRange as LSPSelectionRange
-
-        uri = params.text_document.uri
-        cached = state.cache.get(uri)
-        text = cached.text if cached is not None else _read_buffer(uri) or ""
-        if not text:
-            return []
-        lines = text.splitlines()
-        out: list[Any] = []
-        for pos in params.positions:
-            ranges = _build_selection_ranges(text, lines, pos.line, pos.character)
-            if not ranges:
-                out.append(LSPSelectionRange(
-                    range=Range(start=pos, end=pos),
-                    parent=None,
-                ))
-                continue
-            # Build LSP linked list: innermost first, parent pointers up.
-            parent: Any = None
-            for rng in ranges:
-                parent = LSPSelectionRange(range=rng, parent=parent)
-            out.append(parent)
-        return out
-
-    @server.feature(
-        "textDocument/signatureHelp",
-        SignatureHelpOptions(trigger_characters=["#", "("]),
+    register_lsp_handlers(
+        server, state,
+        read_buffer=_read_buffer,
+        file_line_reader=_file_line_reader,
     )
-    def _on_signature_help(_ls: LanguageServer, params: Any) -> Any | None:
-        """Signature help inside `#(...)` parametrized type instantiation.
-
-        Lightweight: when the cursor is inside a ``#(...)`` after a known
-        parametrized type, show its parameter names as the signature label.
-        Returns None for non-matching contexts, no error.
-        """
-        try:
-            uri = params.text_document.uri
-            cached = state.cache.get(uri)
-            text = cached.text if cached is not None else _read_buffer(uri) or ""
-            if not text:
-                return None
-            split_lines = text.splitlines()
-            line_text = (
-                split_lines[params.position.line]
-                if params.position.line < len(split_lines)
-                else ""
-            )
-            prefix = line_text[: params.position.character]
-            # Match `<TYPE> #(` immediately before the cursor (allowing stuff inside the parens).
-            import re as _re
-            m = _re.search(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*#\s*\([^)]*$", prefix)
-            if not m:
-                return None
-            type_name = m.group(1)
-            if cached is None or not cached.roots:
-                return None
-            defs = _comp_defs_from_cached(cached.roots)
-            comp = defs.get(type_name)
-            if comp is None:
-                return None
-            params_list = list(getattr(comp, "parameters", []) or [])
-            if not params_list:
-                return None
-            sig_label = f"{type_name} #({', '.join(p.name for p in params_list)})"
-            return SignatureHelp(
-                signatures=[
-                    SignatureInformation(
-                        label=sig_label,
-                        parameters=[
-                            ParameterInformation(label=p.name)
-                            for p in params_list
-                        ],
-                    )
-                ],
-                active_signature=0,
-                active_parameter=0,
-            )
-        except Exception:
-            logger.debug("signatureHelp handler failed", exc_info=True)
-            return None
-
-    @server.feature("textDocument/prepareTypeHierarchy")
-    def _on_prepare_type_hierarchy(_ls: LanguageServer, params: Any) -> list[Any] | None:
-        """Anchor for a type-hierarchy request — returns the item the user picked.
-
-        SystemRDL has no inheritance chain, so we treat "subtypes" as
-        "instantiations" (where this type is used). The anchor is the type's
-        declaration; subtypes is the list of instance source locations.
-        """
-        from lsprotocol.types import SymbolKind, TypeHierarchyItem
-
-        uri = params.text_document.uri
-        cached = state.cache.get(uri)
-        if cached is None or not cached.roots:
-            return None
-        word = _word_at_position(cached.text, params.position.line, params.position.character)
-        if not word:
-            return None
-        defs = _comp_defs_from_cached(cached.roots)
-        comp = defs.get(word)
-        if comp is None:
-            return None
-        try:
-            original_path = _uri_to_path(uri)
-        except ValueError:
-            original_path = None
-        translate = (
-            {cached.temp_path: original_path}
-            if cached.temp_path is not None and original_path is not None
-            else None
-        )
-        loc = _definition_location(comp, translate)
-        if loc is None:
-            return None
-        kind_label = type(comp).__name__.lower()
-        return [
-            TypeHierarchyItem(
-                name=word,
-                kind=SymbolKind.Class,
-                uri=loc.uri,
-                range=loc.range,
-                selection_range=loc.range,
-                detail=kind_label,
-                data={"typeName": word, "uri": uri},
-            )
-        ]
-
-    @server.feature("typeHierarchy/subtypes")
-    def _on_type_hierarchy_subtypes(_ls: LanguageServer, params: Any) -> list[Any]:
-        """Subtypes ≡ instances of the type. Reuses `_references_to_type`."""
-        from lsprotocol.types import SymbolKind, TypeHierarchyItem
-
-        item = getattr(params, "item", None)
-        if item is None:
-            return []
-        data = getattr(item, "data", None) or {}
-        type_name = data.get("typeName") if isinstance(data, dict) else None
-        cached_uri = data.get("uri") if isinstance(data, dict) else None
-        if not type_name or not cached_uri:
-            return []
-        cached = state.cache.get(cached_uri)
-        if cached is None or not cached.roots:
-            return []
-        try:
-            original_path = _uri_to_path(cached_uri)
-        except ValueError:
-            original_path = None
-        translate = (
-            {cached.temp_path: original_path}
-            if cached.temp_path is not None and original_path is not None
-            else None
-        )
-        refs = _references_to_type(type_name, cached.roots, False, translate)
-        return [
-            TypeHierarchyItem(
-                name=type_name,
-                kind=SymbolKind.Variable,
-                uri=ref.uri,
-                range=ref.range,
-                selection_range=ref.range,
-                detail="instance",
-            )
-            for ref in refs
-        ]
-
-    @server.feature("typeHierarchy/supertypes")
-    def _on_type_hierarchy_supertypes(_ls: LanguageServer, _params: Any) -> list[Any]:
-        """SystemRDL has no inheritance — no supertypes ever."""
-        return []
-
-    @server.feature("textDocument/references")
-    def _on_references(_ls: LanguageServer, params: Any) -> list[Location]:
-        """Find all instantiation sites of the type under the cursor.
-
-        Word-based: identifier at cursor → look up in comp_defs → walk every
-        cached elaborated tree for instances whose ``original_def`` matches.
-        Cross-file: instances in `\\`include`d files are reported with their
-        true URIs (same path-translate logic as goto-def).
-        """
-        uri = params.text_document.uri
-        cached = state.cache.get(uri)
-        if cached is None or not cached.roots:
-            return []
-        word = _word_at_position(cached.text, params.position.line, params.position.character)
-        if not word:
-            return []
-        defs = _comp_defs_from_cached(cached.roots)
-        if word not in defs:
-            return []
-        try:
-            original_path = _uri_to_path(uri)
-        except ValueError:
-            original_path = None
-        translate = (
-            {cached.temp_path: original_path}
-            if cached.temp_path is not None and original_path is not None
-            else None
-        )
-        include_decl = bool(getattr(params, "context", None) and params.context.include_declaration)
-        return _references_to_type(word, cached.roots, include_decl, translate)
-
-    @server.feature("textDocument/definition")
-    def _on_definition(_ls: LanguageServer, params: Any) -> list[Location] | Location | None:
-        uri = params.text_document.uri
-        cached = state.cache.get(uri)
-        if cached is None or not cached.roots:
-            return None
-        word = _word_at_position(cached.text, params.position.line, params.position.character)
-        if not word:
-            return None
-        try:
-            original_path = _uri_to_path(uri)
-        except ValueError:
-            original_path = None
-        translate = (
-            {cached.temp_path: original_path}
-            if cached.temp_path is not None and original_path is not None
-            else None
-        )
-        # Try multi-segment path first — `top.CTRL.enable` walks the elaborated
-        # tree segment-by-segment. Falls through to single-word lookup when
-        # the path has no dots.
-        path = _path_at_position(cached.text, params.position.line, params.position.character)
-        if path and "." in path:
-            loc = _resolve_path(cached.roots, path, translate)
-            if loc is not None:
-                return loc
-        defs = _comp_defs_from_cached(cached.roots)
-        comp = defs.get(word)
-        if comp is not None:
-            return _definition_location(comp, translate)
-        # Fallback: instance-name lookup. Catches signals (e.g. `resetsignal =
-        # my_rst;` jumps to `signal { ... } my_rst;`) and named registers /
-        # fields that aren't top-level type defs.
-        return _find_instance_by_name(cached.roots, word, translate)
-
-    @server.feature(
-        TEXT_DOCUMENT_SEMANTIC_TOKENS_FULL,
-        SemanticTokensLegend(
-            token_types=TOKEN_TYPES,
-            token_modifiers=TOKEN_MODIFIERS,
-        ),
-    )
-    def _on_semantic_tokens(_ls: LanguageServer, params: Any) -> SemanticTokens:
-        """Compute semantic tokens for the buffer.
-
-        ``params: Any`` (not ``SemanticTokensParams``) is deliberate — pygls
-        2.x inspects the param annotation to decide whether to inject the
-        server as the first argument. With a typed lsprotocol annotation it
-        stripped the ``_ls`` slot and called us with only ``params``,
-        producing ``TypeError: missing 1 required positional argument``
-        on every keystroke (visible as editor-wide lag because VSCode
-        retries the failing request constantly).
-        """
-        try:
-            uri: str | None = None
-            td = getattr(params, "text_document", None)
-            if td is not None:
-                uri = getattr(td, "uri", None)
-            if uri is None and isinstance(params, dict):
-                td_dict = params.get("textDocument") or params.get("text_document") or {}
-                uri = td_dict.get("uri") if isinstance(td_dict, dict) else None
-            if not uri:
-                return SemanticTokens(data=[])
-            text = _read_buffer(uri)
-            if text is None:
-                cached = state.cache.get(uri)
-                text = cached.text if cached is not None else ""
-            data = _semantic_tokens_for_text(text)
-            if len(data) % 5 != 0:
-                logger.error(
-                    "semanticTokens/full: encoder produced %d ints (not a multiple of 5)",
-                    len(data),
-                )
-                return SemanticTokens(data=[])
-            return SemanticTokens(data=[int(x) for x in data])
-        except Exception:
-            logger.exception("semanticTokens/full handler failed; returning empty")
-            return SemanticTokens(data=[])
-
-    @server.feature("textDocument/formatting")
-    def _on_formatting(_ls: LanguageServer, params: Any) -> list[Any]:
-        """Conservative whitespace formatter.
-
-        Trims trailing whitespace, expands tabs to 4 spaces, ensures a single
-        trailing newline. Skips opinionated changes (alignment, brace style)
-        so the formatter never fights user style choices.
-        """
-        uri = params.text_document.uri
-        text = _read_buffer(uri)
-        if text is None:
-            cached = state.cache.get(uri)
-            text = cached.text if cached is not None else ""
-        if not text:
-            return []
-        tab_size = 4
-        opts = getattr(params, "options", None)
-        if opts is not None:
-            ts = getattr(opts, "tab_size", None)
-            if isinstance(ts, int) and ts > 0:
-                tab_size = ts
-        return _document_formatting_edits(text, tab_size)
-
-    @server.feature("textDocument/codeAction")
-    def _on_code_action(_ls: LanguageServer, params: Any) -> list[Any]:
-        """Surface quick fixes from the lightbulb.
-
-        Currently: "Add `= 0` reset value" for field instantiations missing
-        an explicit reset. Pure textual scan — no elaboration dependency, so
-        the action shows up even on broken files where the user is mid-edit.
-        """
-        uri = params.text_document.uri
-        text = _read_buffer(uri)
-        if text is None:
-            cached = state.cache.get(uri)
-            text = cached.text if cached is not None else ""
-        if not text:
-            return []
-        return _code_actions_for_range(uri, text, params.range)
-
-    @server.feature("textDocument/documentLink")
-    def _on_document_link(_ls: LanguageServer, params: Any) -> list[Any]:
-        """Resolve `\\`include` paths into clickable documentLinks.
-
-        Independent of elaboration — works even when the file has parse errors,
-        so the user can navigate around a broken file to fix it.
-        """
-        uri = params.text_document.uri
-        text = _read_buffer(uri)
-        if not text:
-            cached = state.cache.get(uri)
-            text = cached.text if cached is not None else ""
-        try:
-            primary_path = _uri_to_path(uri)
-        except ValueError:
-            return []
-        search_paths = [p for p, _src in _resolve_search_paths(uri, state.include_paths)]
-        return _document_links(text, primary_path, search_paths, state.include_vars)
 
     @server.feature("rdl/includePaths")
     def _on_include_paths(_ls: LanguageServer, params: Any) -> dict[str, Any]:
-        """Return the deduped, source-labeled include search path list for a URI.
-
-        Powers the "SystemRDL: Show effective include paths" command. Lets the
-        user see exactly which paths are in effect — formerly opaque, especially
-        with multiple sources (settings.json + peakrdl.toml + sibling-dir).
-        """
-        uri = None
-        if isinstance(params, dict):
-            uri = params.get("uri") or params.get("textDocument", {}).get("uri")
-        else:
-            uri = getattr(params, "uri", None)
-            if uri is None and hasattr(params, "text_document"):
-                uri = params.text_document.uri
-        if not uri:
-            return {"uri": None, "paths": []}
-        try:
-            resolved = _resolve_search_paths(uri, state.include_paths)
-        except (ValueError, OSError):
-            resolved = []
-        return {
-            "uri": uri,
-            "paths": [{"path": p, "source": src} for p, src in resolved],
-        }
-
-    def _disk_cache_key(uri: str) -> str | None:
-        """Compute the on-disk cache key for ``uri``.
-
-        Returns ``None`` if the URI doesn't correspond to a real file (in
-        which case we just skip the disk cache entirely — the in-memory
-        cache still works). Folds the systemrdl-compiler version so a
-        compiler upgrade auto-invalidates every cached envelope.
-        """
-        try:
-            path = _uri_to_path(uri)
-        except ValueError:
-            return None
-        try:
-            mtime_ns = path.stat().st_mtime_ns
-        except OSError:
-            return None
-        try:
-            import systemrdl as _systemrdl
-            compiler_version = getattr(_systemrdl, "__version__", "unknown")
-        except Exception:
-            compiler_version = "unknown"
-        return make_key(path, mtime_ns, state.include_paths, compiler_version)
+        return handle_include_paths(state, params)
 
     @server.feature("rdl/elaboratedTree")
     async def _on_elaborated_tree(_ls: LanguageServer, params: Any) -> dict[str, Any]:
-        """Custom JSON-RPC: viewer fetches the latest elaborated tree for a URI.
-
-        T1.4: now ``async`` and runs the (potentially multi-second) serialize
-        in ``asyncio.to_thread`` so the LSP event loop is never blocked.
-        Big designs no longer freeze hover / completion / diagnostics while
-        the spine is being built.
-
-        T1.4: when the client advertised ``experimental.systemrdlLazyTree``
-        capability the server returns a spine envelope (``Reg.loadState =
-        'placeholder'``, fields fetched on demand via ``rdl/expandNode``).
-        Old clients keep getting the full tree.
-
-        T1.4: spine envelopes are also persisted to ``DiskCache`` so a
-        VSCode window reload skips parse + elaborate + serialize for an
-        unchanged file. Cache key folds in mtime + include paths +
-        compiler version. Disk cache is only consulted for the lazy path
-        because spine envelopes are small (~10 MB even for 25k regs)
-        while full envelopes can hit 200 MB and aren't worth caching.
-
-        TODO-1 contract preserved:
-
-        - Request may include ``sinceVersion: int``. If it matches the LSP's
-          cached version, the response is a tiny ``{unchanged: true, version}``
-          envelope and the client keeps its previously-rendered tree intact.
-        - First request (no ``sinceVersion`` or stale value) returns the
-          serialized tree, cached on the LSP side keyed by ``(uri, version)``.
-
-        Schema: ``schemas/elaborated-tree.json`` v0.2.0. Returns the cached
-        last-good tree when the current parse has failed (design D7).
-        """
-        uri = None
-        since_version: int | None = None
-        if isinstance(params, dict):
-            uri = params.get("uri") or params.get("textDocument", {}).get("uri")
-            raw = params.get("sinceVersion")
-            if isinstance(raw, int):
-                since_version = raw
-        else:
-            uri = getattr(params, "uri", None)
-            if uri is None and hasattr(params, "text_document"):
-                uri = params.text_document.uri
-            raw = getattr(params, "sinceVersion", None)
-            if isinstance(raw, int):
-                since_version = raw
-
-        if not uri:
-            return _serialize_root([], stale=False, version=0)
-        cached = state.cache.get(uri)
-        if cached is None:
-            return _serialize_root([], stale=False, version=0)
-
-        # Version-gated fast path: client already has this version, skip both
-        # serialization and transport of the (potentially huge) tree body.
-        if since_version is not None and since_version == cached.version:
-            return _unchanged_envelope(cached.version)
-
-        # In-memory fast path: same-version re-fetch returns the memoized dict.
-        if cached.serialized is not None:
-            return cached.serialized
-
-        # Disk cache fast path (lazy mode only — see docstring above).
-        if state.lazy_supported:
-            disk_key = _disk_cache_key(uri)
-            if disk_key is not None:
-                disk_envelope = await asyncio.to_thread(state.disk_cache.get, disk_key)
-                # The cache is content-addressed (sha256 of abs path + mtime +
-                # include paths + compiler version). A hit means the envelope's
-                # *content* is byte-equivalent to what a fresh serialize would
-                # produce — that's the whole point of the key. The envelope's
-                # `version` field is a per-process monotonic counter for the
-                # client's sinceVersion gating; the disk copy carries whatever
-                # counter the previous LSP run had, which is rarely == the
-                # current run's counter. Rewrite the field to the current
-                # in-memory version so client sinceVersion checks stay
-                # coherent, then return. Without this rewrite the disk cache
-                # was effectively dead — every cold start re-serialized.
-                if isinstance(disk_envelope, dict):
-                    disk_envelope["version"] = cached.version
-                    # Stale flag is per-process runtime state, NOT part
-                    # of the content-addressed disk key — a hit may
-                    # carry whatever ``stale`` value was true when the
-                    # entry was written, which is unrelated to whether
-                    # the latest parse succeeded. Override with the
-                    # current state so a "valid → fetched → broken"
-                    # flow doesn't keep serving the non-stale envelope
-                    # from disk after the in-memory invalidation.
-                    # Field-reported as "broke the file, editor shows
-                    # error, webview shows nothing wrong".
-                    disk_envelope["stale"] = uri in state.stale_uris
-                    cached.serialized = disk_envelope
-                    return disk_envelope
-
-        try:
-            original_path = _uri_to_path(uri)
-        except ValueError:
-            original_path = None
-        translate = (
-            {cached.temp_path: original_path}
-            if cached.temp_path is not None and original_path is not None
-            else None
-        )
-        # Pick spine vs full based on the client's advertised capability and
-        # run in a thread so the event loop stays responsive during the
-        # ~1s (spine) or ~6s (full) wall-clock at 25k regs.
-        serialize_fn = _serialize_spine if state.lazy_supported else _serialize_root
-        envelope = await asyncio.to_thread(
-            serialize_fn,
-            cached.roots,
-            uri in state.stale_uris,
-            path_translate=translate,
-            version=cached.version,
-        )
-        cached.serialized = envelope
-
-        # Persist spine to disk (best-effort, fire-and-forget) for window-reload
-        # speed. Full trees are too big to be worth caching to disk.
-        if state.lazy_supported:
-            disk_key = _disk_cache_key(uri)
-            if disk_key is not None:
-                # Don't await — disk write is independent of the response.
-                asyncio.create_task(
-                    asyncio.to_thread(state.disk_cache.put, disk_key, envelope)
-                )
-        return envelope
+        return await handle_elaborated_tree(state, params)
 
     @server.feature("rdl/expandNode")
     async def _on_expand_node(_ls: LanguageServer, params: Any) -> dict[str, Any]:
-        """Custom JSON-RPC: lazy-mode client requests details for a placeholder Reg.
-
-        T1.5. Request: ``{uri, version, nodeId}``. Response: a single ``Reg``
-        dict with ``fields[]`` populated and ``loadState`` absent. The
-        ``nodeId`` is the opaque base-36 string the client got from the
-        spine; it's only valid within the (uri, version) pair the spine
-        was emitted for.
-
-        Errors raised as JSON-RPC error responses:
-        - -32001 ``NodeNotFound`` — nodeId doesn't name any reg (or names
-          a container, which can't be expanded — containers are always
-          fully present in the spine).
-        - -32002 ``VersionMismatch`` — version doesn't match the LSP's
-          current cached version. Client should re-fetch the spine.
-        """
-        from pygls.exceptions import JsonRpcException
-
-        uri = None
-        version: int | None = None
-        node_id: str | None = None
-        if isinstance(params, dict):
-            uri = params.get("uri") or params.get("textDocument", {}).get("uri")
-            v = params.get("version")
-            if isinstance(v, int):
-                version = v
-            n = params.get("nodeId")
-            if isinstance(n, str):
-                node_id = n
-        else:
-            uri = getattr(params, "uri", None)
-            v = getattr(params, "version", None)
-            if isinstance(v, int):
-                version = v
-            n = getattr(params, "nodeId", None)
-            if isinstance(n, str):
-                node_id = n
-
-        if not uri or version is None or not node_id:
-            raise JsonRpcException(
-                code=-32602, message="invalid expandNode params"
-            )
-        cached = state.cache.get(uri)
-        if cached is None:
-            # Soft signal — viewer asked before first elaboration landed (or
-            # after the cache was evicted). Returning a sentinel keeps this
-            # off the JSON-RPC error channel: pygls auto-logs unhandled
-            # JsonRpcException as [ERROR] with a traceback, and a normal race
-            # shouldn't look like a server fault. The viewer's onTreeUpdate
-            # will deliver a fresh tree and useEffect will retry.
-            return {"outdated": True, "currentVersion": None}
-        if cached.version != version:
-            return {"outdated": True, "currentVersion": cached.version}
-
-        # Memoize per node so repeat fetches of the same reg cost a dict ref.
-        if cached.expanded is None:
-            cached.expanded = {}
-        if node_id in cached.expanded:
-            return cached.expanded[node_id]
-
-        try:
-            original_path = _uri_to_path(uri)
-        except ValueError:
-            original_path = None
-        translate = (
-            {cached.temp_path: original_path}
-            if cached.temp_path is not None and original_path is not None
-            else None
-        )
-        result = await asyncio.to_thread(
-            expand_node, cached.roots, node_id, translate
-        )
-        if result is None:
-            raise JsonRpcException(
-                code=-32001, message=f"NodeNotFound (nodeId={node_id})"
-            )
-        cached.expanded[node_id] = result
-        return result
+        return await handle_expand_node(state, params)
 
     # Test hook: expose ServerState + the closures the integration suite
     # needs to drive elaborate paths without spinning up real stdio.
@@ -2229,5 +1403,8 @@ def build_server() -> LanguageServer:
     server._systemrdl_state = state  # type: ignore[attr-defined]
     server._systemrdl_full_pass_async = _full_pass_async  # type: ignore[attr-defined]
     server._systemrdl_apply_compile_result = _apply_compile_result  # type: ignore[attr-defined]
+    # Shared dict consumed by the pull-diagnostics handler in _handlers_lsp.
+    # Updated as a side-effect of every _publish_diagnostics call.
+    server._systemrdl_last_diagnostics = state.last_diagnostics  # type: ignore[attr-defined]
 
     return server
