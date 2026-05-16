@@ -4,6 +4,23 @@ All notable changes to **SystemRDL Pro** are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [SemVer](https://semver.org/).
 
+## [0.29.2] — 2026-05-16
+
+Bumps bundled language server to **systemrdl-lsp 0.21.2**.
+
+### Fixed
+
+- **Array instances (`reg foo[N]`, `regfile bar[N]`) collapsed in the
+  memory-map viewer.** All N unrolled elements serialized with the bare
+  `inst_name`, so the tree's path key (`segs.join('.')`) was identical
+  across the whole array — selection routed every click to the same
+  entry, and the virtualized list's React key collisions made one DOM
+  row freeze in place while the scrollbar rode the full total height
+  ("infinite scroll of one register"). `serialize.py` now uses
+  `node.get_path_segment()` (returns `inst_name[i]` for array elements);
+  `Tree.tsx`'s virtualization key is now position-based as a second
+  layer of defense against any future logical-key collision.
+
 ## [0.29.1] — 2026-05-03
 
 Bumps bundled language server to **systemrdl-lsp 0.21.1**.
