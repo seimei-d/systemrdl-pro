@@ -153,9 +153,20 @@ export function Tree({
       >
         <div className="rdl-tree" style={{ height: `${totalH}px`, position: 'relative' }}>
           <div style={{ position: 'absolute', top: 0, left: 0, right: 0, transform: `translateY(${offsetY}px)` }}>
-            {visibleRows.map(row => (
+            {visibleRows.map((row, i) => (
+              // Key is the absolute index into `rows`, not row.key. row.key is
+              // the logical path (`top.my_reg`) and is *supposed* to be unique
+              // per flat-list entry, but if any upstream slip lets two entries
+              // share it (the `reg[N]` array unroll did, before the
+              // serializer started emitting `name[i]`), React dedups TreeRows
+              // by key — reconciler reuses one DOM node for the whole array,
+              // memo bails on each scroll tick because the key matches, and
+              // the viewport visually freezes on a single register while the
+              // scrollbar still rides the full `totalH` height. Indexing by
+              // position keeps reconciliation correct under any duplicate-key
+              // bug we haven't found yet.
               <TreeRow
-                key={row.key}
+                key={startIdx + i}
                 row={row}
                 selected={selectedKey === row.key}
                 onSelectReg={onSelectReg}

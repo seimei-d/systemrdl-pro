@@ -1295,3 +1295,63 @@ def test_expand_node_returns_none_for_container_id(tmp_path):
     spine = _serialize_spine(roots, stale=False, version=1)
     addrmap_id = spine["roots"][0]["nodeId"]
     assert expand_node(roots, addrmap_id) is None
+
+
+def test_array_instances_get_indexed_names(tmp_path):
+    """Unrolled `reg foo[N]` instances must carry distinct `name` strings.
+
+    Pre-fix: every element of a register/regfile array had
+    ``name = inst_name`` (e.g. ``"my_reg"``) — identical across all N elements,
+    differing only in ``address``. The viewer builds row keys from
+    ``segs.join('.')``, so 32 array elements collapsed into one entry in
+    ``regIndex`` and shared a single React ``key`` in the virtualized
+    Tree — manifesting as "infinite scroll of one register" for the user
+    whose addrmap ended with a large array. Fix: serialize the
+    ``get_path_segment()`` form (``my_reg[0]``, ``my_reg[1]``, …) so each
+    instance is path-unique downstream.
+    """
+    import textwrap
+
+    from systemrdl import RDLCompiler
+    from systemrdl_lsp.serialize import _serialize_root
+
+    rdl = tmp_path / "arrays.rdl"
+    rdl.write_text(
+        textwrap.dedent("""
+            addrmap top {
+                reg { field { sw=rw; hw=r; } d[31:0]; } solo_reg;
+                reg { field { sw=rw; hw=r; } d[31:0]; } my_reg[4];
+                regfile {
+                    reg { field { sw=rw; hw=r; } d[31:0]; } inner;
+                } bank[2];
+            };
+        """)
+    )
+    c = RDLCompiler()
+    c.compile_file(str(rdl))
+    roots = [c.elaborate(top_def_name=None)]
+    env = _serialize_root(roots, stale=False)
+    top = env["roots"][0]
+
+    children = top["children"]
+    names = [ch["name"] for ch in children]
+
+    # Non-array register is unchanged.
+    assert "solo_reg" in names
+    # Array register unrolls into 4 distinct, index-suffixed names.
+    assert [n for n in names if n.startswith("my_reg")] == [
+        "my_reg[0]",
+        "my_reg[1]",
+        "my_reg[2]",
+        "my_reg[3]",
+    ]
+    # Array regfile unrolls the same way.
+    assert [n for n in names if n.startswith("bank")] == ["bank[0]", "bank[1]"]
+    # Children of an arrayed regfile keep their own (non-indexed) names — the
+    # field-level path uniqueness comes from the parent's `[i]` segment.
+    bank0 = next(ch for ch in children if ch["name"] == "bank[0]")
+    assert bank0["children"][0]["name"] == "inner"
+
+    # Addresses still differ — sanity that we didn't lose the existing data.
+    my_regs = [ch for ch in children if ch["name"].startswith("my_reg")]
+    assert len({r["address"] for r in my_regs}) == 4

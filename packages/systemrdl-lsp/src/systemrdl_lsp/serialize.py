@@ -385,7 +385,12 @@ def _serialize_reg(
 
     out: dict[str, Any] = {
         "kind": "reg",
-        "name": node.inst_name or "",
+        # get_path_segment() includes the array index (`my_reg[5]`) for unrolled
+        # array instances; inst_name on its own is the bare type-level identifier
+        # and is identical across every element, which collapses the viewer's
+        # path-keyed regIndex/flatRows into a single entry and makes a `reg[N]`
+        # array render as N visually-identical rows under a duplicate React key.
+        "name": node.get_path_segment() or node.inst_name or "",
         "address": _hex(node.absolute_address, max(32, width_bits)),
         "width": width_bits,
         "fields": fields,
@@ -472,7 +477,9 @@ def _serialize_addressable(
             logger.exception("error walking children of %r", node)
         out = {
             "kind": kind,
-            "name": node.inst_name or "",
+            # See _serialize_reg: arrayed regfile/addrmap (`regfile bank[4];`)
+            # needs the index in the name to keep viewer keys unique.
+            "name": node.get_path_segment() or node.inst_name or "",
             "address": _hex(node.absolute_address),
             "size": _hex(node.size),
             "children": children,
