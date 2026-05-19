@@ -99,7 +99,7 @@ def _inlay_hints_for_addressables(
     """
     from collections import Counter
 
-    from systemrdl.node import AddressableNode
+    from systemrdl.node import RegfileNode, RegNode
 
     hints: list[InlayHint] = []
     lines = buffer_text.splitlines() if buffer_text else []
@@ -107,7 +107,7 @@ def _inlay_hints_for_addressables(
     line_uses: Counter[tuple[str, int]] = Counter()
 
     def collect_uses(node: Any) -> None:
-        if isinstance(node, AddressableNode):
+        if isinstance(node, (RegNode, RegfileNode)):
             inst = getattr(node, "inst", None)
             src_ref = getattr(inst, "inst_src_ref", None) or getattr(inst, "def_src_ref", None)
             line_1b = getattr(src_ref, "line", None)
@@ -126,44 +126,38 @@ def _inlay_hints_for_addressables(
             collect_uses(top)
 
     def visit(node: Any) -> None:
-        if not isinstance(node, AddressableNode):
-            for c in getattr(node, "children", lambda **_: [])(unroll=True):
-                visit(c)
-            return
+        # Only show inlay hints for reg and regfile — skip addrmap and mem.
+        if isinstance(node, (RegNode, RegfileNode)):
+            inst = getattr(node, "inst", None)
+            src_ref = getattr(inst, "inst_src_ref", None) or getattr(inst, "def_src_ref", None)
+            line_1b = getattr(src_ref, "line", None)
+            ref_filename = getattr(src_ref, "filename", None)
 
-        inst = getattr(node, "inst", None)
-        src_ref = getattr(inst, "inst_src_ref", None) or getattr(inst, "def_src_ref", None)
-        line_1b = getattr(src_ref, "line", None)
-        ref_filename = getattr(src_ref, "filename", None)
-
-        if (
-            line_1b is not None
-            and ref_filename
-            and pathlib.Path(ref_filename) == path
-            # Skip lines reused by multiple elaborated instances — those are
-            # the body of a multi-use regfile/reg type, where no single
-            # absolute address is meaningful.
-            and line_uses.get((str(ref_filename), line_1b), 0) <= 1
-        ):
-            line_0b = max(0, line_1b - 1)
-            if line_0b not in seen_lines and line_0b < len(lines):
-                seen_lines.add(line_0b)
-                col_0b = len(lines[line_0b])
-                try:
-                    addr = node.absolute_address
-                except Exception:
-                    addr = None
-                if addr is not None:
-                    hints.append(
-                        InlayHint(
-                            position=Position(line=line_0b, character=col_0b),
-                            label=f"  → {_hex(addr)}",
-                            padding_left=True,
-                            kind=InlayHintKind.Type,
+            if (
+                line_1b is not None
+                and ref_filename
+                and pathlib.Path(ref_filename) == path
+                and line_uses.get((str(ref_filename), line_1b), 0) <= 1
+            ):
+                line_0b = max(0, line_1b - 1)
+                if line_0b not in seen_lines and line_0b < len(lines):
+                    seen_lines.add(line_0b)
+                    col_0b = len(lines[line_0b])
+                    try:
+                        addr = node.absolute_address
+                    except Exception:
+                        addr = None
+                    if addr is not None:
+                        hints.append(
+                            InlayHint(
+                                position=Position(line=line_0b, character=col_0b),
+                                label=f"  → {_hex(addr)}",
+                                padding_left=True,
+                                kind=InlayHintKind.Type,
+                            )
                         )
-                    )
 
-        for c in node.children(unroll=True):
+        for c in getattr(node, "children", lambda **_: [])(unroll=True):
             visit(c)
 
     for r in roots:
