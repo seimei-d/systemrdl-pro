@@ -77,11 +77,11 @@ from .formatting import _document_formatting_edits
 from .hover import _hover_for_word, _hover_text_for_node, _node_at_position
 from .links import _document_links
 from .outline import (
-    _code_lenses_for_addrmaps,
+    _code_lenses_for_addrmaps,  # noqa: F401 — disabled, kept for re-enabling
     _document_symbols,
     _folding_ranges_from_text,
     _inlay_hints_for_addressables,
-    _resolve_code_lens_for,
+    _resolve_code_lens_for,  # noqa: F401 — disabled, kept for re-enabling
     _workspace_symbols_for_uri,
 )
 from .semantic import TOKEN_MODIFIERS, TOKEN_TYPES, _semantic_tokens_for_text
@@ -202,46 +202,58 @@ def register(
         logger.debug("[INLAY] %s — returning %d hints", uri, len(hints))
         return hints
 
+    # DISABLED: CodeLens for resolved addresses — returns empty list so
+    # nothing is highlighted in the editor. The implementation is kept below
+    # for reference; re-enable by uncommenting and restoring the feature
+    # registration.
     @server.feature(
         "textDocument/codeLens",
         CodeLensOptions(resolve_provider=True),
     )
     async def _on_code_lens(_ls: LanguageServer, params: Any) -> list[CodeLens]:
-        uri = params.text_document.uri
-        cached = state.cache.get(uri)
-        if cached is None or not cached.roots:
-            logger.debug("[LENS] %s — no cache, returning []", uri)
-            return []
-        path = cached.temp_path or _uri_to_path(uri)
-        lenses = await asyncio.to_thread(_code_lenses_for_addrmaps, cached.roots, path)
-        for lens in lenses:
-            if isinstance(lens.data, dict):
-                lens.data["uri"] = uri
-        if lenses:
-            sample = lenses[0]
-            logger.warning(
-                "[LENS] %s — returning %d lenses, first at line %d",
-                uri, len(lenses), sample.range.start.line,
-            )
-        else:
-            logger.debug("[LENS] %s — returning 0 lenses", uri)
-        return lenses
+        # Disabled: return empty list so no lenses are rendered.
+        # Original implementation preserved below for re-enabling:
+        #
+        # uri = params.text_document.uri
+        # cached = state.cache.get(uri)
+        # if cached is None or not cached.roots:
+        #     logger.debug("[LENS] %s — no cache, returning []", uri)
+        #     return []
+        # path = cached.temp_path or _uri_to_path(uri)
+        # lenses = await asyncio.to_thread(_code_lenses_for_addrmaps, cached.roots, path)
+        # for lens in lenses:
+        #     if isinstance(lens.data, dict):
+        #         lens.data["uri"] = uri
+        # if lenses:
+        #     sample = lenses[0]
+        #     logger.warning(
+        #         "[LENS] %s — returning %d lenses, first at line %d",
+        #         uri, len(lenses), sample.range.start.line,
+        #     )
+        # else:
+        #     logger.debug("[LENS] %s — returning 0 lenses", uri)
+        # return lenses
+        return []
 
     @server.feature("codeLens/resolve")
     async def _on_code_lens_resolve(_ls: LanguageServer, params: Any) -> Any:
-        data = getattr(params, "data", None)
-        if not isinstance(data, dict):
-            return params
-        uri = data.get("uri")
-        addrmap = data.get("addrmapName")
-        if not uri or not addrmap:
-            return params
-        cached = state.cache.get(uri)
-        if cached is None or not cached.roots:
-            return params
-        cmd = await asyncio.to_thread(_resolve_code_lens_for, cached.roots, addrmap)
-        if cmd is not None:
-            params.command = cmd
+        # Disabled: no-op, return params unchanged.
+        # Original implementation preserved below for re-enabling:
+        #
+        # data = getattr(params, "data", None)
+        # if not isinstance(data, dict):
+        #     return params
+        # uri = data.get("uri")
+        # addrmap = data.get("addrmapName")
+        # if not uri or not addrmap:
+        #     return params
+        # cached = state.cache.get(uri)
+        # if cached is None or not cached.roots:
+        #     return params
+        # cmd = await asyncio.to_thread(_resolve_code_lens_for, cached.roots, addrmap)
+        # if cmd is not None:
+        #     params.command = cmd
+        # return params
         return params
 
     @server.feature("workspace/symbol")
