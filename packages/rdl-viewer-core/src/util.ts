@@ -1,4 +1,4 @@
-import type { TreeNode, Container, Reg, Field } from './types';
+import type { Mem, TreeNode, Container, Reg, Field } from './types';
 
 export function isContainer(n: TreeNode): n is Container {
   return n.kind === 'addrmap' || n.kind === 'regfile';
@@ -50,6 +50,12 @@ export function subtreeMatches(node: TreeNode, filter: string, scope: FilterScop
     }
     return false;
   }
+  if (node.kind === 'mem') {
+    const mem = node as Mem;
+    if (m('name') && mem.name.toLowerCase().includes(lower)) return true;
+    if (m('address') && hex && normalizeAddr(mem.address).includes(hex)) return true;
+    return false;
+  }
   if (m('name') && node.name?.toLowerCase().includes(lower)) return true;
   if (m('address') && hex && normalizeAddr(node.address).includes(hex)) return true;
   return (node.children || []).some(c => subtreeMatches(c, filter, scope));
@@ -57,6 +63,7 @@ export function subtreeMatches(node: TreeNode, filter: string, scope: FilterScop
 
 export function findFirstReg(node: TreeNode, segs: string[]): { reg: Reg; path: string[]; key: string } | null {
   if (node.kind === 'reg') return { reg: node, path: segs, key: segs.join('.') };
+  if (node.kind === 'mem') return null;
   for (const c of node.children || []) {
     const r = findFirstReg(c, segs.concat([c.name]));
     if (r) return r;
@@ -69,6 +76,7 @@ export function findRegByKey(rootNode: TreeNode, key: string): { reg: Reg; path:
     if (node.kind === 'reg') {
       return segs.join('.') === key ? { reg: node, path: segs } : null;
     }
+    if (node.kind === 'mem') return null;
     for (const c of node.children || []) {
       const r = walk(c, segs.concat([c.name]));
       if (r) return r;
@@ -82,7 +90,7 @@ export function countRegs(roots: TreeNode[]): number {
   let n = 0;
   const visit = (node: TreeNode): void => {
     if (node.kind === 'reg') n++;
-    else (node.children || []).forEach(visit);
+    else if (node.kind !== 'mem') (node.children || []).forEach(visit);
   };
   roots.forEach(visit);
   return n;

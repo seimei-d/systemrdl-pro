@@ -1,11 +1,12 @@
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
-import type { Addrmap, Reg, SourceLoc, Transport, TreeNode } from './types';
+import type { Addrmap, Mem, Reg, SourceLoc, Transport, TreeNode } from './types';
 import { isContainer, subtreeMatches, type FilterScope } from './util';
 import type { CtxMenuItem } from './ContextMenu';
 
 export type FlatRow =
   | { kind: 'container'; key: string; depth: number; expanded: boolean; hasChildren: boolean; node: Addrmap | (TreeNode & { kind: 'regfile' }); pathSegs: string[] }
-  | { kind: 'reg'; key: string; depth: number; node: Reg; pathSegs: string[] };
+  | { kind: 'reg'; key: string; depth: number; node: Reg; pathSegs: string[] }
+  | { kind: 'mem'; key: string; depth: number; node: Mem; pathSegs: string[] };
 
 /**
  * Walk the active root and produce a flat ordered list of visible rows
@@ -39,6 +40,10 @@ export function buildFlatList(
       const path = segs.concat([node.name]);
       out.push({ kind: 'reg', key: path.join('.'), depth, node, pathSegs: path });
     }
+    if (node.kind === 'mem') {
+      const path = segs.concat([node.name]);
+      out.push({ kind: 'mem', key: path.join('.'), depth, node, pathSegs: path });
+    }
   }
   visit(root, 0, []);
   return out;
@@ -49,6 +54,7 @@ type Props = {
   selectedKey: string | null;
   onSelectReg: (row: FlatRow & { kind: 'reg' }) => void;
   onRevealContainer: (row: FlatRow & { kind: 'container' }) => void;
+  onRevealMem: (row: FlatRow & { kind: 'mem' }) => void;
   onToggleCollapse: (key: string) => void;
   onContextMenu: (ev: React.MouseEvent, row: FlatRow) => void;
   filter: string;
@@ -65,7 +71,7 @@ const ROW_HEIGHT_PX = 22;
 const OVERSCAN_ROWS = 30;
 
 export function Tree({
-  rows, selectedKey, onSelectReg, onRevealContainer, onToggleCollapse, onContextMenu,
+  rows, selectedKey, onSelectReg, onRevealContainer, onRevealMem, onToggleCollapse, onContextMenu,
   filter, filterMatchCount, hasRoots,
 }: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -171,6 +177,7 @@ export function Tree({
                 selected={selectedKey === row.key}
                 onSelectReg={onSelectReg}
                 onRevealContainer={onRevealContainer}
+                onRevealMem={onRevealMem}
                 onToggleCollapse={onToggleCollapse}
                 onContextMenu={onContextMenu}
               />
@@ -201,6 +208,7 @@ type RowProps = {
   selected: boolean;
   onSelectReg: (row: FlatRow & { kind: 'reg' }) => void;
   onRevealContainer: (row: FlatRow & { kind: 'container' }) => void;
+  onRevealMem: (row: FlatRow & { kind: 'mem' }) => void;
   onToggleCollapse: (key: string) => void;
   onContextMenu: (ev: React.MouseEvent, row: FlatRow) => void;
 };
@@ -209,7 +217,7 @@ type RowProps = {
 // `selected` flipped, not all 500-25k visible rows. The four callback
 // props are useCallback-stable in Viewer so memo bailout is effective.
 const TreeRow = memo(function TreeRow({
-  row, selected, onSelectReg, onRevealContainer, onToggleCollapse, onContextMenu,
+  row, selected, onSelectReg, onRevealContainer, onRevealMem, onToggleCollapse, onContextMenu,
 }: RowProps) {
   const indent = row.depth > 0 ? `rdl-indent-${Math.min(row.depth, 3)}` : '';
   const cls = ['rdl-row', indent];
@@ -259,7 +267,29 @@ const TreeRow = memo(function TreeRow({
   }
 
   // reg
-  const reg = row.node;
+  if (row.kind === 'reg') {
+    const reg = row.node;
+    return (
+      <div
+        className={className}
+        role="treeitem"
+        aria-level={row.depth + 1}
+        aria-selected={selected}
+        data-key={row.key}
+        onClick={() => onSelectReg(row)}
+        onContextMenu={(e) => onContextMenu(e, row)}
+      >
+        <span className="caret"> </span>
+        <span className="addr">{reg.address}</span>
+        <span className="name">{reg.name}</span>
+        <span className="access">{reg.accessSummary || ''}</span>
+      </div>
+    );
+  }
+
+  // mem
+  const mem = row.node;
+  const sizeLabel = mem.memWidth ? `${mem.memEntries ?? '?'}×${mem.memWidth}` : '';
   return (
     <div
       className={className}
@@ -267,13 +297,15 @@ const TreeRow = memo(function TreeRow({
       aria-level={row.depth + 1}
       aria-selected={selected}
       data-key={row.key}
-      onClick={() => onSelectReg(row)}
+      onClick={() => onRevealMem(row)}
       onContextMenu={(e) => onContextMenu(e, row)}
+      title="Click to reveal in editor"
+      style={{ cursor: 'pointer' }}
     >
       <span className="caret"> </span>
-      <span className="addr">{reg.address}</span>
-      <span className="name">{reg.name}</span>
-      <span className="access">{reg.accessSummary || ''}</span>
+      <span className="addr">{mem.address}</span>
+      <span className="name">{mem.name}</span>
+      <span className="access">{`mem${sizeLabel ? ` (${sizeLabel})` : ''}`}</span>
     </div>
   );
 });

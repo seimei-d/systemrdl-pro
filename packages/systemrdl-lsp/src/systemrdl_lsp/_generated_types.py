@@ -70,6 +70,20 @@ class Reg(TypedDict):
     parameters: NotRequired[list["ParameterBinding"]]
     fields: list["Field"]
 
+class Mem(TypedDict):
+    kind: Literal['mem']
+    name: str
+    type: NotRequired[str]
+    displayName: NotRequired[str]
+    nodeId: NotRequired["NodeId"]
+    address: "HexU64"
+    size: "HexU64"
+    memEntries: NotRequired[int]
+    memWidth: NotRequired[int]
+    desc: NotRequired[str]
+    source: NotRequired["SourceLoc"]
+    parameters: NotRequired[list["ParameterBinding"]]
+
 class Regfile(TypedDict):
     kind: Literal['regfile']
     name: str
@@ -81,7 +95,7 @@ class Regfile(TypedDict):
     desc: NotRequired[str]
     source: NotRequired["SourceLoc"]
     parameters: NotRequired[list["ParameterBinding"]]
-    children: list[Union["Regfile", "Reg"]]
+    children: list[Union["Regfile", "Reg", "Mem"]]
 
 class Addrmap(TypedDict):
     kind: Literal['addrmap']
@@ -95,7 +109,7 @@ class Addrmap(TypedDict):
     isBridge: NotRequired[bool]
     source: NotRequired["SourceLoc"]
     parameters: NotRequired[list["ParameterBinding"]]
-    children: list[Union["Addrmap", "Regfile", "Reg"]]
+    children: list[Union["Addrmap", "Regfile", "Reg", "Mem"]]
 
 # Top-level envelope ----------------------------------------------------
 

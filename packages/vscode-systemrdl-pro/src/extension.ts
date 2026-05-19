@@ -11,6 +11,7 @@ import {
 import type {
   Addrmap,
   ElaboratedTree,
+  Mem,
   Reg,
   Regfile,
   SourceLoc,
@@ -870,9 +871,9 @@ function updateStatusBar(tree: ElaboratedTree, uri: string): void {
 
 function countRegs(roots: Addrmap[]): number {
   let n = 0;
-  const walk = (node: Addrmap | Regfile | Reg): void => {
+  const walk = (node: Addrmap | Regfile | Reg | Mem): void => {
     if (node.kind === 'reg') n++;
-    else (node.children ?? []).forEach(walk);
+    else if (node.kind !== 'mem') (node.children ?? []).forEach(walk);
   };
   roots.forEach(walk);
   return n;

@@ -428,6 +428,54 @@ def _serialize_reg(
     return out
 
 
+def _serialize_mem(
+    node: Any,
+    cache: _TypeCache,
+    path_translate: dict[pathlib.Path, pathlib.Path] | None = None,
+) -> dict[str, Any]:
+    """Serialize a MemNode to the schema's Mem shape."""
+    width_bits = 32
+    mw = _cached_prop(node, "memwidth", cache)
+    if mw is not None:
+        try:
+            width_bits = int(mw)
+        except (TypeError, ValueError):
+            pass
+
+    entries = _cached_prop(node, "mementries", cache)
+    mem_entries = int(entries) if entries is not None else None
+
+    total_bytes = (mem_entries * width_bits) // 8 if mem_entries is not None else 0
+
+    out: dict[str, Any] = {
+        "kind": "mem",
+        "name": node.get_path_segment() or node.inst_name or "",
+        "address": _hex(node.absolute_address),
+        "size": _hex(total_bytes),
+    }
+    if mem_entries is not None:
+        out["memEntries"] = mem_entries
+    out["memWidth"] = width_bits
+    inst = getattr(node, "inst", None)
+    if inst is not None and getattr(inst, "type_name", None):
+        out["type"] = str(inst.type_name)
+    display_name = _cached_prop(node, "name", cache)
+    if display_name:
+        out["displayName"] = str(display_name)
+    desc = _cached_prop(node, "desc", cache)
+    if desc:
+        out["desc"] = str(desc)
+    inst_src = getattr(inst, "inst_src_ref", None) if inst is not None else None
+    src = _src_ref_to_dict(inst_src, path_translate) if inst_src is not None \
+        else _cached_def_src_ref(node, cache, path_translate)
+    if src:
+        out["source"] = src
+    params = _serialize_parameters(node)
+    if params:
+        out["parameters"] = params
+    return out
+
+
 def _serialize_addressable(
     node: Any,
     cache: _TypeCache,
@@ -446,7 +494,7 @@ def _serialize_addressable(
     ``lazy`` propagates into ``_serialize_reg`` so reg leaves get
     ``loadState='placeholder'`` and an empty ``fields`` array.
     """
-    from systemrdl.node import AddrmapNode, RegfileNode, RegNode
+    from systemrdl.node import AddrmapNode, MemNode, RegfileNode, RegNode
 
     # Assign nodeId BEFORE recursing so the parent's id is smaller than
     # any descendant's id — that ordering matters for expand_node's DFS.
@@ -461,6 +509,11 @@ def _serialize_addressable(
             out["nodeId"] = my_id
             if out_index is not None:
                 out_index[my_id] = node
+        return out
+    if isinstance(node, MemNode):
+        out = _serialize_mem(node, cache, path_translate)
+        if my_id is not None:
+            out["nodeId"] = my_id
         return out
     if isinstance(node, (AddrmapNode, RegfileNode)):
         kind = "addrmap" if isinstance(node, AddrmapNode) else "regfile"
@@ -628,7 +681,7 @@ def _build_node_index(
     else:
         root_list = [roots_input]
 
-    from systemrdl.node import AddrmapNode, RegfileNode, RegNode
+    from systemrdl.node import AddrmapNode, MemNode, RegfileNode, RegNode
 
     index: dict[str, Any] = {}
     counter = [0]
@@ -638,6 +691,8 @@ def _build_node_index(
         counter[0] += 1
         if isinstance(node, RegNode):
             index[_node_id(my_idx)] = node
+            return
+        if isinstance(node, MemNode):
             return
         if isinstance(node, (AddrmapNode, RegfileNode)):
             try:
@@ -690,7 +745,7 @@ def expand_node(
     else:
         root_list = [roots_input]
 
-    from systemrdl.node import AddrmapNode, RegfileNode, RegNode
+    from systemrdl.node import AddrmapNode, MemNode, RegfileNode, RegNode
 
     counter = [0]
 
@@ -703,6 +758,8 @@ def expand_node(
                 out = _serialize_reg(node, cache, path_translate, lazy=False)
                 out["nodeId"] = my_id
                 return out
+            return None
+        if isinstance(node, MemNode):
             return None
         if isinstance(node, (AddrmapNode, RegfileNode)):
             if my_id == node_id:

@@ -72,7 +72,8 @@
             "oneOf": [
               { "$ref": "#/$defs/Addrmap" },
               { "$ref": "#/$defs/Regfile" },
-              { "$ref": "#/$defs/Reg" }
+              { "$ref": "#/$defs/Reg" },
+              { "$ref": "#/$defs/Mem" }
             ]
           }
         }
@@ -102,9 +103,33 @@
           "items": {
             "oneOf": [
               { "$ref": "#/$defs/Regfile" },
-              { "$ref": "#/$defs/Reg" }
+              { "$ref": "#/$defs/Reg" },
+              { "$ref": "#/$defs/Mem" }
             ]
           }
+        }
+      }
+    },
+    "Mem": {
+      "type": "object",
+      "required": ["kind", "name", "address", "size"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "mem" },
+        "name": { "type": "string", "description": "Instance name." },
+        "type": { "type": "string", "description": "Type name (e.g., 'sram_t')." },
+        "displayName": { "type": "string", "description": "Human-readable name from the SystemRDL `name` property." },
+        "nodeId": { "$ref": "#/$defs/NodeId" },
+        "address": { "$ref": "#/$defs/HexU64" },
+        "size": { "$ref": "#/$defs/HexU64", "description": "Total size in bytes (mementries × memwidth / 8)." },
+        "memEntries": { "type": "integer", "description": "Number of memory entries (words)." },
+        "memWidth": { "type": "integer", "description": "Width of each memory entry in bits." },
+        "desc": { "type": "string" },
+        "source": { "$ref": "#/$defs/SourceLoc" },
+        "parameters": {
+          "type": "array",
+          "description": "Resolved parametrized-type bindings for this instance.",
+          "items": { "$ref": "#/$defs/ParameterBinding" }
         }
       }
     },

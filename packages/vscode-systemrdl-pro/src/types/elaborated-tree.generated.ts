@@ -61,6 +61,21 @@ export type Reg = {
   fields: Field[];
 };
 
+export type Mem = {
+  kind: 'mem';
+  name: string;
+  type?: string;
+  displayName?: string;
+  nodeId?: NodeId;
+  address: HexU64;
+  size: HexU64;
+  memEntries?: number;
+  memWidth?: number;
+  desc?: string;
+  source?: SourceLoc;
+  parameters?: ParameterBinding[];
+};
+
 export type Regfile = {
   kind: 'regfile';
   name: string;
@@ -72,7 +87,7 @@ export type Regfile = {
   desc?: string;
   source?: SourceLoc;
   parameters?: ParameterBinding[];
-  children: (Regfile | Reg)[];
+  children: (Regfile | Reg | Mem)[];
 };
 
 export type Addrmap = {
@@ -87,7 +102,7 @@ export type Addrmap = {
   isBridge?: boolean;
   source?: SourceLoc;
   parameters?: ParameterBinding[];
-  children: (Addrmap | Regfile | Reg)[];
+  children: (Addrmap | Regfile | Reg | Mem)[];
 };
 
 export type ElaboratedTree = {

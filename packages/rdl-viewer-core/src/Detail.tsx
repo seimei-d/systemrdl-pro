@@ -1,9 +1,10 @@
 import { memo, useMemo, useState } from 'react';
-import type { EncodeEntry, Field, ParameterBinding, Reg, SourceLoc, Transport } from './types';
+import type { EncodeEntry, Field, Mem, ParameterBinding, Reg, SourceLoc, Transport } from './types';
 import { BitGrid } from './BitGrid';
 
 type Props = {
   reg: Reg | null;
+  mem: Mem | null;
   path: string[] | null;
   transport: Transport;
 };
@@ -13,17 +14,17 @@ type Props = {
 // active reg hasn't actually changed. `reg` and `path` come from
 // `findRegByKey` which returns the same node-reference for the same
 // (root, key) pair across re-renders.
-function DetailInner({ reg, path, transport }: Props) {
+function DetailInner({ reg, mem, path, transport }: Props) {
   // Decoder input lives at the Detail level so per-field rows can show
   // the decoded value in their reset column when input is non-empty.
   const [decoderInput, setDecoderInput] = useState('');
 
   const decoded = useMemo(() => decode(reg, decoderInput), [reg, decoderInput]);
 
-  if (!reg || !path) {
+  if (!reg && !mem) {
     return (
       <div className="rdl-detail">
-        <div className="placeholder">Select a register to see details.</div>
+        <div className="placeholder">Select a register or memory to see details.</div>
       </div>
     );
   }
@@ -31,6 +32,48 @@ function DetailInner({ reg, path, transport }: Props) {
   const reveal = (source: SourceLoc | undefined) => {
     if (source && transport.reveal) transport.reveal(source);
   };
+
+  // ─── Memory detail ─────────────────────────────────────────────────────
+  if (mem && !reg) {
+    return (
+      <div className="rdl-detail">
+        <h2>{mem.name}</h2>
+        {mem.displayName && mem.displayName !== mem.name && (
+          <div className="display-name">{mem.displayName}</div>
+        )}
+        {path && <div className="breadcrumb">{path.join('.')}</div>}
+        <div className="meta">
+          <span className="k">Address</span><span className="v">{mem.address}</span>
+          <span className="k">Size</span><span className="v">{mem.size}</span>
+          {mem.memEntries != null && (
+            <><span className="k">Entries</span><span className="v">{String(mem.memEntries)}</span></>
+          )}
+          {mem.memWidth != null && (
+            <><span className="k">Width</span><span className="v">{String(mem.memWidth)} bits</span></>
+          )}
+        </div>
+        {mem.desc && <div className="desc">{mem.desc}</div>}
+        {mem.parameters && mem.parameters.length > 0 && (
+          <ParametersTable parameters={mem.parameters} />
+        )}
+        {mem.source && transport.reveal && (
+          <div className="src-link" onClick={() => reveal(mem.source)}>
+            → {((mem.source.uri || '').split('/').pop() || mem.source.uri)}:
+            {(mem.source.line || 0) + 1}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // ─── Register detail ───────────────────────────────────────────────────
+  if (!reg || !path) {
+    return (
+      <div className="rdl-detail">
+        <div className="placeholder">Select a register to see details.</div>
+      </div>
+    );
+  }
 
   const decoderActive = decoded !== null;
 

@@ -1,0 +1,110 @@
+// SystemRDL 2.0 — example with array reg instances.
+// Open in VSCode with SystemRDL Pro extension, then Ctrl+Shift+V to view.
+
+// ─── Register types ────────────────────────────────────────────────────────
+
+reg dma_ctrl {
+    name = "DMA Channel Control";
+    field {
+        sw = rw; hw = na;
+        reset = 0;
+    } enable[0:0];
+    field {
+        sw = rw; hw = na;
+        reset = 0;
+    } burst_en[1:1];
+    field {
+        sw = rw; hw = na;
+        reset = 0;
+    } priority[3:2];
+    field {
+        sw = r; hw = w;
+    } busy[4:4];
+};
+
+reg dma_status {
+    name = "DMA Channel Status";
+    field {
+        sw = rw; hw = w;
+        intr;
+        onwrite = woclr;
+    } done[0:0];
+    field {
+        sw = r; hw = w;
+        sticky;
+    } error[1:1];
+    field {
+        sw = r; hw = w;
+    } progress[15:2];
+};
+
+reg uart_data {
+    name = "UART Data Register";
+    field {
+        sw = rw; hw = rw;
+        reset = 0;
+    } data[7:0];
+    field {
+        sw = r; hw = w;
+    } parity_err[8:8];
+    field {
+        sw = r; hw = w;
+    } framing_err[9:9];
+};
+
+reg gpio_dir {
+    name = "GPIO Direction";
+    field {
+        sw = rw; hw = na;
+        reset = 0;
+    } dir[15:0];
+};
+
+reg gpio_out {
+    name = "GPIO Output";
+    field {
+        sw = rw; hw = na;
+        reset = 0;
+    } out[15:0];
+};
+
+reg gpio_in {
+    name = "GPIO Input";
+    field {
+        sw = r; hw = w;
+    } in[15:0];
+};
+
+// ─── Memory types ──────────────────────────────────────────────────────────
+
+mem sram_t {
+    desc = "Internal SRAM — 1024 words x 32-bit";
+    mementries = 1024;
+    memwidth = 32;
+};
+
+// ─── Top-level addrmap ─────────────────────────────────────────────────────
+
+addrmap soc_top {
+    name = "SoC Top";
+    desc = "SoC with array reg instances.";
+
+    // ── Array of DMA channel registers ──────────────────────────────────
+    // 4 DMA channels, each has ctrl + status.
+    // Unrolled as dma_ctrl[0]..dma_ctrl[3] and dma_status[0]..dma_status[3].
+    dma_ctrl dma_ctrl[4] @ 0x0000;
+    dma_status dma_status[4] @ 0x0010;
+
+    // ── Array of UART data registers ────────────────────────────────────
+    // 8 UART ports, each with a data register.
+    uart_data uart_data[8] @ 0x0100;
+
+    // ── Array of GPIO register blocks ───────────────────────────────────
+    // 3 GPIO banks, each with dir, out, in registers.
+    gpio_dir gpio_dir[3] @ 0x0200;
+    gpio_out gpio_out[3] @ 0x0210;
+    gpio_in gpio_in[3] @ 0x0220;
+
+    // ── Single SRAM ─────────────────────────────────────────────────────
+    external sram_t sram @ 0x1000;
+};

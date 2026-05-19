@@ -207,41 +207,12 @@ def register(
         CodeLensOptions(resolve_provider=True),
     )
     async def _on_code_lens(_ls: LanguageServer, params: Any) -> list[CodeLens]:
-        uri = params.text_document.uri
-        cached = state.cache.get(uri)
-        if cached is None or not cached.roots:
-            logger.debug("[LENS] %s — no cache, returning []", uri)
-            return []
-        path = cached.temp_path or _uri_to_path(uri)
-        lenses = await asyncio.to_thread(_code_lenses_for_addrmaps, cached.roots, path)
-        for lens in lenses:
-            if isinstance(lens.data, dict):
-                lens.data["uri"] = uri
-        if lenses:
-            sample = lenses[0]
-            logger.warning(
-                "[LENS] %s — returning %d lenses, first at line %d",
-                uri, len(lenses), sample.range.start.line,
-            )
-        else:
-            logger.debug("[LENS] %s — returning 0 lenses", uri)
-        return lenses
+        # Disabled: CodeLens for resolved addresses.
+        return []
 
     @server.feature("codeLens/resolve")
     async def _on_code_lens_resolve(_ls: LanguageServer, params: Any) -> Any:
-        data = getattr(params, "data", None)
-        if not isinstance(data, dict):
-            return params
-        uri = data.get("uri")
-        addrmap = data.get("addrmapName")
-        if not uri or not addrmap:
-            return params
-        cached = state.cache.get(uri)
-        if cached is None or not cached.roots:
-            return params
-        cmd = await asyncio.to_thread(_resolve_code_lens_for, cached.roots, addrmap)
-        if cmd is not None:
-            params.command = cmd
+        # Disabled: CodeLens for resolved addresses.
         return params
 
     @server.feature("workspace/symbol")

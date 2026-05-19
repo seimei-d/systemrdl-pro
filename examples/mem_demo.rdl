@@ -1,0 +1,92 @@
+// SystemRDL 2.0 — example with mem (external memory) nodes.
+// Open in VSCode with SystemRDL Pro extension, then Ctrl+Shift+V to view.
+
+// ─── Register types ────────────────────────────────────────────────────────
+
+reg ctrl_reg {
+    name = "Control Register";
+    field {
+        sw = rw; hw = na;
+        reset = 0;
+    } en[0:0];
+    field {
+        sw = rw; hw = na;
+        reset = 0;
+    } mode[1:1];
+    field {
+        sw = r; hw = r;
+    } ready[2:2];
+};
+
+reg status_reg {
+    name = "Status Register";
+    field {
+        sw = rw; hw = w;
+        reset = 0;
+    } err_code[3:0];
+    field {
+        sw = r; hw = w;
+    } done[4:4];
+};
+
+reg dma_cfg {
+    name = "DMA Configuration";
+    field {
+        sw = rw; hw = na;
+        reset = 0;
+    } xfer_size[15:0];
+    field {
+        sw = rw; hw = na;
+        reset = 0;
+    } burst_en[16:16];
+};
+
+// ─── Memory types ──────────────────────────────────────────────────────────
+
+mem sram_t {
+    desc = "Internal SRAM block — 256 words x 32-bit";
+    mementries = 256;
+    memwidth = 32;
+};
+
+mem flash_t {
+    desc = "External flash region — 4096 words x 16-bit";
+    mementries = 4096;
+    memwidth = 16;
+};
+
+// ─── Register file ─────────────────────────────────────────────────────────
+
+regfile dma_channel {
+    desc = "One DMA channel's control registers";
+    ctrl_reg ctrl @ 0x00;
+    status_reg status @ 0x04;
+    dma_cfg cfg @ 0x08;
+};
+
+// ─── Top-level addrmap ─────────────────────────────────────────────────────
+
+addrmap soc_top {
+    name = "SoC Top";
+    desc = "SoC top-level memory map with registers and external memory.";
+
+    // Control block
+    addrmap {
+        desc = "System control registers";
+        ctrl_reg sys_ctrl @ 0x0000;
+        status_reg sys_status @ 0x0004;
+    } control_regs;
+
+    // DMA engine with 2 channels
+    addrmap {
+        desc = "DMA engine";
+        dma_channel ch0 @ 0x0100;
+        dma_channel ch1 @ 0x0110;
+    } dma;
+
+    // Internal SRAM — 256x32 = 1KB at 0x1000
+    external sram_t sram @ 0x1000;
+
+    // External flash — 4096x16 = 8KB at 0x2000
+    external flash_t flash @ 0x2000;
+};

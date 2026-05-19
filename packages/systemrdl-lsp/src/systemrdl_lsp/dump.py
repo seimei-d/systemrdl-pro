@@ -71,7 +71,7 @@ def main(argv: list[str] | None = None) -> int:
     path = path.resolve()
 
     text = path.read_text(encoding="utf-8")
-    messages, roots, tmp_path = _compile_text(path.as_uri(), text, args.include)
+    messages, roots, tmp_path, _consumed, _index, _spine = _compile_text(path.as_uri(), text, args.include)
     try:
         translate = {tmp_path: path}
         envelope = _serialize_root(

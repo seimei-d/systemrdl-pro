@@ -14,15 +14,16 @@ export type {
   EncodeEntry,
   Field,
   HexU64,
+  Mem,
   ParameterBinding,
   Reg,
   Regfile,
   SourceLoc,
 } from './_generated/elaborated-tree';
 
-import type { Addrmap, ElaboratedTree, Reg, Regfile, SourceLoc } from './_generated/elaborated-tree';
+import type { Addrmap, ElaboratedTree, Mem, Reg, Regfile, SourceLoc } from './_generated/elaborated-tree';
 
-export type TreeNode = Addrmap | Regfile | Reg;
+export type TreeNode = Addrmap | Regfile | Reg | Mem;
 export type Container = Addrmap | Regfile;
 
 /**
