@@ -320,6 +320,7 @@ export function Viewer({ transport }: Props) {
       });
   }, [foundReg, tree, transport, pendingExpansions, expandedRegs]);
 
+  const activeSource = foundReg?.reg.source ?? foundMem?.mem.source ?? null;
   const stillElaboratingFirstPass =
     !tree || (tree.version === 0 && (tree.roots ?? []).length === 0);
   if (loadError && !tree) {
@@ -451,6 +452,12 @@ export function Viewer({ transport }: Props) {
           transport={transport}
         />
       </div>
+      {activeSource && transport.reveal && (
+        <div className="rdl-viewer-src-link" onClick={() => transport.reveal!(activeSource)}>
+          → {((activeSource.uri || '').split('/').pop() || activeSource.uri)}:
+          {(activeSource.line || 0) + 1}
+        </div>
+      )}
       <ContextMenu state={ctxMenu} onClose={() => setCtxMenu(null)} />
       {toast && <div className="rdl-toast shown" role="status" aria-live="polite">{toast}</div>}
     </div>

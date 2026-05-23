@@ -1,4 +1,4 @@
-import { memo, useMemo, useState } from 'react';
+import { memo, useDeferredValue, useMemo, useState } from 'react';
 import type { EncodeEntry, Field, Mem, ParameterBinding, Reg, SourceLoc, Transport } from './types';
 import { BitGrid } from './BitGrid';
 
@@ -15,13 +15,27 @@ type Props = {
 // `findRegByKey` which returns the same node-reference for the same
 // (root, key) pair across re-renders.
 function DetailInner({ reg, mem, path, transport }: Props) {
-  // Decoder input lives at the Detail level so per-field rows can show
-  // the decoded value in their reset column when input is non-empty.
   const [decoderInput, setDecoderInput] = useState('');
+
+  // Defer the reg/mem/path so React keeps showing the previous content
+  // while it renders the next one. This prevents the empty-frame flicker
+  // between register switches — the old content stays on screen until the
+  // new render is committed in a single paint.
+  const dReg = useDeferredValue(reg);
+  const dMem = useDeferredValue(mem);
+  const dPath = useDeferredValue(path);
+
+  const r = dReg ?? reg;  // show deferred, but never show null if real value is available
+  const m = dMem ?? mem;
+  const p = dPath ?? path;
 
   const decoded = useMemo(() => decode(reg, decoderInput), [reg, decoderInput]);
 
-  if (!reg && !mem) {
+  const reveal = (source: SourceLoc | undefined) => {
+    if (source && transport.reveal) transport.reveal(source);
+  };
+
+  if (!r && !m) {
     return (
       <div className="rdl-detail">
         <div className="placeholder">Select a register or memory to see details.</div>
@@ -29,79 +43,62 @@ function DetailInner({ reg, mem, path, transport }: Props) {
     );
   }
 
-  const reveal = (source: SourceLoc | undefined) => {
-    if (source && transport.reveal) transport.reveal(source);
-  };
-
   // ─── Memory detail ─────────────────────────────────────────────────────
-  if (mem && !reg) {
+  if (m && !r) {
     return (
       <div className="rdl-detail">
-        <h2>{mem.name}</h2>
-        {mem.displayName && mem.displayName !== mem.name && (
-          <div className="display-name">{mem.displayName}</div>
+        <h2>{m.name}</h2>
+        {m.displayName && m.displayName !== m.name && (
+          <div className="display-name">{m.displayName}</div>
         )}
-        {path && <div className="breadcrumb">{path.join('.')}</div>}
+        {p && <div className="breadcrumb">{p.join('.')}</div>}
         <div className="meta">
-          <span className="k">Address</span><span className="v">{mem.address}</span>
-          <span className="k">Size</span><span className="v">{mem.size}</span>
-          {mem.memEntries != null && (
-            <><span className="k">Entries</span><span className="v">{String(mem.memEntries)}</span></>
+          <span className="k">Address</span><span className="v">{m.address}</span>
+          <span className="k">Size</span><span className="v">{m.size}</span>
+          {m.memEntries != null && (
+            <><span className="k">Entries</span><span className="v">{String(m.memEntries)}</span></>
           )}
-          {mem.memWidth != null && (
-            <><span className="k">Width</span><span className="v">{String(mem.memWidth)} bits</span></>
+          {m.memWidth != null && (
+            <><span className="k">Width</span><span className="v">{String(m.memWidth)} bits</span></>
           )}
         </div>
-        {mem.desc && <div className="desc">{mem.desc}</div>}
-        {mem.parameters && mem.parameters.length > 0 && (
-          <ParametersTable parameters={mem.parameters} />
-        )}
-        {mem.source && transport.reveal && (
-          <div className="src-link" onClick={() => reveal(mem.source)}>
-            → {((mem.source.uri || '').split('/').pop() || mem.source.uri)}:
-            {(mem.source.line || 0) + 1}
-          </div>
+        {m.desc && <div className="desc">{m.desc}</div>}
+        {m.parameters && m.parameters.length > 0 && (
+          <ParametersTable parameters={m.parameters} />
         )}
       </div>
     );
   }
 
-  // ─── Register detail ───────────────────────────────────────────────────
-  if (!reg || !path) {
-    return (
-      <div className="rdl-detail">
-        <div className="placeholder">Select a register to see details.</div>
-      </div>
-    );
-  }
-
+  // At this point r is non-null (checked by !r && !m and m && !r branches above)
+  const regNonNull = r!;
   const decoderActive = decoded !== null;
 
   return (
     <div className="rdl-detail">
-      <h2>{reg.name}</h2>
-      {reg.displayName && reg.displayName !== reg.name && (
-        <div className="display-name">{reg.displayName}</div>
+      <h2>{regNonNull.name}</h2>
+      {regNonNull.displayName && regNonNull.displayName !== regNonNull.name && (
+        <div className="display-name">{regNonNull.displayName}</div>
       )}
-      <div className="breadcrumb">{path.join('.')}</div>
+      <div className="breadcrumb">{p!.join('.')}</div>
       <div className="meta">
-        <span className="k">Address</span><span className="v">{reg.address}</span>
-        <span className="k">Width</span><span className="v">{String(reg.width)}</span>
-        <span className="k">Reset</span><span className="v">{reg.reset ?? '—'}</span>
-        <span className="k">Access</span><span className="v">{reg.accessSummary || '—'}</span>
+        <span className="k">Address</span><span className="v">{regNonNull.address}</span>
+        <span className="k">Width</span><span className="v">{String(regNonNull.width)}</span>
+        <span className="k">Reset</span><span className="v">{regNonNull.reset ?? '—'}</span>
+        <span className="k">Access</span><span className="v">{regNonNull.accessSummary || '—'}</span>
       </div>
-      {reg.desc && <div className="desc">{reg.desc}</div>}
-      {reg.parameters && reg.parameters.length > 0 && (
-        <ParametersTable parameters={reg.parameters} />
+      {regNonNull.desc && <div className="desc">{regNonNull.desc}</div>}
+      {regNonNull.parameters && regNonNull.parameters.length > 0 && (
+        <ParametersTable parameters={regNonNull.parameters} />
       )}
-      {reg.accessWidth && reg.accessWidth !== reg.width && (
+      {regNonNull.accessWidth && regNonNull.accessWidth !== regNonNull.width && (
         <div className="rdl-split-access">
           <strong>Split access:</strong>{' '}
-          {reg.width}-bit register, software accesses in {reg.accessWidth}-bit chunks
-          {' '}({Math.ceil(reg.width / reg.accessWidth)}× {reg.accessWidth}-bit)
+          {regNonNull.width}-bit register, software accesses in {regNonNull.accessWidth}-bit chunks
+          {' '}({Math.ceil(regNonNull.width / regNonNull.accessWidth)}× {regNonNull.accessWidth}-bit)
         </div>
       )}
-      {reg.loadState === 'placeholder' ? (
+      {regNonNull.loadState === 'placeholder' ? (
         // T1.7: spine-only spawn — fields[] hasn't been fetched yet. The
         // Viewer's useEffect kicks off transport.expandNode in parallel with
         // this render; once it returns, the tree is spliced and Detail
@@ -111,7 +108,7 @@ function DetailInner({ reg, mem, path, transport }: Props) {
         </div>
       ) : (
         <>
-          <BitGrid reg={reg} />
+          <BitGrid reg={regNonNull} />
           <RegisterDecoder value={decoderInput} onChange={setDecoderInput} />
           <div className="fields-title">
             Bit fields
@@ -121,7 +118,7 @@ function DetailInner({ reg, mem, path, transport }: Props) {
               </span>
             )}
           </div>
-          {(reg.fields || []).map((f, i) => (
+          {(regNonNull.fields || []).map((f, i) => (
             <FieldRow
               key={i}
               field={f}
@@ -130,12 +127,6 @@ function DetailInner({ reg, mem, path, transport }: Props) {
             />
           ))}
         </>
-      )}
-      {reg.source && transport.reveal && (
-        <div className="src-link" onClick={() => reveal(reg.source)}>
-          → {((reg.source.uri || '').split('/').pop() || reg.source.uri)}:
-          {(reg.source.line || 0) + 1}
-        </div>
       )}
     </div>
   );
