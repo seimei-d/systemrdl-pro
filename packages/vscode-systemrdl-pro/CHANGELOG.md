@@ -6,6 +6,12 @@ project uses [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — viewer
+
+- **Custom properties in register details and field rows.** Register
+  properties appear alongside built-in metadata; field properties render
+  as name/value pairs in a compact subtable, with labeled field columns.
+
 ### Fixed
 
 - **Memory Map webview blank in newer VS Code versions.** Generate the inline
