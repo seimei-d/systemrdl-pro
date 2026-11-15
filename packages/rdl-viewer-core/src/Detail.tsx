@@ -301,15 +301,16 @@ function FieldRow({
       {valueCell}
       <span className="desc">{blurb}</span>
       {field.customProperties && field.customProperties.length > 0 && (
-        <div className="rdl-field-properties" onClick={e => e.stopPropagation()}>
-          {field.customProperties.map(property => (
-            <div key={property.name}>
-              <code>{property.name}</code>
-              {': '}
-              <code>{renderCustomPropertyValue(property.value)}</code>
-            </div>
-          ))}
-        </div>
+        <table className="rdl-field-properties" onClick={e => e.stopPropagation()}>
+          <tbody>
+            {field.customProperties.map(property => (
+              <tr key={property.name}>
+                <th scope="row">{property.name}</th>
+                <td>{renderCustomPropertyValue(property.value)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       )}
       {field.encode && field.encode.length > 0 && (
         <EncodeTable entries={field.encode} />

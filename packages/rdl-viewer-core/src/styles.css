@@ -464,12 +464,14 @@ html, body { margin: 0; padding: 0; background: var(--rdl-bg); color: var(--rdl-
 .rdl-custom-properties-table td.n code { color: var(--rdl-fg); }
 .rdl-custom-properties-table td.v code { color: var(--rdl-accent);
   font-family: var(--rdl-font-mono); overflow-wrap: anywhere; }
-.rdl-field-properties { min-width: 0; color: var(--rdl-dim);
-  font-family: var(--rdl-font-chrome); font-size: 11px; line-height: 1.5;
-  overflow-wrap: anywhere; }
-.rdl-field-properties code { color: var(--rdl-fg);
-  font-family: var(--rdl-font-mono); }
-.rdl-field-properties code:last-child { color: var(--rdl-accent); }
+.rdl-field-properties { min-width: 0; border-collapse: collapse;
+  color: var(--rdl-dim); font-family: var(--rdl-font-chrome);
+  font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+.rdl-field-properties th, .rdl-field-properties td {
+  padding: 1px 8px 1px 0; text-align: left; vertical-align: top;
+}
+.rdl-field-properties th { color: var(--rdl-fg); font-weight: 500; }
+.rdl-field-properties td { color: var(--rdl-accent); }
 .rdl-detail .fields-title { font-size: 11px; color: var(--rdl-dim);
   text-transform: uppercase; letter-spacing: 0.06em;
   border-bottom: 1px solid var(--rdl-border); padding-bottom: 6px;
