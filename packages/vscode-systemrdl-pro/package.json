@@ -172,6 +172,18 @@
           "additionalProperties": { "type": "string" },
           "description": "Override viewer access-mode colours and chrome tokens. Each key maps to a CSS custom property (`--rdl-acc-rw`, `--rdl-acc-ro`, …). Values are any valid CSS colour. Empty = use the built-in palette. Recognised keys: `rw`, `ro`, `wo`, `w1c`, `rsv`, `accent`, `warning`, `bg`, `panel`, `chrome`, `border`, `fg`, `dim`, `selected`."
         },
+        "systemrdl-pro.viewer.followEditorCursor": {
+          "type": "boolean",
+          "scope": "window",
+          "default": true,
+          "description": "When enabled, moving the editor cursor selects the matching register or field in the Memory Map. Disable to keep the viewer selection independent of the editor cursor."
+        },
+        "systemrdl-pro.viewer.followViewerClick": {
+          "type": "boolean",
+          "scope": "window",
+          "default": true,
+          "description": "When enabled, clicking a register, field, or source entry in the Memory Map reveals it in the editor. Disable to keep editor navigation independent of viewer clicks. The explicit Reveal in Editor context-menu action is unaffected."
+        },
         "systemrdl-pro.trace.server": {
           "type": "string",
           "enum": ["off", "messages", "verbose"],

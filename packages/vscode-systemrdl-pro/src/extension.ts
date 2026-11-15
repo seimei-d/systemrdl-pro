@@ -128,6 +128,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     // D10: cursor → viewer. Forwards only to the panel watching the exact
     // URI the editor cursor is in.
     vscode.window.onDidChangeTextEditorSelection(event => {
+      if (!vscode.workspace
+        .getConfiguration('systemrdl-pro')
+        .get<boolean>('viewer.followEditorCursor', true)) return;
       if (event.textEditor.document.languageId !== 'systemrdl-pro') return;
       const uri = event.textEditor.document.uri.toString();
       const entry = memoryMapPanels.get(uri);
@@ -141,6 +144,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       entry.cursorSyncTimer = setTimeout(() => {
         safePostTo(entry, { type: 'cursor', line });
       }, CURSOR_SYNC_DEBOUNCE_MS);
+    }),
+    vscode.workspace.onDidChangeConfiguration(event => {
+      if (
+        !event.affectsConfiguration('systemrdl-pro.viewer.followEditorCursor') ||
+        vscode.workspace
+          .getConfiguration('systemrdl-pro')
+          .get<boolean>('viewer.followEditorCursor', true)
+      ) return;
+      for (const entry of memoryMapPanels.values()) {
+        if (entry.cursorSyncTimer) clearTimeout(entry.cursorSyncTimer);
+        entry.cursorSyncTimer = undefined;
+      }
     }),
     // Refresh status bar diag count when diagnostics change for the URI the
     // active editor is on. Debounced — pre-T4-D this fired once per LSP
@@ -643,12 +658,18 @@ function safePostTo(entry: PanelEntry, message: unknown): void {
 // ---------------------------------------------------------------------------
 
 type WebviewMessage =
-  | { type: 'reveal'; source: SourceLoc }
+  | { type: 'reveal'; source: SourceLoc; explicit?: boolean }
   | { type: 'copy'; text: string; label?: string }
   | { type: 'expandNode'; version: number; nodeId: string };
 
 async function handleWebviewMessage(msg: WebviewMessage, panelUri: string): Promise<void> {
   if (msg.type === 'reveal') {
+    if (
+      !msg.explicit &&
+      !vscode.workspace
+        .getConfiguration('systemrdl-pro')
+        .get<boolean>('viewer.followViewerClick', true)
+    ) return;
     await revealLocation(msg.source);
   } else if (msg.type === 'copy') {
     await vscode.env.clipboard.writeText(msg.text);
@@ -1086,7 +1107,9 @@ function renderViewerHtml(
         cb(elaboratingState);
         return () => elaboratingListeners.delete(cb);
       },
-      reveal(source) { vscode.postMessage({ type: 'reveal', source }); },
+      reveal(source, explicit) {
+        vscode.postMessage({ type: 'reveal', source, explicit });
+      },
       copy(text, label) { vscode.postMessage({ type: 'copy', text, label }); },
       expandNode(version, nodeId) {
         const key = version + ':' + nodeId;

@@ -152,6 +152,8 @@ The latest `.vsix` lives on
 | `systemrdl-pro.elaborationTimeoutMs` | `120000` | Per-elaborate wall-clock cap. After this the LSP keeps the last-good tree and surfaces a synthetic diagnostic. Bump for aggregated SoC tops with deep Perl preprocessor sections. |
 | `systemrdl-pro.elaborateInProcess` | `false` | Run the compiler in the LSP's main Python process instead of the subprocess pool (T3 default). Escape hatch for diagnosing pool-related issues. Restart the language server for the change to take effect. |
 | `systemrdl-pro.viewer.colors` | `{}` | Override viewer access-mode colours and chrome tokens. Keys map to `--rdl-...` CSS custom properties. Recognised: `rw`, `ro`, `wo`, `w1c`, `rsv`, `accent`, `warning`, `bg`, `panel`, `chrome`, `border`, `fg`, `dim`, `selected`. |
+| `systemrdl-pro.viewer.followEditorCursor` | `true` | When enabled, moving the editor cursor selects the matching register or field in the Memory Map. Disable to keep viewer selection independent of editor cursor movement. |
+| `systemrdl-pro.viewer.followViewerClick` | `true` | When enabled, clicking a register, field, or source entry in the Memory Map reveals it in the editor. Disable to keep editor navigation independent of viewer clicks. The explicit **Reveal in Editor** context-menu action is unaffected. |
 | `systemrdl-pro.formatOnSave` | `false` | Apply the SystemRDL formatter on every save. Off by default. Use `// fmt: off` / `// fmt: on` markers to skip a region. |
 | `systemrdl-pro.trace.server` | `off` | LSP communication trace level: `off` / `messages` / `verbose`. |
 

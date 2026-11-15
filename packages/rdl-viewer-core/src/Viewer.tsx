@@ -257,7 +257,11 @@ export function Viewer({ transport }: Props) {
     if (node.type) items.push({ label: 'Copy Type', hint: node.type, action: () => onCopy(node.type ?? '', 'type') });
     if (node.source && transport.reveal) {
       items.push({ sep: true });
-      items.push({ label: 'Reveal in Editor', hint: '', action: () => transport.reveal!(node.source!) });
+      items.push({
+        label: 'Reveal in Editor',
+        hint: '',
+        action: () => transport.reveal!(node.source!, true),
+      });
     } else if (node.source) {
       items.push({ sep: true });
       const fileName = (node.source.uri || '').split('/').pop() || node.source.uri;

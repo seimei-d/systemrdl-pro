@@ -49,7 +49,7 @@ export type Transport = {
   /**
    * Reveal a source location in the host editor. Absent in the CLI surface.
    */
-  reveal?(source: SourceLoc): void;
+  reveal?(source: SourceLoc, explicit?: boolean): void;
   /**
    * Copy text to the host clipboard. If absent, the viewer falls back to
    * navigator.clipboard with a toast on failure.

@@ -147,8 +147,8 @@ The viewer-core knows nothing about either; it sees only this contract.
 | **Python resolution** | `systemrdl-pro.pythonPath` → `ms-python.python` interpreter → `python3`/`python` on PATH |
 | **Memory map panels** | One `WebviewPanel` per `.rdl` URI (markdown-preview-style), `Map<uri, PanelEntry>` |
 | **Push refresh** | Listens for `rdl/elaboratedTreeChanged`, calls `refreshMemoryMap(uri)` with `sinceVersion` |
-| **Cursor → viewer** | `onDidChangeTextEditorSelection` debounces and posts cursor line to the active panel |
-| **Reveal in editor** | postMessage `reveal` → opens document, scrolls range into view, 200 ms flash decoration |
+| **Cursor → viewer** | `onDidChangeTextEditorSelection` debounces and posts cursor line to the active panel; disabled by `systemrdl-pro.viewer.followEditorCursor` |
+| **Reveal in editor** | postMessage `reveal` → opens document, scrolls range into view, 200 ms flash decoration; automatic viewer clicks are disabled by `systemrdl-pro.viewer.followViewerClick`, while explicit context-menu reveals remain available |
 | **Status bar** | `$(circuit-board) N regs · root_names · diag counts` updated on diagnostics + cursor move |
 
 ## Schema-driven types (Decision 9A)

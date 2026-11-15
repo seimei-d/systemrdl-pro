@@ -58,8 +58,13 @@ either match an existing decision or go through a fresh design review.
   message in the tree, not silence.
 - **D9** — Partial-tab amber-dot deferred — multi-root rendering already
   isolates failures per addrmap.
-- **D10** — Cursor in editor → tree auto-selects matching node, with a
-  500 ms debounce to avoid thrash on selection drag.
+- **D10** — Cursor in editor → tree auto-selects matching node by default,
+  with a 500 ms debounce to avoid thrash on selection drag. The
+  `systemrdl-pro.viewer.followEditorCursor` setting can disable this
+  editor-to-viewer synchronization without affecting viewer-to-editor
+  navigation. The separate `systemrdl-pro.viewer.followViewerClick`
+  setting controls automatic viewer-to-editor navigation from clicks;
+  explicit **Reveal in Editor** remains available.
 - **D12** — The viewer palette is locked to a muted/professional set
   (mockup B from the design review). User overrides via
   `systemrdl-pro.viewer.colors`.
