@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { ElaboratedTree, Mem, Reg, SourceLoc, Transport, TreeNode } from './types';
+import type { Addrmap, ElaboratedTree, Mem, Reg, SourceLoc, Transport, TreeNode } from './types';
 import { findFirstReg, isContainer, subtreeMatches, type FilterScope } from './util';
 import { buildFlatList, FlatRow, Tree } from './Tree';
 import { Detail } from './Detail';
@@ -10,6 +10,7 @@ type Props = { transport: Transport };
 type Selection =
   | { kind: 'reg'; key: string }
   | { kind: 'mem'; key: string }
+  | { kind: 'addrmap'; key: string }
   | null;
 
 export function Viewer({ transport }: Props) {
@@ -140,13 +141,27 @@ export function Viewer({ transport }: Props) {
     return m;
   }, [root]);
 
+  const addrmapIndex = useMemo(() => {
+    const m = new Map<string, { addrmap: Addrmap; path: string[] }>();
+    if (!root) return m;
+    const walk = (node: TreeNode, segs: string[]): void => {
+      if (node.kind === 'addrmap') m.set(segs.join('.'), { addrmap: node, path: segs });
+      if (node.kind === 'reg' || node.kind === 'mem') return;
+      for (const child of node.children || []) walk(child, [...segs, child.name]);
+    };
+    walk(root, [root.name]);
+    return m;
+  }, [root]);
+
   // Auto-select first reg when root changes or selection becomes invalid.
   useEffect(() => {
     if (!root) return;
     if (selection) {
       const stillValid = selection.kind === 'reg'
         ? regIndex.has(selection.key)
-        : memIndex.has(selection.key);
+        : selection.kind === 'mem'
+          ? memIndex.has(selection.key)
+          : addrmapIndex.has(selection.key);
       if (!stillValid) {
         setSelection(null);
       }
@@ -155,7 +170,7 @@ export function Viewer({ transport }: Props) {
       const first = findFirstReg(root, [root.name]);
       if (first) setSelection({ kind: 'reg', key: first.key });
     }
-  }, [root, selection, regIndex, memIndex]);
+  }, [root, selection, regIndex, memIndex, addrmapIndex]);
 
   const filterMatchCount = useMemo(
     () => flatRows.filter(r => r.kind === 'reg').length,
@@ -192,14 +207,16 @@ export function Viewer({ transport }: Props) {
     if (row.node.source && transport.reveal) transport.reveal(row.node.source);
   }, [transport]);
 
-  const revealContainer = useCallback((row: FlatRow & { kind: 'container' }) => {
-    if (!transport.reveal) return;
+  const selectContainer = useCallback((row: FlatRow & { kind: 'container' }) => {
+    if (row.node.kind === 'addrmap') {
+      setSelection({ kind: 'addrmap', key: row.key });
+    }
     const source = row.node.source;
-    if (!source) {
+    if (!source && transport.reveal) {
       setToast(`No source location for ${row.node.kind} ${row.node.name}`);
       return;
     }
-    transport.reveal(source);
+    if (source && transport.reveal) transport.reveal(source);
   }, [transport]);
 
   const selectMem = useCallback((row: FlatRow & { kind: 'mem' }) => {
@@ -294,6 +311,11 @@ export function Viewer({ transport }: Props) {
     return memIndex.get(selection.key) ?? null;
   }, [memIndex, selection]);
 
+  const foundAddrmap = useMemo(() => {
+    if (!selection || selection.kind !== 'addrmap') return null;
+    return addrmapIndex.get(selection.key) ?? null;
+  }, [addrmapIndex, selection]);
+
   const pendingExpansions = useRef<Set<string>>(new Set()).current;
   useEffect(() => {
     if (!foundReg || !tree || !transport.expandNode) return;
@@ -324,7 +346,8 @@ export function Viewer({ transport }: Props) {
       });
   }, [foundReg, tree, transport, pendingExpansions, expandedRegs]);
 
-  const activeSource = foundReg?.reg.source ?? foundMem?.mem.source ?? null;
+  const activeSource = foundReg?.reg.source ?? foundMem?.mem.source
+    ?? foundAddrmap?.addrmap.source ?? null;
   const stillElaboratingFirstPass =
     !tree || (tree.version === 0 && (tree.roots ?? []).length === 0);
   if (loadError && !tree) {
@@ -440,7 +463,7 @@ export function Viewer({ transport }: Props) {
             rows={flatRows}
             selectedKey={selection?.key ?? null}
             onSelectReg={selectReg}
-            onRevealContainer={revealContainer}
+            onSelectContainer={selectContainer}
             onRevealMem={selectMem}
             onToggleCollapse={toggleCollapse}
             onContextMenu={onContextMenu}
@@ -452,7 +475,8 @@ export function Viewer({ transport }: Props) {
         <Detail
           reg={foundReg?.reg ?? null}
           mem={foundMem?.mem ?? null}
-          path={foundReg?.path ?? foundMem?.path ?? null}
+          addrmap={foundAddrmap?.addrmap ?? null}
+          path={foundReg?.path ?? foundMem?.path ?? foundAddrmap?.path ?? null}
           transport={transport}
         />
       </div>

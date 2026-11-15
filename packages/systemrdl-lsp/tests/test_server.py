@@ -1262,6 +1262,60 @@ def test_lazy_spine_round_trips_through_expand_node(tmp_path):
     assert {k: v for k, v in full_reg.items() if k != "nodeId"} == full_reg_via_full
 
 
+def test_serializer_includes_user_defined_properties(tmp_path):
+    """Explicit and dynamic user properties serialize on addrmap, reg, and field."""
+    from systemrdl_lsp.serialize import _serialize_root, _serialize_spine, expand_node
+
+    rdl = textwrap.dedent("""
+        property vendor_label {
+            type = string;
+            component = field | reg | addrmap;
+            default = "unspecified";
+        };
+        addrmap top {
+            vendor_label = "root";
+            reg {
+                vendor_label = "register";
+                field { sw=rw; hw=r; vendor_label="field"; } first[0:0] = 0;
+                field { sw=rw; hw=r; } second[1:1] = 0;
+                field { sw=rw; hw=r; } plain[2:2] = 0;
+            } CTRL @ 0x0;
+            CTRL.second->vendor_label = "dynamic";
+        };
+    """).strip()
+    rdl_path = tmp_path / "custom-properties.rdl"
+    rdl_path.write_text(rdl, encoding="utf-8")
+    _messages, roots, tmp, _consumed, _node_index, _spine = _compile_text(
+        rdl_path.as_uri(), rdl
+    )
+    try:
+        envelope = _serialize_root(roots, stale=False)
+        addrmap = envelope["roots"][0]
+        reg = addrmap["children"][0]
+        fields = {field["name"]: field for field in reg["fields"]}
+
+        assert addrmap["customProperties"] == [{"name": "vendor_label", "value": "root"}]
+        assert reg["customProperties"] == [{"name": "vendor_label", "value": "register"}]
+        assert fields["first"]["customProperties"] == [
+            {"name": "vendor_label", "value": "field"}
+        ]
+        assert fields["second"]["customProperties"] == [
+            {"name": "vendor_label", "value": "dynamic"}
+        ]
+        assert "customProperties" not in fields["plain"]
+
+        spine = _serialize_spine(roots, stale=False)
+        spine_addrmap = spine["roots"][0]
+        spine_reg = spine_addrmap["children"][0]
+        assert spine_addrmap["customProperties"] == addrmap["customProperties"]
+        assert spine_reg["customProperties"] == reg["customProperties"]
+        expanded = expand_node(roots, spine_reg["nodeId"])
+        assert expanded is not None
+        assert expanded["fields"] == reg["fields"]
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 def test_expand_node_returns_none_for_unknown_id(tmp_path):
     from systemrdl import RDLCompiler
     from systemrdl_lsp.serialize import expand_node

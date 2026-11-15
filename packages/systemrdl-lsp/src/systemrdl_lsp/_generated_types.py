@@ -32,6 +32,10 @@ class ParameterBinding(TypedDict):
     type: NotRequired[str]
     value: object
 
+class CustomProperty(TypedDict):
+    name: str
+    value: object
+
 AccessMode = Literal['rw', 'ro', 'wo', 'w1c', 'w0c', 'w1s', 'w0s', 'rclr', 'rset', 'wclr', 'wset', 'na']
 
 class EncodeEntry(TypedDict):
@@ -49,6 +53,7 @@ class Field(TypedDict):
     reset: NotRequired["HexU64"]
     desc: NotRequired[str]
     source: NotRequired["SourceLoc"]
+    customProperties: NotRequired[list["CustomProperty"]]
     isCounter: NotRequired[bool]
     isIntr: NotRequired[bool]
     encode: NotRequired[list["EncodeEntry"]]
@@ -68,6 +73,7 @@ class Reg(TypedDict):
     desc: NotRequired[str]
     source: NotRequired["SourceLoc"]
     parameters: NotRequired[list["ParameterBinding"]]
+    customProperties: NotRequired[list["CustomProperty"]]
     fields: list["Field"]
 
 class Mem(TypedDict):
@@ -109,12 +115,13 @@ class Addrmap(TypedDict):
     isBridge: NotRequired[bool]
     source: NotRequired["SourceLoc"]
     parameters: NotRequired[list["ParameterBinding"]]
+    customProperties: NotRequired[list["CustomProperty"]]
     children: list[Union["Addrmap", "Regfile", "Reg", "Mem"]]
 
 # Top-level envelope ----------------------------------------------------
 
 class ElaboratedTree(TypedDict):
-    schemaVersion: Literal['0.2.0']
+    schemaVersion: Literal['0.3.0']
     version: NotRequired[int]
     unchanged: NotRequired[bool]
     lazy: NotRequired[bool]

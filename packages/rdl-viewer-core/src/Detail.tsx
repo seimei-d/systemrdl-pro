@@ -1,10 +1,11 @@
-import { memo, useDeferredValue, useMemo, useState } from 'react';
-import type { EncodeEntry, Field, Mem, ParameterBinding, Reg, SourceLoc, Transport } from './types';
+import { Fragment, memo, useDeferredValue, useMemo, useState } from 'react';
+import type { Addrmap, CustomProperty, EncodeEntry, Field, Mem, ParameterBinding, Reg, SourceLoc, Transport } from './types';
 import { BitGrid } from './BitGrid';
 
 type Props = {
   reg: Reg | null;
   mem: Mem | null;
+  addrmap: Addrmap | null;
   path: string[] | null;
   transport: Transport;
 };
@@ -14,7 +15,7 @@ type Props = {
 // active reg hasn't actually changed. `reg` and `path` come from
 // `findRegByKey` which returns the same node-reference for the same
 // (root, key) pair across re-renders.
-function DetailInner({ reg, mem, path, transport }: Props) {
+function DetailInner({ reg, mem, addrmap, path, transport }: Props) {
   const [decoderInput, setDecoderInput] = useState('');
 
   // Defer the reg/mem/path so React keeps showing the previous content
@@ -35,10 +36,34 @@ function DetailInner({ reg, mem, path, transport }: Props) {
     if (source && transport.reveal) transport.reveal(source);
   };
 
-  if (!r && !m) {
+  if (!r && !m && !addrmap) {
     return (
       <div className="rdl-detail">
         <div className="placeholder">Select a register or memory to see details.</div>
+      </div>
+    );
+  }
+
+  if (addrmap && !r && !m) {
+    return (
+      <div className="rdl-detail">
+        <h2>{addrmap.name}</h2>
+        {addrmap.displayName && addrmap.displayName !== addrmap.name && (
+          <div className="display-name">{addrmap.displayName}</div>
+        )}
+        {p && <div className="breadcrumb">{p.join('.')}</div>}
+        <div className="meta">
+          <span className="k">Address</span><span className="v">{addrmap.address}</span>
+          <span className="k">Size</span><span className="v">{addrmap.size}</span>
+          {addrmap.isBridge && <><span className="k">Type</span><span className="v">Bridge</span></>}
+        </div>
+        {addrmap.desc && <div className="desc">{addrmap.desc}</div>}
+        {addrmap.parameters && addrmap.parameters.length > 0 && (
+          <ParametersTable parameters={addrmap.parameters} />
+        )}
+        {addrmap.customProperties && addrmap.customProperties.length > 0 && (
+          <CustomPropertiesTable properties={addrmap.customProperties} />
+        )}
       </div>
     );
   }
@@ -86,6 +111,12 @@ function DetailInner({ reg, mem, path, transport }: Props) {
         <span className="k">Width</span><span className="v">{String(regNonNull.width)}</span>
         <span className="k">Reset</span><span className="v">{regNonNull.reset ?? '—'}</span>
         <span className="k">Access</span><span className="v">{regNonNull.accessSummary || '—'}</span>
+        {regNonNull.customProperties?.map(property => (
+          <Fragment key={property.name}>
+            <span className="k">{property.name}</span>
+            <span className="v">{renderCustomPropertyValue(property.value)}</span>
+          </Fragment>
+        ))}
       </div>
       {regNonNull.desc && <div className="desc">{regNonNull.desc}</div>}
       {regNonNull.parameters && regNonNull.parameters.length > 0 && (
@@ -117,6 +148,14 @@ function DetailInner({ reg, mem, path, transport }: Props) {
                 · showing decoded values for <code>{decoderInput}</code>
               </span>
             )}
+          </div>
+          <div className="field-header" aria-hidden="true">
+            <span>Bits</span>
+            <span>Name</span>
+            <span>Access</span>
+            <span>Reset / Value</span>
+            <span>Description</span>
+            <span>Properties</span>
           </div>
           {(regNonNull.fields || []).map((f, i) => (
             <FieldRow
@@ -261,11 +300,51 @@ function FieldRow({
       <span className={'rdl-pill ' + acc}>{acc.toUpperCase()}</span>
       {valueCell}
       <span className="desc">{blurb}</span>
+      {field.customProperties && field.customProperties.length > 0 && (
+        <div className="rdl-field-properties" onClick={e => e.stopPropagation()}>
+          {field.customProperties.map(property => (
+            <div key={property.name}>
+              <code>{property.name}</code>
+              {': '}
+              <code>{renderCustomPropertyValue(property.value)}</code>
+            </div>
+          ))}
+        </div>
+      )}
       {field.encode && field.encode.length > 0 && (
         <EncodeTable entries={field.encode} />
       )}
     </div>
   );
+}
+
+function CustomPropertiesTable({
+  properties,
+}: {
+  properties: CustomProperty[];
+}) {
+  return (
+    <div className="rdl-custom-properties" onClick={e => e.stopPropagation()}>
+      <div className="rdl-custom-properties-title">Custom properties</div>
+      <table className="rdl-custom-properties-table">
+        <tbody>
+          {properties.map(property => (
+            <tr key={property.name}>
+              <td className="n"><code>{property.name}</code></td>
+              <td className="v"><code>{renderCustomPropertyValue(property.value)}</code></td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function renderCustomPropertyValue(value: unknown): string {
+  if (value === null || value === undefined) return '—';
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  return JSON.stringify(value) ?? String(value);
 }
 
 function ParametersTable({ parameters }: { parameters: ParameterBinding[] }) {

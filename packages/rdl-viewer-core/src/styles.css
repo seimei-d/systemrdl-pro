@@ -456,13 +456,36 @@ html, body { margin: 0; padding: 0; background: var(--rdl-bg); color: var(--rdl-
   font-size: 10px; margin-left: 8px; text-transform: none; letter-spacing: 0; }
 .rdl-fields-mode code { color: var(--rdl-accent); font-family: var(--rdl-font-mono); }
 
+.rdl-custom-properties { margin: 6px 0 2px; }
+.rdl-custom-properties-title { color: var(--rdl-dim); font-size: 11px;
+  margin-bottom: 3px; }
+.rdl-custom-properties-table { border-collapse: collapse; font-size: 12px; }
+.rdl-custom-properties-table td { padding: 2px 8px 2px 0; vertical-align: top; }
+.rdl-custom-properties-table td.n code { color: var(--rdl-fg); }
+.rdl-custom-properties-table td.v code { color: var(--rdl-accent);
+  font-family: var(--rdl-font-mono); overflow-wrap: anywhere; }
+.rdl-field-properties { min-width: 0; color: var(--rdl-dim);
+  font-family: var(--rdl-font-chrome); font-size: 11px; line-height: 1.5;
+  overflow-wrap: anywhere; }
+.rdl-field-properties code { color: var(--rdl-fg);
+  font-family: var(--rdl-font-mono); }
+.rdl-field-properties code:last-child { color: var(--rdl-accent); }
 .rdl-detail .fields-title { font-size: 11px; color: var(--rdl-dim);
   text-transform: uppercase; letter-spacing: 0.06em;
   border-bottom: 1px solid var(--rdl-border); padding-bottom: 6px;
   margin: 16px 0 8px; }
-.rdl-detail .field { display: grid; grid-template-columns: 60px 140px 60px 90px 1fr;
+.rdl-detail .field,
+.rdl-detail .field-header {
+  display: grid;
+  grid-template-columns: 60px 140px 60px 90px minmax(0, 1fr) minmax(180px, 1fr);
   column-gap: 12px; padding: 4px 0; border-bottom: 1px dotted #2a2a2a;
-  font-family: var(--rdl-font-mono); font-size: 13px; align-items: baseline; }
+  align-items: baseline; }
+.rdl-detail .field { font-family: var(--rdl-font-mono); font-size: 13px; }
+.rdl-detail .field-header {
+  color: var(--rdl-dim); font-family: var(--rdl-font-chrome);
+  font-size: 10px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 0.04em; border-bottom: 1px solid var(--rdl-border);
+}
 .rdl-detail .field .desc { color: var(--rdl-dim); font-family: var(--rdl-font-chrome);
   font-style: normal; }
 .rdl-viewer-src-link { flex-shrink: 0; padding: 6px 20px;

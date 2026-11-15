@@ -10,6 +10,7 @@
 export type {
   AccessMode,
   Addrmap,
+  CustomProperty,
   ElaboratedTree,
   EncodeEntry,
   Field,

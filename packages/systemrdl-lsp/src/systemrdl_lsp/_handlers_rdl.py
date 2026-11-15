@@ -107,7 +107,7 @@ async def handle_elaborated_tree(state: ServerState, params: Any) -> dict[str, A
     - First request (no ``sinceVersion`` or stale value) returns the
       serialized tree, cached on the LSP side keyed by ``(uri, version)``.
 
-    Schema: ``schemas/elaborated-tree.json`` v0.2.0. Returns the cached
+    Schema: ``schemas/elaborated-tree.json`` v0.3.0. Returns the cached
     last-good tree when the current parse has failed (design D7).
     """
     uri = None

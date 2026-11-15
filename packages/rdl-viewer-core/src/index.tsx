@@ -23,7 +23,17 @@ import { createRoot, type Root } from 'react-dom/client';
 import { Viewer } from './Viewer';
 import type { Transport } from './types';
 
-export type { Transport, ElaboratedTree, Reg, Addrmap, Regfile, Field, SourceLoc, TreeNode } from './types';
+export type {
+  Transport,
+  ElaboratedTree,
+  Reg,
+  Addrmap,
+  Regfile,
+  Field,
+  CustomProperty,
+  SourceLoc,
+  TreeNode,
+} from './types';
 
 export function mount(target: HTMLElement, transport: Transport): () => void {
   const root: Root = createRoot(target);

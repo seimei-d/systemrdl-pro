@@ -53,7 +53,7 @@ type Props = {
   rows: FlatRow[];
   selectedKey: string | null;
   onSelectReg: (row: FlatRow & { kind: 'reg' }) => void;
-  onRevealContainer: (row: FlatRow & { kind: 'container' }) => void;
+  onSelectContainer: (row: FlatRow & { kind: 'container' }) => void;
   onRevealMem: (row: FlatRow & { kind: 'mem' }) => void;
   onToggleCollapse: (key: string) => void;
   onContextMenu: (ev: React.MouseEvent, row: FlatRow) => void;
@@ -71,7 +71,7 @@ const ROW_HEIGHT_PX = 22;
 const OVERSCAN_ROWS = 30;
 
 export function Tree({
-  rows, selectedKey, onSelectReg, onRevealContainer, onRevealMem, onToggleCollapse, onContextMenu,
+  rows, selectedKey, onSelectReg, onSelectContainer, onRevealMem, onToggleCollapse, onContextMenu,
   filter, filterMatchCount, hasRoots,
 }: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -176,7 +176,7 @@ export function Tree({
                 row={row}
                 selected={selectedKey === row.key}
                 onSelectReg={onSelectReg}
-                onRevealContainer={onRevealContainer}
+                onSelectContainer={onSelectContainer}
                 onRevealMem={onRevealMem}
                 onToggleCollapse={onToggleCollapse}
                 onContextMenu={onContextMenu}
@@ -207,7 +207,7 @@ type RowProps = {
   row: FlatRow;
   selected: boolean;
   onSelectReg: (row: FlatRow & { kind: 'reg' }) => void;
-  onRevealContainer: (row: FlatRow & { kind: 'container' }) => void;
+  onSelectContainer: (row: FlatRow & { kind: 'container' }) => void;
   onRevealMem: (row: FlatRow & { kind: 'mem' }) => void;
   onToggleCollapse: (key: string) => void;
   onContextMenu: (ev: React.MouseEvent, row: FlatRow) => void;
@@ -217,7 +217,7 @@ type RowProps = {
 // `selected` flipped, not all 500-25k visible rows. The four callback
 // props are useCallback-stable in Viewer so memo bailout is effective.
 const TreeRow = memo(function TreeRow({
-  row, selected, onSelectReg, onRevealContainer, onRevealMem, onToggleCollapse, onContextMenu,
+  row, selected, onSelectReg, onSelectContainer, onRevealMem, onToggleCollapse, onContextMenu,
 }: RowProps) {
   const indent = row.depth > 0 ? `rdl-indent-${Math.min(row.depth, 3)}` : '';
   const cls = ['rdl-row', indent];
@@ -230,19 +230,20 @@ const TreeRow = memo(function TreeRow({
     const isBridge = node.kind === 'addrmap' && (node as { isBridge?: boolean }).isBridge;
     const kindLabel = node.kind + (node.type ? ` (${node.type})` : '') + (isBridge ? ' · bridge' : '');
     const rowTitle = (isBridge ? 'bridge addrmap · ' : '') +
-      'Click to reveal in editor · use the chevron to collapse';
-    // Click on the row body (not the caret button) reveals the container's
-    // source in the host editor — same UX as register rows. Caret button
-    // keeps its own click handler with stopPropagation so it only collapses,
-    // never reveals.
+      (node.kind === 'addrmap'
+        ? 'Click to view details and reveal in editor · use the chevron to collapse'
+        : 'Click to reveal in editor · use the chevron to collapse');
+    // Addrmap rows also select their detail view. The caret button keeps its
+    // own click handler with stopPropagation so it only toggles collapse.
     return (
       <div
         className={className}
         role="treeitem"
         aria-level={row.depth + 1}
         aria-expanded={row.expanded}
+        aria-selected={selected}
         data-key={row.key}
-        onClick={() => onRevealContainer(row)}
+        onClick={() => onSelectContainer(row)}
         onContextMenu={(e) => onContextMenu(e, row)}
         title={rowTitle}
         style={{ cursor: 'pointer' }}

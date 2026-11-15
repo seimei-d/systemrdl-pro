@@ -20,6 +20,11 @@ export type ParameterBinding = {
   value: unknown;
 };
 
+export type CustomProperty = {
+  name: string;
+  value: unknown;
+};
+
 export type AccessMode = 'rw' | 'ro' | 'wo' | 'w1c' | 'w0c' | 'w1s' | 'w0s' | 'rclr' | 'rset' | 'wclr' | 'wset' | 'na';
 
 export type EncodeEntry = {
@@ -38,6 +43,7 @@ export type Field = {
   reset?: HexU64;
   desc?: string;
   source?: SourceLoc;
+  customProperties?: CustomProperty[];
   isCounter?: boolean;
   isIntr?: boolean;
   encode?: EncodeEntry[];
@@ -58,6 +64,7 @@ export type Reg = {
   desc?: string;
   source?: SourceLoc;
   parameters?: ParameterBinding[];
+  customProperties?: CustomProperty[];
   fields: Field[];
 };
 
@@ -102,11 +109,12 @@ export type Addrmap = {
   isBridge?: boolean;
   source?: SourceLoc;
   parameters?: ParameterBinding[];
+  customProperties?: CustomProperty[];
   children: (Addrmap | Regfile | Reg | Mem)[];
 };
 
 export type ElaboratedTree = {
-  schemaVersion: '0.2.0';
+  schemaVersion: '0.3.0';
   version?: number;
   unchanged?: boolean;
   lazy?: boolean;

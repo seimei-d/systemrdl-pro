@@ -4,6 +4,14 @@ All notable changes to **SystemRDL Pro** are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- **Memory Map webview blank in newer VS Code versions.** Generate the inline
+  script CSP nonce using standard base64 encoding, as required by CSP nonce
+  sources.
+
 ## [0.29.2] — 2026-05-16
 
 Bumps bundled language server to **systemrdl-lsp 0.21.2**.

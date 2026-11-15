@@ -1,4 +1,4 @@
-"""Elaborated tree → JSON serializer (rdl/elaboratedTree, schema v0.2.0).
+"""Elaborated tree → JSON serializer (rdl/elaboratedTree, schema v0.3.0).
 
 Performance note: a per-call ``_TypeCache`` memoizes type-level property
 lookups (``get_property`` walks the override → type → default chain on every
@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-ELABORATED_TREE_SCHEMA_VERSION = "0.2.0"
+ELABORATED_TREE_SCHEMA_VERSION = "0.3.0"
 
 
 def _node_id(index: int) -> str:
@@ -56,17 +56,21 @@ class _TypeCache:
     """Per-call cache of type-level lookups, keyed by id(component_def).
 
     Discarded at the end of each ``_serialize_root`` call so it never leaks
-    state across LSP requests. Two stores:
+    state across LSP requests. Type-level lookups are stored in:
 
     - ``props[(def_id, prop_name)]`` -> resolved property value (or None)
     - ``def_src_refs[def_id]`` -> serialized def_src_ref dict (or None)
+
+    The user-defined property names are captured once per call for custom
+    property serialization.
     """
 
-    __slots__ = ("def_src_refs", "props")
+    __slots__ = ("custom_property_names", "def_src_refs", "props")
 
-    def __init__(self) -> None:
+    def __init__(self, custom_property_names: set[str] | None = None) -> None:
         self.props: dict[tuple[int, str], Any] = {}
         self.def_src_refs: dict[int, dict[str, Any] | None] = {}
+        self.custom_property_names = custom_property_names or set()
 
 
 def _cached_prop(node: Any, name: str, cache: _TypeCache) -> Any:
@@ -107,6 +111,66 @@ def _cached_prop(node: Any, name: str, cache: _TypeCache) -> Any:
 
 
 _MISSING = object()
+
+
+def _json_safe_property_value(value: Any) -> Any:
+    """Convert a user property value to a JSON-safe, readable value."""
+    get_value = getattr(value, "get_value", None)
+    if callable(get_value):
+        try:
+            value = get_value()
+        except (AttributeError, LookupError, TypeError, ValueError):
+            pass
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(k): _json_safe_property_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe_property_value(v) for v in value]
+    if isinstance(value, set):
+        return sorted(
+            (_json_safe_property_value(v) for v in value),
+            key=lambda v: str(v),
+        )
+    for attr in ("name", "inst_name", "type_name"):
+        label = getattr(value, attr, None)
+        if isinstance(label, str):
+            return label
+    return str(value)
+
+
+def _serialize_custom_properties(node: Any, cache: _TypeCache) -> list[dict[str, Any]]:
+    """Serialize explicitly assigned user properties, excluding inherited defaults."""
+    inst = getattr(node, "inst", None)
+    if inst is None or not cache.custom_property_names:
+        return []
+    assigned = set(getattr(inst, "properties", None) or {})
+    original_def = getattr(inst, "original_def", None)
+    assigned.update(getattr(original_def, "properties", None) or {})
+    out: list[dict[str, Any]] = []
+    for name in sorted(cache.custom_property_names & assigned):
+        try:
+            value = node.get_property(name)
+        except (LookupError, AttributeError):
+            continue
+        out.append({"name": name, "value": _json_safe_property_value(value)})
+    return out
+
+
+def _custom_property_names(roots_input: list[RootNode] | RootNode | None) -> set[str]:
+    if isinstance(roots_input, list):
+        root_list = roots_input
+    elif roots_input is None:
+        root_list = []
+    else:
+        root_list = [roots_input]
+    for root in root_list:
+        env = getattr(root, "env", None)
+        rules = getattr(env, "property_rules", None)
+        properties = getattr(rules, "user_properties", None)
+        if properties:
+            return set(properties)
+    return set()
 
 
 def _hex(value: int, width_bits: int = 32) -> str:
@@ -213,6 +277,9 @@ def _serialize_field(
         "msb": node.msb,
         "access": _field_access_token(node, cache),
     }
+    custom_properties = _serialize_custom_properties(node, cache)
+    if custom_properties:
+        out["customProperties"] = custom_properties
     display_name = _cached_prop(node, "name", cache)
     if display_name:
         out["displayName"] = str(display_name)
@@ -417,6 +484,9 @@ def _serialize_reg(
         desc = _cached_prop(node, "desc", cache)
         if desc:
             out["desc"] = str(desc)
+    custom_properties = _serialize_custom_properties(node, cache)
+    if custom_properties:
+        out["customProperties"] = custom_properties
     inst_src = getattr(inst, "inst_src_ref", None) if inst is not None else None
     src = _src_ref_to_dict(inst_src, path_translate) if inst_src is not None \
         else _cached_def_src_ref(node, cache, path_translate)
@@ -562,6 +632,10 @@ def _serialize_addressable(
         params = _serialize_parameters(node)
         if params:
             out["parameters"] = params
+        if isinstance(node, AddrmapNode):
+            custom_properties = _serialize_custom_properties(node, cache)
+            if custom_properties:
+                out["customProperties"] = custom_properties
         return out
     return None
 
@@ -590,7 +664,7 @@ def _serialize_root(
     lazy: bool = False,
     out_index: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Build the JSON envelope matching ``schemas/elaborated-tree.json`` v0.2.0.
+    """Build the JSON envelope matching ``schemas/elaborated-tree.json`` v0.3.0.
 
     ``roots_input`` is either a list of ``RootNode`` (multi-root, Decision 3C —
     one per top-level ``addrmap`` definition) or a single ``RootNode | None``
@@ -614,7 +688,7 @@ def _serialize_root(
     else:
         root_list = [roots_input]
 
-    cache = _TypeCache()
+    cache = _TypeCache(_custom_property_names(root_list))
     # Single shared id counter across all roots so node ids are unique within
     # an entire envelope (multi-root configurations don't collide).
     id_counter: list[int] | None = [0] if lazy else None
@@ -729,7 +803,7 @@ def expand_node(
     carries the same ``nodeId`` for the convenience of the client
     (which uses it as the splice key).
     """
-    cache = _TypeCache()
+    cache = _TypeCache(_custom_property_names(roots_input))
     if node_index is not None:
         node = node_index.get(node_id)
         if node is None:
@@ -782,5 +856,3 @@ def expand_node(
         except Exception:
             logger.exception("expand_node walk failed at root level")
     return None
-
-
