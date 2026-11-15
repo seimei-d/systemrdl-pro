@@ -1117,6 +1117,5 @@ function makeNonce(): string {
   // practice (VSCode's webview is sandboxed) but the CSP nonce mechanism
   // is meant to defeat injection attacks, and a non-CSPRNG nonce is a
   // category error a security audit would flag.
-  return crypto.randomBytes(18).toString('base64url');
+  return crypto.randomBytes(18).toString('base64');
 }
-

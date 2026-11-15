@@ -142,4 +142,4 @@ ${e.message}`,void 0,i.handled===!0?!1:"force")}hookConfigurationChanged(e){this
     RdlViewer.mount(document.getElementById('app-root'), transport);
   })();
   </script>
-</body></html>`}function _D(){return Wy.randomBytes(18).toString("base64url")}0&&(module.exports={activate,deactivate});
+</body></html>`}function _D(){return Wy.randomBytes(18).toString("base64")}0&&(module.exports={activate,deactivate});
