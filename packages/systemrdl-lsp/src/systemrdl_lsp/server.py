@@ -1151,6 +1151,14 @@ def build_server() -> LanguageServer:
         finally:
             state.pending.pop(uri, None)
 
+    def _supports_workspace_configuration() -> bool:
+        try:
+            capabilities = server.client_capabilities
+        except (AttributeError, RuntimeError):
+            return False
+        workspace_capabilities = getattr(capabilities, "workspace", None)
+        return bool(getattr(workspace_capabilities, "configuration", False))
+
     async def _read_workspace_config(
         scope_uri: str | None = None,
     ) -> dict[str, Any] | None:
@@ -1160,6 +1168,8 @@ def build_server() -> LanguageServer:
         nothing or the response wasn't a dict. Raises only on the
         underlying transport failure — callers wrap in try/except.
         """
+        if not _supports_workspace_configuration():
+            return None
         from lsprotocol.types import (
             ConfigurationItem,
             ConfigurationParams,

@@ -1194,11 +1194,15 @@ def test_relative_include_path_resolves_from_workspace_root(tmp_path):
 
 def test_include_paths_configuration_is_requested_for_document_uri(tmp_path):
     """Resource-scoped VS Code settings must be read with the document URI."""
+    from lsprotocol.types import ClientCapabilities, WorkspaceClientCapabilities
     from systemrdl_lsp.server import build_server
 
     server = build_server()
     uri = (tmp_path / "main.rdl").as_uri()
     requests = []
+    server.protocol.client_capabilities = ClientCapabilities(
+        workspace=WorkspaceClientCapabilities(configuration=True)
+    )
 
     async def workspace_configuration(params):
         requests.append(params.items[0])
