@@ -350,6 +350,39 @@ def _peakrdl_toml_paths(start: pathlib.Path) -> list[str]:
 # the user's source has Perl markers but the binary is missing.
 _PERL_MARKER_RE = re.compile(r"<%")
 
+# PeakRDL-regblock's exporter normally loads these UDP declarations. The LSP
+# recognizes them on demand so the viewer does not depend on the exporter.
+_REGBLOCK_UDP_TYPES: dict[str, tuple[str, str]] = {
+    "buffer_reads": ("reg", "boolean"),
+    "rbuffer_trigger": ("reg", "ref"),
+    "buffer_writes": ("reg", "boolean"),
+    "wbuffer_trigger": ("reg", "ref"),
+    "rd_swacc": ("field", "boolean"),
+    "wr_swacc": ("field", "boolean"),
+    "is_signed": ("field", "boolean"),
+    "intwidth": ("field", "longint unsigned"),
+    "fracwidth": ("field", "longint unsigned"),
+}
+_UNRECOGNIZED_PROPERTY_RE = re.compile(r"Unrecognized property '([A-Za-z_]\w*)'")
+
+
+def _unrecognized_regblock_udps(captured: list[tuple[Severity, str, Any]]) -> set[str]:
+    return {
+        match.group(1)
+        for _severity, text, _src_ref in captured
+        if (match := _UNRECOGNIZED_PROPERTY_RE.search(text))
+        and match.group(1) in _REGBLOCK_UDP_TYPES
+    }
+
+
+def _regblock_udp_declarations(names: set[str]) -> str:
+    """Build declarations for recognized regblock UDPs rejected as unknown."""
+    return "\n".join(
+        f"property {name} {{ component = {_REGBLOCK_UDP_TYPES[name][0]}; "
+        f"type = {_REGBLOCK_UDP_TYPES[name][1]}; }};"
+        for name in sorted(names)
+    )
+
 
 def _perl_in_source(text: str) -> bool:
     """True when the buffer contains a Perl preprocessor marker."""
@@ -423,7 +456,6 @@ def _compile_text(
         # built-in default (covers ~95% of preprocessor needs) stays in effect
         # for everyone else.
         compiler_kwargs["perl_safe_opcodes"] = list(perl_safe_opcodes)
-    compiler = RDLCompiler(**compiler_kwargs)
 
     expanded_text = _expand_include_vars(text, include_vars or {})
     with tempfile.NamedTemporaryFile(
@@ -438,7 +470,40 @@ def _compile_text(
 
     roots: list[RootNode] = []
     try:
-        compiler.compile_file(str(tmp_path), incl_search_paths=search_paths)
+        compiler = RDLCompiler(**compiler_kwargs)
+        missing_regblock_udps: set[str] = set()
+        while True:
+            udp_path: pathlib.Path | None = None
+            try:
+                if missing_regblock_udps:
+                    declarations = _regblock_udp_declarations(missing_regblock_udps)
+                    with tempfile.NamedTemporaryFile(
+                        mode="w",
+                        suffix=".rdl",
+                        prefix=".systemrdl-lsp-udps-",
+                        encoding="utf-8",
+                        delete=False,
+                    ) as udp_file:
+                        udp_file.write(declarations)
+                        udp_path = pathlib.Path(udp_file.name)
+                    compiler.compile_file(str(udp_path), incl_search_paths=search_paths)
+                compiler.compile_file(str(tmp_path), incl_search_paths=search_paths)
+                break
+            except RDLCompileError:
+                new_names = _unrecognized_regblock_udps(printer.captured) - missing_regblock_udps
+                if not new_names:
+                    raise
+                missing_regblock_udps.update(new_names)
+
+                # A failed compiler instance cannot be reused; retry with the
+                # newly discovered declarations and all previous fallbacks.
+                printer = CapturingPrinter()
+                compiler_kwargs["message_printer"] = printer
+                compiler = RDLCompiler(**compiler_kwargs)
+            finally:
+                if udp_path is not None:
+                    udp_path.unlink(missing_ok=True)
+
         # Enumerate every top-level addrmap definition in declaration order, then
         # elaborate each. Per the systemrdl-compiler docstring, the compiler must
         # be discarded if elaborate() raises — we still keep prior successful

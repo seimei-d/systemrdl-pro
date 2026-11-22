@@ -1,0 +1,39 @@
+// PeakRDL-regblock UDP showcase. Open this file and inspect the register and
+// field properties in the Memory Map viewer.
+//
+// The LSP recognizes these common regblock UDPs without a separate declaration
+// file. When generating RTL with PeakRDL-regblock, compile its
+// hdl-src/regblock_udps.rdl before this file, as described in the regblock docs.
+//
+// Try:
+// • `buffer_reads` / `buffer_writes` on CONTROL
+// • `rd_swacc` / `wr_swacc` on fields to request software-access strobes
+// • `is_signed`, `intwidth`, and `fracwidth` on the signed fixed-point sample
+
+addrmap regblock_udp_demo {
+    name = "PeakRDL-regblock UDP demo";
+
+    reg {
+        buffer_reads = true;
+        buffer_writes = true;
+
+        field {
+            sw = rw;
+            hw = rw;
+            rd_swacc = true;
+            wr_swacc = true;
+            desc = "Software read/write access strobes are enabled.";
+        } enable[0:0] = 0;
+    } CONTROL @ 0x0;
+
+    reg {
+        field {
+            sw = r;
+            hw = w;
+            is_signed = true;
+            intwidth = 4;
+            fracwidth = 4;
+            desc = "Signed 4.4 fixed-point sample.";
+        } sample[7:0] = 0;
+    } SAMPLE @ 0x4;
+};

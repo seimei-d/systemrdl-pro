@@ -124,6 +124,8 @@ viewer without an editor.
 - **Python:** 3.10+
 - **`perl`** on `PATH` (optional) unlocks the SystemRDL Perl preprocessor
   (clause 16.3) for parametric register generation.
+- **PeakRDL-regblock UDPs:** common regblock properties such as `wr_swacc`
+  are recognized and shown in the viewer without installing PeakRDL-regblock.
 
 ## Source
 

@@ -142,6 +142,53 @@ def test_compile_text_returns_no_root_on_parse_error(tmp_path):
         tmp_file.unlink(missing_ok=True)
 
 
+def test_compile_text_supports_peakrdl_regblock_udps(tmp_path):
+    """Regblock UDPs elaborate without requiring their declarations in the workspace."""
+    from systemrdl_lsp.serialize import _serialize_root
+
+    rdl = textwrap.dedent("""
+        addrmap top {
+            reg {
+                buffer_reads = true;
+                field { sw=rw; hw=r; wr_swacc=true; } data[0:0] = 0;
+            } CTRL @ 0x0;
+        };
+    """).strip()
+    uri = (tmp_path / "regblock.rdl").as_uri()
+    messages, roots, tmp_file, _consumed, _node_index, _spine = _compile_text(uri, rdl)
+    try:
+        errors = [m for m in messages if m.severity in (Severity.ERROR, Severity.FATAL)]
+        assert errors == []
+        assert len(roots) == 1
+
+        reg = _serialize_root(roots, stale=False)["roots"][0]["children"][0]
+        assert reg["customProperties"] == [{"name": "buffer_reads", "value": True}]
+        assert reg["fields"][0]["customProperties"] == [{"name": "wr_swacc", "value": True}]
+    finally:
+        tmp_file.unlink(missing_ok=True)
+
+
+def test_compile_text_does_not_duplicate_declared_regblock_udp(tmp_path):
+    """An explicit or included UDP declaration takes precedence over fallback."""
+    rdl = textwrap.dedent("""
+        property wr_swacc {
+            component = field;
+            type = boolean;
+        };
+        addrmap top {
+            reg { field { sw=rw; hw=r; wr_swacc=true; } data[0:0] = 0; } CTRL @ 0x0;
+        };
+    """).strip()
+    uri = (tmp_path / "declared.rdl").as_uri()
+    messages, roots, tmp_file, _consumed, _node_index, _spine = _compile_text(uri, rdl)
+    try:
+        errors = [m for m in messages if m.severity in (Severity.ERROR, Severity.FATAL)]
+        assert errors == []
+        assert len(roots) == 1
+    finally:
+        tmp_file.unlink(missing_ok=True)
+
+
 def test_compile_text_translates_temp_path_to_original_uri(tmp_path):
     """Diagnostics carry the original file path, not the LSP-internal temp path."""
     original = tmp_path / "real.rdl"
