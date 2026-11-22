@@ -1,6 +1,7 @@
 import { Fragment, memo, useDeferredValue, useMemo, useState } from 'react';
 import type { Addrmap, CustomProperty, EncodeEntry, Field, Mem, ParameterBinding, Reg, SourceLoc, Transport } from './types';
 import { BitGrid } from './BitGrid';
+import { RichText } from './RichText';
 
 type Props = {
   reg: Reg | null;
@@ -47,9 +48,9 @@ function DetailInner({ reg, mem, addrmap, path, transport }: Props) {
   if (addrmap && !r && !m) {
     return (
       <div className="rdl-detail">
-        <h2>{addrmap.name}</h2>
+        <h2><RichText text={addrmap.name} /></h2>
         {addrmap.displayName && addrmap.displayName !== addrmap.name && (
-          <div className="display-name">{addrmap.displayName}</div>
+          <div className="display-name"><RichText text={addrmap.displayName} /></div>
         )}
         {p && <div className="breadcrumb">{p.join('.')}</div>}
         <div className="meta">
@@ -57,7 +58,7 @@ function DetailInner({ reg, mem, addrmap, path, transport }: Props) {
           <span className="k">Size</span><span className="v">{addrmap.size}</span>
           {addrmap.isBridge && <><span className="k">Type</span><span className="v">Bridge</span></>}
         </div>
-        {addrmap.desc && <div className="desc">{addrmap.desc}</div>}
+        {addrmap.desc && <div className="desc"><RichText text={addrmap.desc} /></div>}
         {addrmap.parameters && addrmap.parameters.length > 0 && (
           <ParametersTable parameters={addrmap.parameters} />
         )}
@@ -72,9 +73,9 @@ function DetailInner({ reg, mem, addrmap, path, transport }: Props) {
   if (m && !r) {
     return (
       <div className="rdl-detail">
-        <h2>{m.name}</h2>
+        <h2><RichText text={m.name} /></h2>
         {m.displayName && m.displayName !== m.name && (
-          <div className="display-name">{m.displayName}</div>
+          <div className="display-name"><RichText text={m.displayName} /></div>
         )}
         {p && <div className="breadcrumb">{p.join('.')}</div>}
         <div className="meta">
@@ -87,7 +88,7 @@ function DetailInner({ reg, mem, addrmap, path, transport }: Props) {
             <><span className="k">Width</span><span className="v">{String(m.memWidth)} bits</span></>
           )}
         </div>
-        {m.desc && <div className="desc">{m.desc}</div>}
+        {m.desc && <div className="desc"><RichText text={m.desc} /></div>}
         {m.parameters && m.parameters.length > 0 && (
           <ParametersTable parameters={m.parameters} />
         )}
@@ -101,9 +102,9 @@ function DetailInner({ reg, mem, addrmap, path, transport }: Props) {
 
   return (
     <div className="rdl-detail">
-      <h2>{regNonNull.name}</h2>
+      <h2><RichText text={regNonNull.name} /></h2>
       {regNonNull.displayName && regNonNull.displayName !== regNonNull.name && (
-        <div className="display-name">{regNonNull.displayName}</div>
+        <div className="display-name"><RichText text={regNonNull.displayName} /></div>
       )}
       <div className="breadcrumb">{p!.join('.')}</div>
       <div className="meta">
@@ -118,7 +119,7 @@ function DetailInner({ reg, mem, addrmap, path, transport }: Props) {
           </Fragment>
         ))}
       </div>
-      {regNonNull.desc && <div className="desc">{regNonNull.desc}</div>}
+      {regNonNull.desc && <div className="desc"><RichText text={regNonNull.desc} /></div>}
       {regNonNull.parameters && regNonNull.parameters.length > 0 && (
         <ParametersTable parameters={regNonNull.parameters} />
       )}
@@ -283,7 +284,7 @@ function FieldRow({
     >
       <b>[{field.msb}:{field.lsb}]</b>
       <span className="rdl-field-name">
-        {field.name}
+        <RichText text={field.name} />
         {field.isCounter && (
           <span
             className="rdl-tag counter"
@@ -299,7 +300,7 @@ function FieldRow({
       </span>
       <span className={'rdl-pill ' + acc}>{acc.toUpperCase()}</span>
       {valueCell}
-      <span className="desc">{blurb}</span>
+      <span className="desc"><RichText text={blurb} /></span>
       {field.customProperties && field.customProperties.length > 0 && (
         <table className="rdl-field-properties" onClick={e => e.stopPropagation()}>
           <tbody>
@@ -405,10 +406,10 @@ function EncodeTable({ entries }: { entries: EncodeEntry[] }) {
               <td className="n">
                 {e.name}
                 {e.displayName && e.displayName !== e.name && (
-                  <span className="display-name"> · {e.displayName}</span>
+                  <span className="display-name"> · <RichText text={e.displayName} /></span>
                 )}
               </td>
-              <td className="d">{e.desc || ''}</td>
+              <td className="d"><RichText text={e.desc || ''} /></td>
             </tr>
           ))}
         </tbody>

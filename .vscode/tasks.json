@@ -1,0 +1,11 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "build SystemRDL viewer and extension",
+      "type": "shell",
+      "command": "bun run --filter @systemrdl-pro/viewer-core build && bun run --cwd packages/vscode-systemrdl-pro build",
+      "problemMatcher": []
+    }
+  ]
+}
