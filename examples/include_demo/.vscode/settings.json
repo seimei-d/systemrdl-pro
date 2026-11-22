@@ -1,0 +1,5 @@
+{
+    "systemrdl-pro.includePaths": [
+        "./includes"
+    ]
+}

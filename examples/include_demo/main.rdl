@@ -1,0 +1,7 @@
+// Include demo entry point. Open this file to test include resolution and
+// Ctrl-click navigation on the included path.
+`include "defs.rdl"
+
+addrmap include_demo {
+    shared_ctrl_t SHARED_CTRL @ 0x0;
+};

@@ -1,0 +1,15 @@
+// This register type is pulled into main.rdl through the configured
+// systemrdl-pro.includePaths search directory.
+reg shared_ctrl_t {
+    name = "Shared control register";
+    field {
+        sw = rw;
+        hw = r;
+        desc = "Enable the shared block.";
+    } enable[0:0] = 0;
+    field {
+        sw = r;
+        hw = w;
+        desc = "Indicates that the block is ready.";
+    } ready[1:1] = 0;
+};
