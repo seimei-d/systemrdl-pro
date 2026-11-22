@@ -7,6 +7,7 @@ coverage.
 
 from __future__ import annotations
 
+import asyncio
 import pathlib
 import textwrap
 
@@ -1150,6 +1151,65 @@ def test_resolve_search_paths_dedups_and_labels(tmp_path):
     assert "peakrdl.toml" in sources
     # File's own directory is the implicit `sibling` fallback.
     assert any(s == "sibling" for s in sources)
+
+
+def test_relative_include_path_resolves_from_workspace_root(tmp_path):
+    """Relative includePaths settings are rooted at the workspace, not cwd."""
+    workspace = tmp_path / "workspace"
+    source_dir = workspace / "src"
+    include_dir = workspace / "includes"
+    source_dir.mkdir(parents=True)
+    include_dir.mkdir()
+    include_file = include_dir / "defs.rdl"
+    include_file.write_text(
+        "reg shared_ctrl_t { field { sw=rw; hw=r; } enable[0:0]=0; };",
+        encoding="utf-8",
+    )
+    main = source_dir / "main.rdl"
+    source = '`include "defs.rdl"\naddrmap top { shared_ctrl_t CTRL @ 0; };'
+    resolved = _resolve_search_paths(
+        main.as_uri(), ["./includes"], [str(workspace)]
+    )
+    assert resolved[0] == (str(include_dir), "setting")
+    from systemrdl_lsp.server import _document_links
+    links = _document_links(
+        '`include "defs.rdl"\n',
+        main,
+        [path for path, _source in resolved],
+        {},
+    )
+    assert len(links) == 1
+    assert links[0].target == include_file.as_uri()
+
+    messages, roots, temp_file, consumed, _node_index, _spine = _compile_text(
+        main.as_uri(), source, ["./includes"], workspace_folders=[str(workspace)]
+    )
+    try:
+        assert not [message for message in messages if message.severity == Severity.Error]
+        assert roots
+        assert include_file.resolve() in consumed
+    finally:
+        temp_file.unlink(missing_ok=True)
+
+
+def test_include_paths_configuration_is_requested_for_document_uri(tmp_path):
+    """Resource-scoped VS Code settings must be read with the document URI."""
+    from systemrdl_lsp.server import build_server
+
+    server = build_server()
+    uri = (tmp_path / "main.rdl").as_uri()
+    requests = []
+
+    async def workspace_configuration(params):
+        requests.append(params.items[0])
+        return [{"includePaths": ["./includes"]}]
+
+    server.workspace_configuration_async = workspace_configuration
+    paths = asyncio.run(server._systemrdl_include_paths_for_uri(uri))
+
+    assert paths == ["./includes"]
+    assert requests[0].scope_uri == uri
+    assert requests[0].section == "systemrdl-pro"
 
 
 def test_cross_file_diagnostics_bucket_by_source(tmp_path):

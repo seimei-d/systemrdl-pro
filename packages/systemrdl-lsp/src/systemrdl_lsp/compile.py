@@ -251,7 +251,9 @@ def _expand_include_vars(text: str, vars_map: dict[str, str]) -> str:
 
 
 def _resolve_search_paths(
-    uri: str, setting_paths: list[str] | None = None
+    uri: str,
+    setting_paths: list[str] | None = None,
+    workspace_folders: list[str] | None = None,
 ) -> list[tuple[str, str]]:
     r"""Return the deduped, source-labeled include search path list for ``uri``.
 
@@ -265,10 +267,26 @@ def _resolve_search_paths(
     3. ``"sibling"`` — implicit fallback to the file's own directory so
        relative `\include "x.rdl"` works without extra config.
 
-    Dedup is by literal path string. Workspace-relative paths from the setting
-    are left unresolved here (handled downstream by the compiler); peakrdl.toml
-    paths are already absolutized.
+    Relative setting paths are resolved against the containing workspace folder,
+    or the source file's directory when no workspace folder is available.
+    PeakRDL paths are already absolutized.
     """
+    original_path = _uri_to_path(uri)
+    source_path = original_path.resolve()
+    matching_folders: list[pathlib.Path] = []
+    for folder in workspace_folders or []:
+        try:
+            root = pathlib.Path(folder).resolve()
+            source_path.relative_to(root)
+        except (OSError, ValueError):
+            continue
+        matching_folders.append(root)
+    setting_base = (
+        max(matching_folders, key=lambda p: len(p.parts))
+        if matching_folders
+        else original_path.parent
+    )
+
     seen: set[str] = set()
     out: list[tuple[str, str]] = []
 
@@ -279,9 +297,11 @@ def _resolve_search_paths(
         out.append((p, source))
 
     for p in setting_paths or []:
-        push(str(p), "setting")
+        candidate = pathlib.Path(p)
+        if not candidate.is_absolute():
+            candidate = setting_base / candidate
+        push(str(candidate.resolve()), "setting")
 
-    original_path = _uri_to_path(uri)
     for p in _peakrdl_toml_paths(original_path):
         push(p, "peakrdl.toml")
 
@@ -407,6 +427,7 @@ def _compile_text(
     incl_search_paths: list[str] | None = None,
     include_vars: dict[str, str] | None = None,
     perl_safe_opcodes: list[str] | None = None,
+    workspace_folders: list[str] | None = None,
 ) -> tuple[
     list[CompilerMessage],
     list[RootNode],
@@ -447,7 +468,9 @@ def _compile_text(
     # Deduped, source-labeled list — _resolve_search_paths is also exposed
     # to clients via the rdl/includePaths JSON-RPC for the "Show effective
     # include paths" command.
-    search_paths = [p for p, _src in _resolve_search_paths(uri, incl_search_paths)]
+    search_paths = [
+        p for p, _src in _resolve_search_paths(uri, incl_search_paths, workspace_folders)
+    ]
 
     printer = CapturingPrinter()
     compiler_kwargs: dict[str, Any] = {"message_printer": printer}
@@ -583,6 +606,7 @@ def _compile_text_compressed(
     incl_search_paths: list[str] | None = None,
     include_vars: dict[str, str] | None = None,
     perl_safe_opcodes: list[str] | None = None,
+    workspace_folders: list[str] | None = None,
 ) -> bytes:
     """``_compile_text`` wrapped for ProcessPoolExecutor IPC.
 
@@ -602,6 +626,7 @@ def _compile_text_compressed(
     """
     result = _compile_text(
         uri, text, incl_search_paths, include_vars, perl_safe_opcodes,
+        workspace_folders,
     )
     return zlib.compress(
         pickle.dumps(result, protocol=_T3_PICKLE_PROTOCOL),

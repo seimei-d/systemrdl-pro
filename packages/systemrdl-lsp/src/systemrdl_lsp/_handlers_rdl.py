@@ -45,7 +45,11 @@ def handle_include_paths(state: ServerState, params: Any) -> dict[str, Any]:
     if not uri:
         return {"uri": None, "paths": []}
     try:
-        resolved = _resolve_search_paths(uri, state.include_paths)
+        resolved = _resolve_search_paths(
+            uri,
+            state.include_paths_by_uri.get(uri, state.include_paths),
+            state.workspace_folders,
+        )
     except (ValueError, OSError):
         resolved = []
     return {
@@ -62,6 +66,8 @@ def _disk_cache_key(state: ServerState, uri: str) -> str | None:
     file with a different ``$VAR`` substitution map produces a different
     elaborated tree and therefore a different key.
     """
+    from .compile import _resolve_search_paths
+
     try:
         path = _uri_to_path(uri)
     except ValueError:
@@ -75,8 +81,18 @@ def _disk_cache_key(state: ServerState, uri: str) -> str | None:
         compiler_version = getattr(_systemrdl, "__version__", "unknown")
     except Exception:
         compiler_version = "unknown"
+    try:
+        include_paths = [
+            p for p, _src in _resolve_search_paths(
+                uri,
+                state.include_paths_by_uri.get(uri, state.include_paths),
+                state.workspace_folders,
+            )
+        ]
+    except (ValueError, OSError):
+        include_paths = state.include_paths
     return make_key(
-        path, mtime_ns, state.include_paths, compiler_version,
+        path, mtime_ns, include_paths, compiler_version,
         include_vars=state.include_vars,
     )
 

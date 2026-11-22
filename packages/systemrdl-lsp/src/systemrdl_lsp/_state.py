@@ -28,6 +28,8 @@ class ServerState:
     cache: ElaborationCache = dataclasses.field(default_factory=ElaborationCache)
     pending: dict[str, asyncio.Task] = dataclasses.field(default_factory=dict)
     include_paths: list[str] = dataclasses.field(default_factory=list)
+    include_paths_by_uri: dict[str, list[str]] = dataclasses.field(default_factory=dict)
+    workspace_folders: list[str] = dataclasses.field(default_factory=list)
     # Forward + reverse include-graph maps. On every successful elaborate
     # ``compile._harvest_consumed_files`` records which sources the compiler
     # opened, so editing a library file proactively re-elaborates open

@@ -631,6 +631,7 @@ def build_server() -> LanguageServer:
                 buffer_text = _uri_to_path(uri).read_text(encoding="utf-8")
             except (OSError, ValueError):
                 return
+        await _include_paths_for_uri(uri)
 
         # T2-C: per-URI mutex. Replaces the TODO(T2) marker that used to
         # warn about same-URI didOpen+didSave races. Different URIs are
@@ -762,14 +763,16 @@ def build_server() -> LanguageServer:
                     and state.elaborate_pool is not None
                 )
                 pf: Any = None
+                include_paths = state.include_paths_by_uri.get(uri, state.include_paths)
                 if up:
                     pf = state.elaborate_pool.submit(
                         _compile_text_compressed,
                         uri,
                         buffer_text,
-                        state.include_paths,
+                        include_paths,
                         state.include_vars,
                         state.perl_safe_opcodes,
+                        state.workspace_folders,
                     )
                     state.inflight_pool_futures[uri] = pf
                     awaitable = asyncio.wrap_future(pf)
@@ -779,9 +782,10 @@ def build_server() -> LanguageServer:
                         _compile_text,
                         uri,
                         buffer_text,
-                        state.include_paths,
+                        include_paths,
                         state.include_vars,
                         state.perl_safe_opcodes,
+                        state.workspace_folders,
                     )
                 return up, awaitable, pf
 
@@ -1147,7 +1151,9 @@ def build_server() -> LanguageServer:
         finally:
             state.pending.pop(uri, None)
 
-    async def _read_workspace_config() -> dict[str, Any] | None:
+    async def _read_workspace_config(
+        scope_uri: str | None = None,
+    ) -> dict[str, Any] | None:
         """Fetch the systemrdl-pro section of the workspace config.
 
         Returns the dict on success, ``None`` if the client returned
@@ -1156,16 +1162,60 @@ def build_server() -> LanguageServer:
         """
         from lsprotocol.types import (
             ConfigurationItem,
-            WorkspaceConfigurationParams,
+            ConfigurationParams,
         )
         configs = await server.workspace_configuration_async(
-            WorkspaceConfigurationParams(
-                items=[ConfigurationItem(section="systemrdl-pro")]
+            ConfigurationParams(
+                items=[
+                    ConfigurationItem(
+                        scope_uri=scope_uri,
+                        section="systemrdl-pro",
+                    )
+                ]
             )
         )
         if configs and isinstance(configs[0], dict):
             return configs[0]
         return None
+
+    async def _include_paths_for_uri(uri: str) -> list[str]:
+        if uri in state.include_paths_by_uri:
+            return state.include_paths_by_uri[uri]
+        try:
+            cfg = await _read_workspace_config(scope_uri=uri)
+        except Exception:
+            logger.warning(
+                "document-scoped includePaths read failed for %s",
+                uri,
+                exc_info=True,
+            )
+            return state.include_paths_by_uri.get(uri, state.include_paths)
+        if cfg is None:
+            return state.include_paths_by_uri.get(uri, state.include_paths)
+        raw_paths = cfg.get("includePaths")
+        if not isinstance(raw_paths, list):
+            return state.include_paths_by_uri.get(uri, state.include_paths)
+        paths = [str(path) for path in raw_paths if path]
+        state.include_paths_by_uri[uri] = paths
+        return paths
+
+    def _recompile_open_documents() -> None:
+        try:
+            documents = server.workspace.text_documents
+        except RuntimeError:
+            logger.debug("cannot refresh includes before workspace initialization")
+            return
+        for uri in documents:
+            try:
+                if _uri_to_path(uri).suffix.lower() != ".rdl":
+                    continue
+            except (ValueError, OSError):
+                continue
+            text = _read_buffer(uri)
+            if text is None:
+                continue
+            state.force_re_elaborate.add(uri)
+            asyncio.ensure_future(_full_pass_async(uri, text))
 
     def _apply_workspace_config(cfg: dict[str, Any], *, is_initial: bool) -> None:
         """Push values from a workspace-config dict into ServerState.
@@ -1181,8 +1231,11 @@ def build_server() -> LanguageServer:
         toggles need an explicit restart anyway since the cache state
         differs).
         """
+        previous_include_paths = state.include_paths
         paths = cfg.get("includePaths") or []
         state.include_paths = [str(p) for p in paths if p]
+        if state.include_paths != previous_include_paths:
+            _recompile_open_documents()
         raw_vars = cfg.get("includeVars") or {}
         if isinstance(raw_vars, dict):
             state.include_vars = {str(k): str(v) for k, v in raw_vars.items()}
@@ -1225,8 +1278,21 @@ def build_server() -> LanguageServer:
             )
             logger.info("elaboration timeout: %.1fs", state.elaboration_timeout_s)
 
+    def _workspace_folder_paths() -> list[str]:
+        try:
+            folders = server.workspace.folders.values()
+            paths = [str(_uri_to_path(folder.uri)) for folder in folders]
+            if not paths and server.workspace.root_path:
+                paths = [str(server.workspace.root_path)]
+            return paths
+        except (RuntimeError, ValueError, OSError):
+            logger.debug("could not resolve workspace folders", exc_info=True)
+            return []
+
     @server.feature(INITIALIZED)
     def _on_initialized(_ls: LanguageServer, _params: InitializedParams) -> None:
+        state.workspace_folders = _workspace_folder_paths()
+
         # Detect lazy-tree client capability before answering any
         # rdl/elaboratedTree request. The capability lives under
         # `experimental.systemrdlLazyTree` per the design doc; clients that
@@ -1255,6 +1321,13 @@ def build_server() -> LanguageServer:
             asyncio.ensure_future(_preindex_workspace())
 
         asyncio.ensure_future(fetch())
+
+    @server.feature("workspace/didChangeWorkspaceFolders")
+    def _on_workspace_folders_changed(_ls: LanguageServer, _params: Any) -> None:
+        folders = _workspace_folder_paths()
+        if folders != state.workspace_folders:
+            state.workspace_folders = folders
+            _recompile_open_documents()
 
     @server.feature(TEXT_DOCUMENT_DID_OPEN)
     def _on_open(_ls: LanguageServer, params: DidOpenTextDocumentParams) -> None:
@@ -1360,6 +1433,8 @@ def build_server() -> LanguageServer:
     ) -> None:
         async def refresh() -> None:
             try:
+                state.include_paths_by_uri.clear()
+                _recompile_open_documents()
                 cfg = await _read_workspace_config()
                 if cfg is not None:
                     _apply_workspace_config(cfg, is_initial=False)
@@ -1392,10 +1467,14 @@ def build_server() -> LanguageServer:
         server, state,
         read_buffer=_read_buffer,
         file_line_reader=_file_line_reader,
+        include_paths_for_uri=_include_paths_for_uri,
     )
 
     @server.feature("rdl/includePaths")
-    def _on_include_paths(_ls: LanguageServer, params: Any) -> dict[str, Any]:
+    async def _on_include_paths(_ls: LanguageServer, params: Any) -> dict[str, Any]:
+        uri = params.get("uri") if isinstance(params, dict) else getattr(params, "uri", None)
+        if uri:
+            await _include_paths_for_uri(uri)
         return handle_include_paths(state, params)
 
     @server.feature("rdl/elaboratedTree")
@@ -1413,6 +1492,7 @@ def build_server() -> LanguageServer:
     server._systemrdl_state = state  # type: ignore[attr-defined]
     server._systemrdl_full_pass_async = _full_pass_async  # type: ignore[attr-defined]
     server._systemrdl_apply_compile_result = _apply_compile_result  # type: ignore[attr-defined]
+    server._systemrdl_include_paths_for_uri = _include_paths_for_uri  # type: ignore[attr-defined]
     # Shared dict consumed by the pull-diagnostics handler in _handlers_lsp.
     # Updated as a side-effect of every _publish_diagnostics call.
     server._systemrdl_last_diagnostics = state.last_diagnostics  # type: ignore[attr-defined]

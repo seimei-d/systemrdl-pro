@@ -18,7 +18,7 @@ import asyncio
 import logging
 import pathlib
 import re as _re
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 from lsprotocol.types import (
@@ -121,14 +121,16 @@ def register(
     *,
     read_buffer: Callable[[str], str | None],
     file_line_reader: Callable[[pathlib.Path, int], str | None],
+    include_paths_for_uri: Callable[[str], Awaitable[list[str]]],
 ) -> None:
     """Register the standard LSP feature handlers on ``server``.
 
-    The two callable kwargs are deliberate: ``read_buffer`` reaches into
+    The callable kwargs are deliberate: ``read_buffer`` reaches into
     pygls' workspace which only exists once the server is constructed, and
     ``file_line_reader`` prefers the open-buffer cache over disk so rename
-    sees unsaved edits. Both are defined inside ``build_server`` and passed
-    in here.
+    sees unsaved edits. ``include_paths_for_uri`` loads resource-scoped
+    configuration for document links. These are defined inside
+    ``build_server`` and passed in here.
     """
 
     # -- hover -----------------------------------------------------------
@@ -1064,7 +1066,7 @@ def register(
         return _code_actions_for_range(uri, text, params.range)
 
     @server.feature("textDocument/documentLink")
-    def _on_document_link(_ls: LanguageServer, params: Any) -> list[Any]:
+    async def _on_document_link(_ls: LanguageServer, params: Any) -> list[Any]:
         """Resolve `\\`include` paths into clickable documentLinks.
 
         Independent of elaboration — works even when the file has parse errors,
@@ -1079,5 +1081,10 @@ def register(
             primary_path = _uri_to_path(uri)
         except ValueError:
             return []
-        search_paths = [p for p, _src in _resolve_search_paths(uri, state.include_paths)]
+        include_paths = await include_paths_for_uri(uri)
+        search_paths = [
+            p for p, _src in _resolve_search_paths(
+                uri, include_paths, state.workspace_folders
+            )
+        ]
         return _document_links(text, primary_path, search_paths, state.include_vars)
