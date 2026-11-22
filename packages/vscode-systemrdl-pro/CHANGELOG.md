@@ -4,19 +4,32 @@ All notable changes to **SystemRDL Pro** are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.31.2] — 2026-11-22
+
+Bumps the language server to **systemrdl-lsp 0.23.1**.
 
 ### Added — viewer
 
 - **Custom properties in register details and field rows.** Register
   properties appear alongside built-in metadata; field properties render
   as name/value pairs in a compact subtable, with labeled field columns.
+- **Rich text in viewer names and descriptions**, including markdown-style
+  emphasis and links.
+- **Synchronized navigation** between the editor and Memory Map viewer.
 
 ### Fixed
 
 - **Memory Map webview blank in newer VS Code versions.** Generate the inline
   script CSP nonce using standard base64 encoding, as required by CSP nonce
   sources.
+- **Include paths from workspace settings now resolve per document.** Relative
+  paths such as `./includes` are resolved against the containing workspace
+  folder, including on Windows.
+- **Field properties are collapsed by default** to keep the tree compact.
+
+### Added — LSP
+
+- Support for PeakRDL-regblock user-defined properties.
 
 ## [0.29.2] — 2026-05-16
 
