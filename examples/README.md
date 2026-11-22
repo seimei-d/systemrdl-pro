@@ -7,7 +7,7 @@ described inside the file's header comment.
 | File | What it covers |
 |---|---|
 | [`sample.rdl`](sample.rdl) | Multi-feature SystemRDL demo — two top-level addrmaps (`cpu_top`, `dma_engine`, `uart`), nested addrmap/regfile containers, named field types, reused `dma_channel_t` regfile. Default starting point. |
-| [`features_demo.rdl`](features_demo.rdl) | Comprehensive showcase: user-defined property rendered in the viewer on fields, registers, and addrmaps; enums + `encode` binding, signals, parametrized type, counter / interrupt fields, default-property propagation, alias register, `bridge` addrmap, `ispresent` conditional, `accesswidth` split-access, dynamic property assignment. |
+| [`features_demo.rdl`](features_demo.rdl) | Comprehensive showcase: user-defined properties rendered in the viewer on fields, registers, and addrmaps (including multiple properties on one field to demo the collapsible disclosure); enums + `encode` binding, signals, parametrized type, counter / interrupt fields, default-property propagation, alias register, `bridge` addrmap, `ispresent` conditional, `accesswidth` split-access, dynamic property assignment. |
 | [`enum_demo.rdl`](enum_demo.rdl) | Minimal `enum` + `encode = …` field binding. Detail panel shows the enum value table inside the field row. |
 | [`alias_demo.rdl`](alias_demo.rdl) | `alias <orig> <type> <new> @ <addr>;` — same-storage mirror at a different address (clause 10.5). |
 | [`perl_demo.rdl`](perl_demo.rdl) | Perl preprocessor (clause 16.3) generating 8 DMA channels via `<% for my $i ... %>`. Requires `perl` on PATH. |

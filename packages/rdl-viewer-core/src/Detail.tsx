@@ -156,7 +156,6 @@ function DetailInner({ reg, mem, addrmap, path, transport }: Props) {
             <span>Access</span>
             <span>Reset / Value</span>
             <span>Description</span>
-            <span>Properties</span>
           </div>
           {(regNonNull.fields || []).map((f, i) => (
             <FieldRow
@@ -302,16 +301,27 @@ function FieldRow({
       {valueCell}
       <span className="desc"><RichText text={blurb} /></span>
       {field.customProperties && field.customProperties.length > 0 && (
-        <table className="rdl-field-properties" onClick={e => e.stopPropagation()}>
-          <tbody>
-            {field.customProperties.map(property => (
-              <tr key={property.name}>
-                <th scope="row">{property.name}</th>
-                <td>{renderCustomPropertyValue(property.value)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <details
+          className="rdl-field-properties-details"
+          onClick={e => e.stopPropagation()}
+        >
+          <summary>
+            <span className="rdl-field-properties-label">properties</span>
+            <span className="rdl-field-properties-count">
+              {field.customProperties.length}
+            </span>
+          </summary>
+          <table className="rdl-field-properties">
+            <tbody>
+              {field.customProperties.map(property => (
+                <tr key={property.name}>
+                  <th scope="row">{property.name}</th>
+                  <td>{renderCustomPropertyValue(property.value)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </details>
       )}
       {field.encode && field.encode.length > 0 && (
         <EncodeTable entries={field.encode} />

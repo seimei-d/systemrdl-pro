@@ -13,6 +13,8 @@
 // • Right-click any tree row for Copy Name / Address / Type / Reveal
 //
 // Property declarations come first so types defined later can reference them.
+// The `div` field has several explicit custom properties to demo the
+// collapsible Properties disclosure in the viewer.
 
 // ─── User-defined property ──────────────────────────────────────────────────
 //
@@ -29,6 +31,22 @@ property safety_critical {
     type = boolean;
     component = reg;
     default = false;
+};
+
+property verification_required {
+    type = boolean;
+    component = field;
+    default = false;
+};
+
+property review_owner {
+    type = string;
+    component = field;
+};
+
+property review_ticket {
+    type = string;
+    component = field;
 };
 
 // ─── Enums for `encode = …` field bindings ─────────────────────────────────
@@ -115,6 +133,9 @@ reg uart_lcr_t {
         sw = rw; hw = r;
         desc = "Manual divisor; only used when baud == BAUD_USER.";
         vendor_label = "div_lookup";
+        verification_required = true;
+        review_owner = "Connectivity IP";
+        review_ticket = "HW-1842: verify divisor update behavior";
     } div[15:8] = 0x10;
     field {
         sw = rw; hw = r;
